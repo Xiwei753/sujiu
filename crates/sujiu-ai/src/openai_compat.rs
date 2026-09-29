@@ -421,14 +421,21 @@ impl AiProvider for OpenAiCompatProvider {
         {
             pending.push_str(&String::from_utf8_lossy(&chunk));
 
+            // A whole response can arrive in a single chunk, so stopping only
+            // between chunks would let a cancelled turn keep streaming. Check
+            // after every server-sent event instead.
             while let Some(newline) = pending.find('\n') {
                 let line = pending[..newline].to_string();
                 pending.drain(..=newline);
                 accumulator.push_line(&line, sink)?;
+
+                if !sink.should_continue() {
+                    return Err(ProviderError::Cancelled);
+                }
             }
 
             if !sink.should_continue() {
-                break;
+                return Err(ProviderError::Cancelled);
             }
         }
 

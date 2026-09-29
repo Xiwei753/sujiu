@@ -13,6 +13,12 @@ pub enum ProviderError {
 
     #[error("provider response was invalid: {0}")]
     InvalidResponse(String),
+
+    /// The consumer stopped listening. This is not a failure: it is how a
+    /// cancelled turn is reported, and a provider must not be asked to
+    /// disguise it as a completed one.
+    #[error("turn cancelled")]
+    Cancelled,
 }
 
 /// Receives normalized streaming output while a provider turn is in flight.
@@ -73,6 +79,12 @@ pub trait AiProvider: Send + Sync {
             if !text.is_empty() {
                 sink.on_text_delta(text);
             }
+        }
+
+        // A non-streaming provider can still be cancelled once it answers, and
+        // it must report that the same way a streaming one does.
+        if !sink.should_continue() {
+            return Err(ProviderError::Cancelled);
         }
 
         Ok(turn)

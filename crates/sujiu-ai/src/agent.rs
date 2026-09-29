@@ -147,6 +147,9 @@ impl<'a> AgentRuntime<'a> {
         for round in 1..=self.config.max_rounds {
             let definitions = self.request_tool_definitions(&active);
 
+            // A provider reports a cancelled turn as an error rather than
+            // completing it, so a stop the user asked for never looks like a
+            // finished answer.
             let turn = self
                 .provider
                 .stream(
@@ -156,7 +159,11 @@ impl<'a> AgentRuntime<'a> {
                     },
                     sink,
                 )
-                .await?;
+                .await
+                .map_err(|error| match error {
+                    ProviderError::Cancelled => AgentError::Cancelled,
+                    other => AgentError::Provider(other),
+                })?;
 
             if turn.tool_calls.is_empty() {
                 let final_text = turn.text.unwrap_or_default();
@@ -407,6 +414,49 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| ProviderError::InvalidResponse("mock exhausted".into()))
         }
+    }
+
+    /// A provider that only knows how to complete. The default `stream` body
+    /// has to report cancellation on its own, otherwise stopping a
+    /// non-streaming provider would look like a finished turn.
+    struct CompleteOnlyProvider {
+        text: String,
+    }
+
+    #[async_trait]
+    impl AiProvider for CompleteOnlyProvider {
+        async fn complete(
+            &self,
+            _request: ProviderRequest,
+        ) -> Result<AssistantTurn, ProviderError> {
+            Ok(AssistantTurn {
+                text: Some(self.text.clone()),
+                tool_calls: Vec::new(),
+                ..AssistantTurn::default()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_non_streaming_provider_reports_cancellation() {
+        let provider = CompleteOnlyProvider {
+            text: "the console is awake".to_string(),
+        };
+        let tools = ToolRegistry::new();
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+
+        // A sink that has already been told to stop.
+        let mut sink = RecordingSink {
+            stop_after_deltas: Some(0),
+            ..RecordingSink::default()
+        };
+
+        let error = runtime
+            .run_streaming(user_message("hi"), "hello", &mut sink)
+            .await
+            .expect_err("a stopped sink must not complete the turn");
+        assert!(matches!(error, AgentError::Cancelled), "got {error:?}");
+        assert_eq!(sink.deltas.len(), 1, "the answer is still reported once");
     }
 
     /// Emits deltas for the whole turn text, then the completed turn.

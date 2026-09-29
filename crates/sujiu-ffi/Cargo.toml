@@ -14,3 +14,7 @@ tokio.workspace = true
 serde_json.workspace = true
 sujiu-ai = { path = "../sujiu-ai" }
 sujiu-core = { path = "../sujiu-core" }
+
+[dev-dependencies]
+sujiu-core = { path = "../sujiu-core" }
+tokio = { workspace = true }
