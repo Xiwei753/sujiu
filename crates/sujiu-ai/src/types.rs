@@ -162,7 +162,9 @@ impl ToolOutput {
             .iter()
             .filter_map(|content| match content {
                 ToolContent::Text { text } => Some(text.as_str()),
-                ToolContent::Resource { text: Some(text), .. } => Some(text.as_str()),
+                ToolContent::Resource {
+                    text: Some(text), ..
+                } => Some(text.as_str()),
                 _ => None,
             })
             .collect::<Vec<_>>()
