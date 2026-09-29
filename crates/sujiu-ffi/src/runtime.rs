@@ -17,13 +17,19 @@ use sujiu_ai::{
 };
 use sujiu_core::{
     Character, ChatMessage, ChatRole, ContextKind, ContextRecord, ContextSource, PromptCompiler,
-    ProviderConfig, Session,
+    ProviderConfig, ProviderKind, Session, DEFAULT_APP_SYSTEM_PROMPT,
 };
 
 use crate::events::{TurnEventKind, TurnEventReporter, TurnEventSink};
 
 /// Upper bound on the transcript a single conversation state call returns.
 const MAX_TRANSCRIPT_MESSAGES: usize = 200;
+
+/// Provider kinds this runtime can actually drive.
+///
+/// A frontend must only offer these. Accepting a kind it cannot serve would let
+/// a user configure a provider and then fail every turn.
+const SUPPORTED_PROVIDER_KINDS: &[ProviderKind] = &[ProviderKind::OpenAiCompatible];
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -101,14 +107,15 @@ pub struct ConversationSnapshot {
 /// Input for one turn. The api key is supplied per call by the platform secret
 /// store and is never persisted by the runtime.
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SendTurnRequest {
     pub session_id: String,
     pub user_text: String,
-    #[serde(default)]
-    pub app_system_prompt: Option<String>,
+    /// Provider to use for this turn, overriding the stored configuration.
     #[serde(default)]
     pub provider: Option<ProviderConfig>,
+    /// Credential for this turn. Supplied by the platform secret store per
+    /// call and never persisted by the runtime.
     #[serde(default)]
     pub api_key: Option<String>,
 }
@@ -117,6 +124,7 @@ pub struct SendTurnRequest {
 pub enum TurnError {
     SessionNotFound(String),
     NoProviderConfigured,
+    UnsupportedProviderKind(String),
     MissingCredential,
     ContextStore(ContextStoreError),
 }
@@ -127,6 +135,9 @@ impl std::fmt::Display for TurnError {
             Self::SessionNotFound(id) => write!(formatter, "session_not_found: {id}"),
             Self::NoProviderConfigured => {
                 write!(formatter, "no_provider_configured")
+            }
+            Self::UnsupportedProviderKind(kind) => {
+                write!(formatter, "unsupported_provider_kind: {kind}")
             }
             Self::MissingCredential => write!(formatter, "missing_credential"),
             Self::ContextStore(error) => write!(formatter, "{error}"),
@@ -208,8 +219,28 @@ impl SujiuRuntime {
         self.inner.lock().unwrap().provider_config.clone()
     }
 
-    pub fn set_provider_config(&self, config: Option<ProviderConfig>) {
+    /// Provider kinds a frontend may offer, in a stable order.
+    pub fn supported_provider_kinds() -> Vec<String> {
+        SUPPORTED_PROVIDER_KINDS
+            .iter()
+            .map(|kind| provider_kind_label(*kind))
+            .collect()
+    }
+
+    /// Store the provider a frontend configured.
+    ///
+    /// An unsupported kind is rejected here rather than at the first turn, so
+    /// the settings screen learns immediately that it cannot offer it.
+    pub fn set_provider_config(&self, config: Option<ProviderConfig>) -> Result<(), TurnError> {
+        if let Some(config) = config.as_ref() {
+            if !SUPPORTED_PROVIDER_KINDS.contains(&config.kind) {
+                return Err(TurnError::UnsupportedProviderKind(provider_kind_label(
+                    config.kind,
+                )));
+            }
+        }
         self.inner.lock().unwrap().provider_config = config;
+        Ok(())
     }
 
     pub fn sessions(&self) -> Vec<SessionSummary> {
@@ -464,6 +495,12 @@ impl SujiuRuntime {
             return Err(TurnError::NoProviderConfigured);
         }
 
+        if !SUPPORTED_PROVIDER_KINDS.contains(&config.kind) {
+            return Err(TurnError::UnsupportedProviderKind(provider_kind_label(
+                config.kind,
+            )));
+        }
+
         let api_key = request
             .api_key
             .clone()
@@ -484,7 +521,7 @@ impl SujiuRuntime {
             .unwrap_or_default();
 
         let plan = PromptCompiler::compile(
-            request.app_system_prompt.as_deref(),
+            Some(DEFAULT_APP_SYSTEM_PROMPT),
             &character,
             &session.messages,
             &request.user_text,

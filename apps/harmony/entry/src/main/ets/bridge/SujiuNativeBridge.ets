@@ -82,7 +82,6 @@ interface NativeProviderConfig {
 interface NativeTurnRequest {
   sessionId: string;
   userText: string;
-  appSystemPrompt: string;
   provider: NativeProviderConfig | undefined;
   apiKey: string;
 }
@@ -97,6 +96,7 @@ interface NativeTurnEvent {
 
 interface NativeRuntime {
   coreVersion(): string;
+  providerKinds(): string[];
   listSessions(): NativeSession[];
   listCharacters(query: string): NativeCharacter[];
   listModels(): NativeModel[];
@@ -370,7 +370,6 @@ export class SujiuNativeBridge implements SujiuBridge {
     const request: NativeTurnRequest = {
       sessionId: sessionId,
       userText: userText,
-      appSystemPrompt: 'You are Sujiu, a role-play client. Answer in character.',
       provider: this.draft === null ? undefined : {
         id: this.draft.id,
         name: this.draft.name,

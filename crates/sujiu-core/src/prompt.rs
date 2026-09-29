@@ -25,6 +25,13 @@ pub struct PromptSegment {
     pub priority: i32,
 }
 
+/// Instruction applied to every conversation.
+///
+/// This is model semantics, not user-visible copy, so it lives in the shared
+/// runtime instead of a platform bridge. It is English by design: it is read by
+/// the model, never rendered, so it must not follow the interface language.
+pub const DEFAULT_APP_SYSTEM_PROMPT: &str = "You are Sujiu, an AI role-play client. Stay in character, and answer in the language the user writes in.";
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct PromptPlan {
     pub segments: Vec<PromptSegment>,

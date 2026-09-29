@@ -106,7 +106,6 @@ pub struct ProviderConfigDto {
 pub struct TurnRequestDto {
     pub session_id: String,
     pub user_text: String,
-    pub app_system_prompt: Option<String>,
     pub provider: Option<ProviderConfigDto>,
     pub api_key: Option<String>,
 }
@@ -235,7 +234,6 @@ impl TurnRequestDto {
         SendTurnRequest {
             session_id: self.session_id,
             user_text: self.user_text,
-            app_system_prompt: self.app_system_prompt,
             provider: self.provider.map(|provider| provider.to_domain()),
             api_key: self.api_key,
         }
@@ -373,9 +371,22 @@ impl SujiuRuntimeBridge {
         self.runtime.create_session(Some(character_id.as_str()))
     }
 
+    /// Provider kinds the runtime can drive, so a settings screen offers only
+    /// those. A kind it cannot serve would fail every turn.
     #[napi]
-    pub fn configure_provider(&self, provider: ProviderConfigDto) {
-        self.runtime.set_provider_config(Some(provider.to_domain()));
+    pub fn provider_kinds(&self) -> Vec<String> {
+        SujiuRuntime::supported_provider_kinds()
+    }
+
+    /// Store the provider a settings screen configured.
+    ///
+    /// Throws when the kind is not supported, so the screen can tell the user
+    /// immediately instead of at the first turn.
+    #[napi]
+    pub fn configure_provider(&self, provider: ProviderConfigDto) -> Result<()> {
+        self.runtime
+            .set_provider_config(Some(provider.to_domain()))
+            .map_err(|error| napi::Error::from_reason(format!("{error}")))
     }
 
     /// Sends one turn. The callback receives normalized turn events as JSON.

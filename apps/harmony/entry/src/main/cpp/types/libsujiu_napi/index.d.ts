@@ -86,7 +86,10 @@ export interface ProviderConfig {
 export interface TurnRequest {
   sessionId: string;
   userText: string;
-  appSystemPrompt?: string;
+  /**
+   * The runtime owns the app-level prompt. The request is decoded with unknown
+   * fields rejected, so passing `appSystemPrompt` here is an error, not a no-op.
+   */
   provider?: ProviderConfig;
   apiKey?: string;
 }
@@ -97,19 +100,21 @@ export const create: () => SujiuRuntimeBridge;
 
 export class SujiuRuntimeBridge {
   coreVersion(): string;
+  /**
+   * Provider kinds the runtime can actually drive, e.g.
+   * `['openai_compatible']`. A settings screen must offer only these: a kind
+   * that is not listed is rejected by `configureProvider` and would fail every
+   * turn.
+   */
+  providerKinds(): string[];
   listSessions(): SessionSummary[];
   listCharacters(query?: string): CharacterSummary[];
   listModels(): ModelSummary[];
   listContextSources(): ContextSource[];
   conversationState(sessionId: string): ConversationSnapshot;
   createSession(characterId: string): string;
+  /** Throws when `provider.kind` is not in `providerKinds()`. */
   configureProvider(provider: ProviderConfig): void;
-  /**
-   * Runs one turn. The callback receives normalized turn events as JSON
-   * strings, one per event, on the ArkTS thread. The returned promise settles
-   * when the turn ends; a failed turn still resolves, because the failure is
-   * reported as a `turn_failed` event rather than as a rejection.
-   */
   /**
    * Runs a turn and reports every normalized event as JSON.
    *
