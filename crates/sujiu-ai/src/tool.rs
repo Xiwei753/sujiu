@@ -69,74 +69,73 @@ impl ToolRegistry {
             .filter(|term| !term.is_empty())
             .collect::<Vec<_>>();
 
-        let mut scored = self
-            .tools
-            .values()
-            .map(|tool| {
-                let definition = tool.definition();
-                let name = definition.name.to_lowercase();
-                let title = definition.title.clone().unwrap_or_default().to_lowercase();
-                let description = definition.description.to_lowercase();
-                let category = definition.discovery.category.to_lowercase();
-                let keywords = definition
-                    .discovery
-                    .keywords
-                    .iter()
-                    .map(|keyword| keyword.to_lowercase())
-                    .collect::<Vec<_>>();
-
-                let mut score = if definition.discovery.always_available {
-                    10_000
-                } else {
-                    0
-                };
-
-                if !query.is_empty() {
-                    if name.contains(&query) || query.contains(&name) {
-                        score += 80;
-                    }
-                    if !title.is_empty() && (title.contains(&query) || query.contains(&title)) {
-                        score += 50;
-                    }
-                    if description.contains(&query) {
-                        score += 20;
-                    }
-                    if !category.is_empty() && query.contains(&category) {
-                        score += 25;
-                    }
-                    if keywords
+        let mut scored =
+            self.tools
+                .values()
+                .map(|tool| {
+                    let definition = tool.definition();
+                    let name = definition.name.to_lowercase();
+                    let title = definition.title.clone().unwrap_or_default().to_lowercase();
+                    let description = definition.description.to_lowercase();
+                    let category = definition.discovery.category.to_lowercase();
+                    let keywords = definition
+                        .discovery
+                        .keywords
                         .iter()
-                        .any(|keyword| query.contains(keyword) || keyword.contains(&query))
-                    {
-                        score += 60;
-                    }
-                }
+                        .map(|keyword| keyword.to_lowercase())
+                        .collect::<Vec<_>>();
 
-                for term in &terms {
-                    if name.contains(*term) {
-                        score += 20;
-                    }
-                    if title.contains(*term) {
-                        score += 10;
-                    }
-                    if description.contains(*term) {
-                        score += 5;
-                    }
-                    if category.contains(*term) {
-                        score += 8;
-                    }
-                    if keywords
-                        .iter()
-                        .any(|keyword| keyword.contains(*term) || term.contains(keyword.as_str()))
-                    {
-                        score += 30;
-                    }
-                }
+                    let mut score = if definition.discovery.always_available {
+                        10_000
+                    } else {
+                        0
+                    };
 
-                (score, definition)
-            })
-            .filter(|(score, _)| *score > 0)
-            .collect::<Vec<_>>();
+                    if !query.is_empty() {
+                        if name.contains(&query) || query.contains(&name) {
+                            score += 80;
+                        }
+                        if !title.is_empty() && (title.contains(&query) || query.contains(&title)) {
+                            score += 50;
+                        }
+                        if description.contains(&query) {
+                            score += 20;
+                        }
+                        if !category.is_empty() && query.contains(&category) {
+                            score += 25;
+                        }
+                        if keywords
+                            .iter()
+                            .any(|keyword| query.contains(keyword) || keyword.contains(&query))
+                        {
+                            score += 60;
+                        }
+                    }
+
+                    for term in &terms {
+                        if name.contains(*term) {
+                            score += 20;
+                        }
+                        if title.contains(*term) {
+                            score += 10;
+                        }
+                        if description.contains(*term) {
+                            score += 5;
+                        }
+                        if category.contains(*term) {
+                            score += 8;
+                        }
+                        if keywords.iter().any(|keyword| {
+                            keyword.contains(*term) || term.contains(keyword.as_str())
+                        }) {
+                            score += 30;
+                        }
+                    }
+
+                    (score, definition)
+                })
+                .filter(|(score, _)| *score > 0)
+                .collect::<Vec<_>>();
 
         scored.sort_by(|(left_score, left), (right_score, right)| {
             right_score
