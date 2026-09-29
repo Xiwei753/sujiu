@@ -1,4 +1,5 @@
 import { ChatController, ChatMessageItem, isBusy, statusLabel } from '../presentation/ChatController';
+import { AppTheme } from '../ui/theme/Theme';
 import { MessageItemView } from './MessageViews';
 
 /**
@@ -10,6 +11,7 @@ import { MessageItemView } from './MessageViews';
 @Component
 export struct ConversationView {
   @ObjectLink controller: ChatController;
+  @ObjectLink theme: AppTheme;
 
   build() {
     List({ space: 12 }) {
@@ -17,7 +19,10 @@ export struct ConversationView {
         ListItem() {
           MessageItemView({
             message: message,
-            onCopy: (item: ChatMessageItem) => this.controller.copyMessage(item)
+            theme: this.theme,
+            onCopy: (item: ChatMessageItem): void => {
+              this.controller.copyMessage(item);
+            }
           });
         }
       }, (message: ChatMessageItem) => message.id);
@@ -28,7 +33,7 @@ export struct ConversationView {
             LoadingProgress().width(16).height(16);
             Text(statusLabel(this.controller.generationState))
               .fontSize(12)
-              .fontColor('#8A8A99');
+              .fontColor(this.theme.textSecondary);
           }
           .width('100%')
           .alignItems(VerticalAlign.Center);
@@ -39,17 +44,18 @@ export struct ConversationView {
         ListItem() {
           Text(this.controller.errorMessage)
             .fontSize(13)
-            .fontColor('#B3261E')
+            .fontColor(this.theme.danger)
             .width('100%')
             .padding(12)
             .borderRadius(12)
-            .backgroundColor('#22B3261E');
+            .backgroundColor(this.theme.dangerSurface);
         }
       }
     }
     .width('100%')
     .layoutWeight(1)
     .padding({ left: 16, right: 16, top: 12, bottom: 12 })
-    .scrollBar(BarState.Auto);
+    .scrollBar(BarState.Auto)
+    .backgroundColor(this.theme.pageBackground);
   }
 }

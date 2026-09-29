@@ -60,6 +60,9 @@ export enum TurnEventKind {
   Started = 'started',
   TextDelta = 'text_delta',
   ThinkingDelta = 'thinking_delta',
+  /** The model asked for a tool; the runtime has not started it yet. */
+  ToolCallRequested = 'tool_call_requested',
+  /** The runtime is running the tool now. */
   ToolCallStarted = 'tool_call_started',
   ToolCallFinished = 'tool_call_finished',
   Completed = 'turn_completed',
@@ -86,6 +89,8 @@ export interface SujiuBridge {
   listModels(): Promise<ModelSummary[]>;
   listContextSources(): Promise<ContextSourceSummary[]>;
   conversationState(sessionId: string): Promise<ConversationSnapshot>;
+  /** Creates an empty session so a brand new chat can send its first message. */
+  createSession(characterId: string, modelId: string, title: string): Promise<SessionSummary>;
   sendTurn(sessionId: string, userText: string, onEvent: TurnEventListener): void;
   cancelTurn(sessionId: string): void;
   runtimeSummary(): string;

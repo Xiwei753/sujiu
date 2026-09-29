@@ -1,12 +1,31 @@
 {
   app: {
-    // Signing material is machine local and secret: never commit it.
-    // Run `devecocli signature generate --product default` once per machine to
-    // populate this locally. See apps/harmony/README.md.
-    signingConfigs: [],
+    // The repo keeps the default signing config and the product's reference to
+    // it, so the product always resolves a signing config. The material
+    // placeholders are empty on purpose: `devecocli signature generate
+    // --product default` fills the real storeFile/certpath/profile paths, key
+    // alias and encrypted passwords into this same entry, in place, and those
+    // filled values are machine local and secret. Never commit them. See
+    // apps/harmony/README.md.
+    signingConfigs: [
+      {
+        name: 'default',
+        type: 'HarmonyOS',
+        material: {
+          certpath: '',
+          keyAlias: '',
+          keyPassword: '',
+          profile: '',
+          signAlg: 'SHA256withECDSA',
+          storeFile: '',
+          storePassword: '',
+        },
+      },
+    ],
     products: [
       {
         name: 'default',
+        signingConfig: 'default',
         bundleName: 'com.xiwei.sujiu',
         compileSdkVersion: '26.0.0',
         compatibleSdkVersion: '26.0.0',

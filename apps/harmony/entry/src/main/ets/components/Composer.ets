@@ -1,4 +1,5 @@
 import { ChatController } from '../presentation/ChatController';
+import { AppTheme } from '../ui/theme/Theme';
 
 /**
  * `+ input Send` composer. The leading affordance is a capability menu, not a
@@ -7,6 +8,7 @@ import { ChatController } from '../presentation/ChatController';
 @Component
 export struct Composer {
   @ObjectLink controller: ChatController;
+  @ObjectLink theme: AppTheme;
 
   build() {
     Row({ space: 8 }) {
@@ -14,8 +16,8 @@ export struct Composer {
         .width(40)
         .height(40)
         .borderRadius(20)
-        .backgroundColor('#22FFFFFF')
-        .fontColor('#E8E8F0')
+        .backgroundColor(this.theme.surfaceMuted)
+        .fontColor(this.theme.textPrimary)
         .enabled(false)
         .accessibilityText('Add attachment');
 
@@ -23,7 +25,9 @@ export struct Composer {
         .layoutWeight(1)
         .maxLines(6)
         .borderRadius(18)
-        .backgroundColor('#1AFFFFFF')
+        .backgroundColor(this.theme.surface)
+        .fontColor(this.theme.textPrimary)
+        .placeholderColor(this.theme.textSecondary)
         .onChange((value: string) => {
           this.controller.setDraft(value);
         });
@@ -33,22 +37,23 @@ export struct Composer {
           .width(40)
           .height(40)
           .borderRadius(20)
-          .backgroundColor('#22B3261E')
-          .fontColor('#B3261E')
+          .backgroundColor(this.theme.dangerSurface)
+          .fontColor(this.theme.danger)
           .onClick(() => this.controller.stop());
       } else {
         Button('↑')
           .width(40)
           .height(40)
           .borderRadius(20)
-          .backgroundColor('#3D5AFE')
-          .fontColor('#FFFFFF')
+          .backgroundColor(this.theme.accent)
+          .fontColor(this.theme.textOnAccent)
           .enabled(this.controller.canSend)
           .onClick(() => this.controller.send());
       }
     }
     .width('100%')
     .alignItems(VerticalAlign.Bottom)
-    .padding({ left: 12, right: 12, top: 8, bottom: 8 });
+    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+    .backgroundColor(this.theme.pageBackground);
   }
 }

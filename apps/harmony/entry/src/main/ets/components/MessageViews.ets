@@ -1,4 +1,5 @@
 import { ChatMessageItem, ToolCallItem } from '../presentation/ChatController';
+import { AppTheme } from '../ui/theme/Theme';
 
 /**
  * Disclosure block for tool activity and thinking.
@@ -10,24 +11,25 @@ import { ChatMessageItem, ToolCallItem } from '../presentation/ChatController';
 export struct CollapsibleSection {
   @Prop title: string = '';
   @Prop body: string = '';
+  @ObjectLink theme: AppTheme;
   @State expanded: boolean = false;
 
   build() {
     Column() {
       Row({ space: 6 }) {
-        Text(this.expanded ? '▾' : '▸').fontSize(14).fontColor('#888888');
-        Text(this.title).fontSize(13).fontColor('#888888');
+        Text(this.expanded ? '▾' : '▸').fontSize(14).fontColor(this.theme.textSecondary);
+        Text(this.title).fontSize(13).fontColor(this.theme.textSecondary);
       }
       .width('100%')
       .alignItems(VerticalAlign.Center)
       .onClick(() => {
         this.expanded = !this.expanded;
-      })
+      });
 
       if (this.expanded) {
         Text(this.body)
           .fontSize(13)
-          .fontColor('#888888')
+          .fontColor(this.theme.textSecondary)
           .width('100%')
           .margin({ top: 6 });
       }
@@ -36,20 +38,25 @@ export struct CollapsibleSection {
     .width('100%')
     .padding(10)
     .borderRadius(10)
-    .backgroundColor('#22FFFFFF');
+    .backgroundColor(this.theme.surfaceMuted);
   }
 }
 
 @Component
 export struct MessageItemView {
   @ObjectLink message: ChatMessageItem;
+  @ObjectLink theme: AppTheme;
   onCopy: (message: ChatMessageItem) => void = () => {
   };
 
   build() {
     Column({ space: 6 }) {
       if (this.message.thinking.length > 0) {
-        CollapsibleSection({ title: 'Thinking', body: this.message.thinking });
+        CollapsibleSection({
+          title: 'Thinking',
+          body: this.message.thinking,
+          theme: this.theme
+        });
       }
       if (this.message.hasToolCalls) {
         CollapsibleSection({
@@ -58,24 +65,25 @@ export struct MessageItemView {
             .map((call: ToolCallItem) => {
               return `${call.toolName}: ${call.statusLabel}${call.summary.length > 0 ? ' — ' + call.summary : ''}`;
             })
-            .join('\n')
+            .join('\n'),
+          theme: this.theme
         });
       }
       if (this.message.text.trim().length > 0) {
         Text(this.message.text)
           .fontSize(16)
           .width('100%')
-          .fontColor(this.message.isUser ? '#FFFFFF' : '#E8E8F0');
+          .fontColor(this.theme.textPrimary);
       }
       Text('Copy')
         .fontSize(11)
-        .fontColor('#8A8A99')
+        .fontColor(this.theme.textSecondary)
         .onClick(() => this.onCopy(this.message));
     }
     .alignItems(HorizontalAlign.Start)
     .width('100%')
     .padding(this.message.isUser ? 12 : 0)
     .borderRadius(14)
-    .backgroundColor(this.message.isUser ? '#3D5AFE' : '#00000000');
+    .backgroundColor(this.message.isUser ? this.theme.userBubble : '#00000000');
   }
 }

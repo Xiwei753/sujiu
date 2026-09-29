@@ -24,7 +24,10 @@ export class HarmonyClipboardService implements ClipboardService {
   copyText(label: string, text: string): void {
     const board = pasteboard.getSystemPasteboard();
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, text);
-    board.setData(data);
+    board.setData(data).catch(() => {
+      // Clipboard writes can be denied while the app is backgrounded; the chat
+      // surface keeps working, so this is not surfaced as a turn failure.
+    });
   }
 }
 

@@ -103,27 +103,34 @@ export class InMemorySujiuBridge implements SujiuBridge {
     }
   ];
 
-  private readonly messages: MessageSummary[] = [
-    {
-      id: 'm-1',
-      role: MessageRole.User,
-      text: 'You said the frequency was dead. Why is the light on the console blinking?'
-    },
-    {
-      id: 'm-2',
-      role: MessageRole.Assistant,
-      text: 'Because the console and I are arguing about who owns the night shift. ' +
-        'The blinking is a caller who has not decided to speak yet.',
-      toolName: 'search_context',
-      toolStatusLabel: 'Searched 3 records'
-    },
-    {
-      id: 'm-3',
-      role: MessageRole.User,
-      text: 'And if they decide to speak while I am on the line?'
-    }
-  ];
+  private readonly seededMessages: Map<string, MessageSummary[]> = new Map<string, MessageSummary[]>([
+    [
+      'session-1',
+      [
+        {
+          id: 'm-1',
+          role: MessageRole.User,
+          text: 'You said the frequency was dead. Why is the light on the console blinking?'
+        },
+        {
+          id: 'm-2',
+          role: MessageRole.Assistant,
+          text: 'Because the console and I are arguing about who owns the night shift. ' +
+            'The blinking is a caller who has not decided to speak yet.',
+          toolName: 'search_context',
+          toolStatusLabel: 'Searched 3 records'
+        },
+        {
+          id: 'm-3',
+          role: MessageRole.User,
+          text: 'And if they decide to speak while I am on the line?'
+        }
+      ]
+    ]
+  ]);
 
+  private createdSessionCounter: number = 0;
+  private currentModelId: string = '';
   private cancelledSessionId: string = '';
 
   listSessions(): Promise<SessionSummary[]> {
@@ -153,16 +160,49 @@ export class InMemorySujiuBridge implements SujiuBridge {
 
   conversationState(sessionId: string): Promise<ConversationSnapshot> {
     const found: SessionSummary | undefined = this.sessions.find((item: SessionSummary) => item.id === sessionId);
+    const session: SessionSummary = found ?? this.sessions[0];
+    const messages: MessageSummary[] = this.seededMessages.get(session.id) ?? [];
     const snapshot: ConversationSnapshot = {
-      session: found ?? this.sessions[0],
-      messages: this.messages,
+      session: session,
+      messages: messages,
       contextSources: this.contextSources
     };
     return Promise.resolve(snapshot);
   }
 
+  createSession(characterId: string, modelId: string, title: string): Promise<SessionSummary> {
+    this.createdSessionCounter += 1;
+    const character: CharacterSummary | undefined = this.characters
+      .find((item: CharacterSummary) => item.id === characterId);
+    const model: ModelSummary | undefined = this.models.find((item: ModelSummary) => item.id === modelId);
+    const created: SessionSummary = {
+      id: `session-new-${this.createdSessionCounter}`,
+      title: title.length > 0 ? title : 'New chat',
+      characterId: characterId.length > 0 ? characterId : (character?.id ?? ''),
+      characterName: character?.name ?? '',
+      preview: '',
+      updatedAt: Date.now()
+    };
+    this.sessions.unshift(created);
+    this.seededMessages.set(created.id, []);
+    const snapshotSummary: SessionSummary = created;
+    if (model) {
+      // The model choice is part of the new session, not a page-level default.
+      this.currentModelId = model.id;
+    }
+    return Promise.resolve(snapshotSummary);
+  }
+
   sendTurn(sessionId: string, userText: string, onEvent: TurnEventListener): void {
     this.cancelledSessionId = '';
+    const stored: MessageSummary[] = this.seededMessages.get(sessionId) ?? [];
+    const appended: MessageSummary = {
+      id: `m-${sessionId}-${stored.length + 1}`,
+      role: MessageRole.User,
+      text: userText
+    };
+    stored.push(appended);
+    this.seededMessages.set(sessionId, stored);
     onEvent({ kind: TurnEventKind.Started });
     this.emitScript(sessionId, this.scriptFor(userText), onEvent);
   }
@@ -209,20 +249,23 @@ export class InMemorySujiuBridge implements SujiuBridge {
         { kind: TurnEventKind.Failed, message: 'Request failed: provider returned 429' }
       ];
     }
-    return [
-      { kind: TurnEventKind.ThinkingDelta, text: 'Recall the broadcast record, then answer in character.' },
-      { kind: TurnEventKind.TextDelta, text: 'The console blinks because the night is not over yet. ' },
-      { kind: TurnEventKind.TextDelta, text: 'You asked earlier whether I would let a caller in. ' },
-      { kind: TurnEventKind.ToolCallStarted, callId: 'call-1', toolName: 'search_context' },
-      {
-        kind: TurnEventKind.ToolCallFinished,
-        callId: 'call-1',
-        toolName: 'search_context',
-        summary: '3 records · 1 world lore, 1 story event, 1 memory',
-        isError: false
-      },
-      { kind: TurnEventKind.TextDelta, text: 'I checked the night log, the lorebook and what I still owe you. ' },
-      { kind: TurnEventKind.TextDelta, text: 'The answer is no, and I am going to let you stay anyway.' }
-    ];
+    const steps: ScriptStep[] = [];
+    if (this.currentModelId === 'model-reasoning') {
+      steps.push({ kind: TurnEventKind.ThinkingDelta, text: 'Recall the broadcast record, then answer in character.' });
+    }
+    steps.push({ kind: TurnEventKind.TextDelta, text: 'The console blinks because the night is not over yet. ' });
+    steps.push({ kind: TurnEventKind.TextDelta, text: 'You asked earlier whether I would let a caller in. ' });
+    steps.push({ kind: TurnEventKind.ToolCallRequested, callId: 'call-1', toolName: 'search_context' });
+    steps.push({ kind: TurnEventKind.ToolCallStarted, callId: 'call-1', toolName: 'search_context' });
+    steps.push({
+      kind: TurnEventKind.ToolCallFinished,
+      callId: 'call-1',
+      toolName: 'search_context',
+      summary: '3 records · 1 world lore, 1 story event, 1 memory',
+      isError: false
+    });
+    steps.push({ kind: TurnEventKind.TextDelta, text: 'I checked the night log, the lorebook and what I still owe you. ' });
+    steps.push({ kind: TurnEventKind.TextDelta, text: 'The answer is no, and I am going to let you stay anyway.' });
+    return steps;
   }
 }

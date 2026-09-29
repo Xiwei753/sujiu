@@ -1,10 +1,12 @@
 import { CharacterSummary, ContextSourceSummary, ModelSummary } from '../bridge/SujiuBridge';
 import { ChatController } from '../presentation/ChatController';
+import { AppTheme } from '../ui/theme/Theme';
 
 /** Lightweight model picker: recents first, no separate management page. */
 @Component
 export struct ModelSelectorSheet {
   @ObjectLink controller: ChatController;
+  @ObjectLink theme: AppTheme;
   onPick: (modelId: string) => void = () => {
   };
 
@@ -13,16 +15,17 @@ export struct ModelSelectorSheet {
       Text('Model')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
+        .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, top: 16, bottom: 8 });
 
       ForEach(this.controller.models, (model: ModelSummary) => {
         Row() {
           Column({ space: 2 }) {
-            Text(model.name).fontSize(16).width('100%');
+            Text(model.name).fontSize(16).fontColor(this.theme.textPrimary).width('100%');
             Text(`${model.providerLabel} · ${model.contextLabel}`)
               .fontSize(11)
-              .fontColor('#8A8A99')
+              .fontColor(this.theme.textSecondary)
               .width('100%');
           }
           .alignItems(HorizontalAlign.Start)
@@ -31,7 +34,7 @@ export struct ModelSelectorSheet {
           if (this.controller.currentModel?.id === model.id) {
             Text('In use')
               .fontSize(11)
-              .fontColor('#3D5AFE');
+              .fontColor(this.theme.accent);
           }
         }
         .width('100%')
@@ -48,6 +51,7 @@ export struct ModelSelectorSheet {
 @Component
 export struct CharacterSelectorSheet {
   @ObjectLink controller: ChatController;
+  @ObjectLink theme: AppTheme;
   onPick: (characterId: string) => void = () => {
   };
   onOpenLibrary: () => void = () => {
@@ -59,6 +63,8 @@ export struct CharacterSelectorSheet {
         placeholder: 'Search characters',
         text: this.controller.characterQuery
       })
+        .fontColor(this.theme.textPrimary)
+        .placeholderColor(this.theme.textSecondary)
         .margin({ left: 24, right: 24, top: 16, bottom: 8 })
         .onChange((value: string) => this.controller.searchCharacters(value));
 
@@ -66,17 +72,18 @@ export struct CharacterSelectorSheet {
         Column({ space: 2 }) {
           Text(character.name)
             .fontSize(this.controller.currentCharacter?.id === character.id ? 15 : 16)
+            .fontColor(this.theme.textPrimary)
             .width('100%');
           Text(character.tagline)
             .fontSize(12)
-            .fontColor('#8A8A99')
+            .fontColor(this.theme.textSecondary)
             .maxLines(2)
             .textOverflow({ overflow: TextOverflow.Ellipsis })
             .width('100%');
           if (character.tags.length > 0) {
             Text(character.tags.join(' · '))
               .fontSize(11)
-              .fontColor('#8A8A99')
+              .fontColor(this.theme.textSecondary)
               .width('100%');
           }
         }
@@ -90,7 +97,7 @@ export struct CharacterSelectorSheet {
         .width('100%')
         .margin({ top: 8, bottom: 16 })
         .backgroundColor('#00000000')
-        .fontColor('#3D5AFE')
+        .fontColor(this.theme.accent)
         .onClick(() => this.onOpenLibrary());
     }
     .alignItems(HorizontalAlign.Start)
@@ -107,29 +114,31 @@ export struct CharacterSelectorSheet {
 @Component
 export struct ContextSheet {
   @ObjectLink controller: ChatController;
+  @ObjectLink theme: AppTheme;
 
   build() {
     Column({ space: 4 }) {
       Text('Context')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
+        .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, top: 16, bottom: 8 });
 
       if (this.controller.contextSources.length === 0) {
         Text('No context sources in this session yet.')
           .fontSize(12)
-          .fontColor('#8A8A99')
+          .fontColor(this.theme.textSecondary)
           .width('100%')
           .padding({ left: 24, right: 24, bottom: 12 });
       }
 
       ForEach(this.controller.contextSources, (source: ContextSourceSummary) => {
         Column({ space: 2 }) {
-          Text(source.name).fontSize(16).width('100%');
+          Text(source.name).fontSize(16).fontColor(this.theme.textPrimary).width('100%');
           Text(`${source.kindLabel} · ${source.recordCount} records`)
             .fontSize(11)
-            .fontColor('#8A8A99')
+            .fontColor(this.theme.textSecondary)
             .width('100%');
         }
         .alignItems(HorizontalAlign.Start)

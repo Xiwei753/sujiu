@@ -276,8 +276,10 @@ emits coarse application events:
 | Normalized event | Presentation effect |
 | --- | --- |
 | `turn_started` | `Submitting` |
+| `thinking_delta` | `Streaming`, append to the collapsed thinking block |
 | `text_delta` | `Streaming`, append to the streaming assistant message |
-| `tool_call_started` | `WaitingForTool` → `ExecutingTool`, insert collapsed tool row |
+| `tool_call_requested` | `WaitingForTool`, insert a collapsed tool row in the queued state |
+| `tool_call_started` | `ExecutingTool`, mark the tool row as running |
 | `tool_call_finished` | fill the tool row result, `ContinuingAfterTool` |
 | `turn_completed` | `Completed` |
 | `turn_failed` | `Failed` with a user-safe message |
@@ -310,7 +312,7 @@ Required operations:
 list_sessions()                 list_characters(query)
 list_models()                   list_context_sources(session_id)
 conversation_state(session_id)  send_turn(session_id, input) -> TurnEvent stream
-cancel_turn(session_id)
+cancel_turn(session_id)         create_session(character_id, model_id, title)
 ```
 
 Rules:
@@ -318,7 +320,10 @@ Rules:
 - add fields compatibly; do not churn the model-visible schema;
 - expose coarse application events (§3), not provider events;
 - keep presentation-only concerns out of the boundary;
-- do not require each frontend to parse provider-specific tool-call JSON.
+- do not require each frontend to parse provider-specific tool-call JSON;
+- "new chat" is a runtime session, not an empty page state: the session must
+  exist before the first message is sent, so the UI never has to invent a
+  placeholder session id.
 
 ---
 

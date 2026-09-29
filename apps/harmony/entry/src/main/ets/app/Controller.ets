@@ -9,20 +9,24 @@ import {
   PlatformServices
 } from '../platform/PlatformServices';
 import { ChatController } from '../presentation/ChatController';
-import { Navigator } from '../presentation/Navigator';
+import { AppTheme } from '../ui/theme/Theme';
 
 /**
  * Composition root.
  *
  * The only place that knows concrete implementations. Swapping the preview
  * bridge for the `sujiu-ffi` bridge is a one-line change here.
+ *
+ * Navigation is *not* here: pages are owned by ArkUI `Navigation` in the view
+ * layer, and the runtime does not know a navigation stack exists.
  */
 @Observed
 export class AppGraph {
   readonly bridge: SujiuBridge;
   readonly platform: PlatformServices;
   readonly controller: ChatController;
-  readonly navigator: Navigator;
+  /** UI-layer tokens, kept in sync with the resolved appearance mode. */
+  readonly theme: AppTheme = new AppTheme(false);
   private context: common.Context | null = null;
 
   constructor() {
@@ -33,7 +37,7 @@ export class AppGraph {
       new HarmonyPlatformInfoService()
     );
     this.controller = new ChatController(this.bridge, this.platform);
-    this.navigator = new Navigator();
+    this.controller.onAppearanceChanged = () => this.syncTheme();
   }
 
   /** Bound once the UI is alive; the host context is only reachable there. */
@@ -42,6 +46,7 @@ export class AppGraph {
   }
 
   start(): void {
+    this.syncTheme();
     this.controller.refresh();
   }
 
@@ -54,5 +59,10 @@ export class AppGraph {
       default:
         return this.context !== null && this.platform.appearance.systemPrefersDark(this.context);
     }
+  }
+
+  /** Re-reads the platform appearance and re-points the theme tokens. */
+  syncTheme(): void {
+    this.theme.apply(this.isDarkMode());
   }
 }

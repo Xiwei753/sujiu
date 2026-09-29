@@ -126,6 +126,13 @@ export class ChatController {
   errorMessage: string = '';
   appearanceMode: AppearanceMode = AppearanceMode.System;
 
+  /**
+   * Raised when the appearance mode changes. Presentation does not decide what
+   * that means for colors; the UI layer listens and re-themes itself.
+   */
+  onAppearanceChanged: () => void = () => {
+  };
+
   private assistantOpen: boolean = false;
   private messageCounter: number = 0;
 
@@ -183,11 +190,35 @@ export class ChatController {
     this.loadConversation(sessionId);
   }
 
+  /**
+   * Starts a new chat by creating a real (empty) session first, so the very
+   * first message has somewhere to go. Never leaves the page without a
+   * sendable session id.
+   */
   newSession(): void {
-    this.currentSessionId = '';
-    this.messages = [];
-    this.generationState = GenerationState.Idle;
-    this.errorMessage = '';
+    if (this.busy) {
+      return;
+    }
+    this.generationState = GenerationState.Submitting;
+    const characterId: string = this.currentCharacter?.id ?? '';
+    const modelId: string = this.currentModel?.id ?? '';
+    this.bridge.createSession(characterId, modelId, 'New chat').then((session: SessionSummary) => {
+      this.currentSessionId = session.id;
+      this.messages = [];
+      this.generationState = GenerationState.Idle;
+      this.errorMessage = '';
+      this.assistantOpen = false;
+      this.refreshSessions();
+    }).catch(() => {
+      this.generationState = GenerationState.Failed;
+      this.errorMessage = 'Could not start a new chat';
+    });
+  }
+
+  private refreshSessions(): void {
+    this.bridge.listSessions().then((sessions: SessionSummary[]) => {
+      this.sessionGroups = this.groupSessions(sessions);
+    });
   }
 
   setDraft(text: string): void {
@@ -233,7 +264,11 @@ export class ChatController {
   }
 
   setAppearance(mode: AppearanceMode): void {
+    if (this.appearanceMode === mode) {
+      return;
+    }
     this.appearanceMode = mode;
+    this.onAppearanceChanged();
   }
 
   copyMessage(message: ChatMessageItem): void {
@@ -280,17 +315,33 @@ export class ChatController {
         break;
       case TurnEventKind.ThinkingDelta:
         this.ensureAssistant();
+        if (this.generationState !== GenerationState.Submitting) {
+          this.generationState = GenerationState.Streaming;
+        }
         this.appendToAssistant((message: ChatMessageItem) => {
           message.thinking += event.text ?? '';
+        });
+        break;
+      case TurnEventKind.ToolCallRequested:
+        // The model asked for a tool; the runtime has not run it yet.
+        this.ensureAssistant();
+        this.generationState = GenerationState.WaitingForTool;
+        this.appendToAssistant((message: ChatMessageItem) => {
+          message.toolCalls = message.toolCalls.concat([
+            new ToolCallItem(event.callId ?? 'call', event.toolName ?? 'tool', 'queued')
+          ]);
         });
         break;
       case TurnEventKind.ToolCallStarted:
         this.ensureAssistant();
         this.generationState = GenerationState.ExecutingTool;
         this.appendToAssistant((message: ChatMessageItem) => {
-          message.toolCalls = message.toolCalls.concat([
-            new ToolCallItem(event.callId ?? 'call', event.toolName ?? 'tool', 'running')
-          ]);
+          message.toolCalls = message.toolCalls.map((call: ToolCallItem) => {
+            if (call.id !== (event.callId ?? 'call')) {
+              return call;
+            }
+            return new ToolCallItem(call.id, call.toolName, 'running');
+          });
         });
         break;
       case TurnEventKind.ToolCallFinished:
