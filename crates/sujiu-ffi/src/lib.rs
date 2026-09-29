@@ -17,9 +17,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sujiu_core::{
-    Character, ChatMessage, PromptCompiler, PromptPlan, ProviderConfig, ProviderKind,
-};
+use sujiu_core::{Character, ChatMessage, PromptCompiler, PromptPlan, ProviderConfig};
 
 pub use sujiu_core::CORE_VERSION;
 
@@ -730,7 +728,7 @@ mod tests {
         ProviderConfig {
             id: "provider-default".into(),
             name: "Local".into(),
-            kind: ProviderKind::OpenAiCompatible,
+            kind: sujiu_core::ProviderKind::OpenAiCompatible,
             base_url: "https://example.invalid/v1".into(),
             model: "test-model".into(),
             credential_ref: None,

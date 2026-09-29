@@ -37,11 +37,14 @@ impl Recorder {
             .collect()
     }
 
-    fn text(&self) -> String {
+    /// Only the answer. Reasoning deltas carry text too, and folding them in
+    /// makes the answer look like the model repeated itself.
+    fn answer(&self) -> String {
         self.events
             .lock()
             .expect("recorder poisoned")
             .iter()
+            .filter(|event| event.kind == TurnEventKind::TextDelta)
             .filter_map(|event| event.text.clone())
             .collect()
     }
@@ -53,9 +56,12 @@ impl TurnEventReporter for Recorder {
     }
 }
 
-#[tokio::test]
+// Not #[tokio::test]: the runtime owns a tokio runtime, and dropping one inside
+// an async context panics. The C ABI blocks on the same runtime, so this does
+// too.
+#[test]
 #[ignore = "needs SUJIU_TEST_BASE_URL, SUJIU_TEST_API_KEY and SUJIU_TEST_MODEL"]
-async fn a_real_turn_streams_back_from_a_live_provider() {
+fn a_real_turn_streams_back_from_a_live_provider() {
     let base_url = std::env::var("SUJIU_TEST_BASE_URL").expect("SUJIU_TEST_BASE_URL");
     let api_key = std::env::var("SUJIU_TEST_API_KEY").expect("SUJIU_TEST_API_KEY");
     let model = std::env::var("SUJIU_TEST_MODEL").expect("SUJIU_TEST_MODEL");
@@ -85,21 +91,19 @@ async fn a_real_turn_streams_back_from_a_live_provider() {
 
     let recorder = Recorder::default();
     let mut sink = recorder.clone();
-    runtime
-        .send_turn(
-            SendTurnRequest {
-                session_id: "session-1".to_string(),
-                user_text: "In one short sentence: what are you listening for?".to_string(),
-                provider: None,
-                api_key: Some(api_key),
-            },
-            &mut sink,
-        )
-        .await;
+    runtime.tokio.block_on(runtime.send_turn(
+        SendTurnRequest {
+            session_id: "session-1".to_string(),
+            user_text: "In one short sentence: what are you listening for?".to_string(),
+            provider: None,
+            api_key: Some(api_key),
+        },
+        &mut sink,
+    ));
 
     let kinds = recorder.kinds();
     println!("kinds: {kinds:?}");
-    let answer = recorder.text();
+    let answer = recorder.answer();
     println!("answer: {answer}");
 
     assert_eq!(kinds.first(), Some(&TurnEventKind::TurnStarted));

@@ -17,4 +17,3 @@ sujiu-core = { path = "../sujiu-core" }
 
 [dev-dependencies]
 sujiu-core = { path = "../sujiu-core" }
-tokio = { workspace = true }
