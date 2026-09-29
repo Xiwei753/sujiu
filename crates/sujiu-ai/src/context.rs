@@ -194,7 +194,7 @@ impl ContextStore for InMemoryContextStore {
 
         let terms = query
             .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
-            .filter(|term| !term.is_empty())
+            .filter(|term| is_significant_term(term))
             .collect::<Vec<_>>();
 
         let mut scored = self
@@ -659,6 +659,11 @@ fn context_kind_names() -> Vec<&'static str> {
 
 fn default_search_limit() -> usize {
     5
+}
+
+fn is_significant_term(term: &str) -> bool {
+    let char_count = term.chars().count();
+    char_count >= 3 || (char_count >= 2 && term.chars().any(|ch| !ch.is_ascii()))
 }
 
 fn make_snippet(content: &str, max_chars: usize) -> String {
