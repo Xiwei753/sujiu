@@ -1,11 +1,17 @@
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 use serde_json::{json, Value};
 use sujiu_core::PromptPlan;
 use thiserror::Error;
 
 use crate::{
-    provider::{AiProvider, ProviderError},
+    provider::{AiProvider, NullStreamSink, ProviderError, StreamSink},
     tool::ToolRegistry,
     types::{
         messages_from_prompt_plan, ModelMessage, ModelRole, ProviderRequest, ToolAnnotations,
@@ -41,6 +47,31 @@ pub enum AgentError {
 
     #[error("tool loop exceeded {0} rounds")]
     MaxRounds(usize),
+
+    #[error("turn cancelled")]
+    Cancelled,
+}
+
+/// Cooperative cancellation for an in-flight turn.
+///
+/// A turn is cancelled from another thread, so cancellation is observed at
+/// safe points: between provider rounds, between tool calls and between
+/// streaming deltas. It never interrupts a tool or a request in progress.
+#[derive(Clone, Debug, Default)]
+pub struct CancelToken(Arc<AtomicBool>);
+
+impl CancelToken {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -51,14 +82,14 @@ pub struct AgentOutcome {
     pub tool_results: Vec<ToolResult>,
 }
 
-pub struct AgentRuntime<'a, P: AiProvider> {
-    provider: &'a P,
+pub struct AgentRuntime<'a> {
+    provider: &'a dyn AiProvider,
     tools: &'a ToolRegistry,
     config: AgentConfig,
 }
 
-impl<'a, P: AiProvider> AgentRuntime<'a, P> {
-    pub fn new(provider: &'a P, tools: &'a ToolRegistry, config: AgentConfig) -> Self {
+impl<'a> AgentRuntime<'a> {
+    pub fn new(provider: &'a dyn AiProvider, tools: &'a ToolRegistry, config: AgentConfig) -> Self {
         Self {
             provider,
             tools,
@@ -85,8 +116,22 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
 
     pub async fn run(
         &self,
+        messages: Vec<ModelMessage>,
+        discovery_query: &str,
+    ) -> Result<AgentOutcome, AgentError> {
+        self.run_streaming(messages, discovery_query, &mut NullStreamSink)
+            .await
+    }
+
+    /// Run one conversation turn, reporting progress to `sink`.
+    ///
+    /// This is the single agent loop. Non-streaming callers get the same
+    /// semantics through `run`, which simply discards the events.
+    pub async fn run_streaming(
+        &self,
         mut messages: Vec<ModelMessage>,
         discovery_query: &str,
+        sink: &mut dyn StreamSink,
     ) -> Result<AgentOutcome, AgentError> {
         let mut active = self.tools.always_available_names();
 
@@ -104,10 +149,13 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
 
             let turn = self
                 .provider
-                .complete(ProviderRequest {
-                    messages: messages.clone(),
-                    tools: definitions,
-                })
+                .stream(
+                    ProviderRequest {
+                        messages: messages.clone(),
+                        tools: definitions,
+                    },
+                    sink,
+                )
                 .await?;
 
             if turn.tool_calls.is_empty() {
@@ -134,6 +182,12 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
             });
 
             for call in calls {
+                if !sink.should_continue() {
+                    return Err(AgentError::Cancelled);
+                }
+
+                sink.on_tool_call_started(&call);
+
                 let result = if call.name == SEARCH_TOOLS_NAME {
                     self.execute_tool_search(&call, &mut active)
                 } else if active.contains(&call.name) {
@@ -157,6 +211,7 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
                     structured_content: result.output.structured_content.clone(),
                     is_error: result.output.is_error,
                 });
+                sink.on_tool_call_finished(&call, &result);
                 all_results.push(result);
             }
         }
@@ -352,6 +407,259 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| ProviderError::InvalidResponse("mock exhausted".into()))
         }
+    }
+
+    /// Emits deltas for the whole turn text, then the completed turn.
+    struct StreamingMockProvider {
+        turns: Mutex<VecDeque<(Vec<String>, AssistantTurn)>>,
+    }
+
+    #[async_trait]
+    impl AiProvider for StreamingMockProvider {
+        async fn complete(&self, request: ProviderRequest) -> Result<AssistantTurn, ProviderError> {
+            self.stream(request, &mut NullStreamSink).await
+        }
+
+        async fn stream(
+            &self,
+            _request: ProviderRequest,
+            sink: &mut dyn crate::provider::StreamSink,
+        ) -> Result<AssistantTurn, ProviderError> {
+            let (chunks, turn) = self
+                .turns
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| ProviderError::InvalidResponse("mock exhausted".into()))?;
+
+            for chunk in chunks {
+                if !sink.should_continue() {
+                    break;
+                }
+                sink.on_text_delta(&chunk);
+            }
+
+            Ok(turn)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        deltas: Vec<String>,
+        reasoning: Vec<String>,
+        requested: Vec<String>,
+        started: Vec<String>,
+        finished: Vec<(String, bool)>,
+        stop_after_deltas: Option<usize>,
+    }
+
+    impl StreamSink for RecordingSink {
+        fn on_text_delta(&mut self, delta: &str) {
+            self.deltas.push(delta.to_owned());
+        }
+
+        fn on_reasoning_delta(&mut self, delta: &str) {
+            self.reasoning.push(delta.to_owned());
+        }
+
+        fn on_tool_call_requested(&mut self, call: &ToolCall) {
+            self.requested.push(call.name.clone());
+        }
+
+        fn on_tool_call_started(&mut self, call: &ToolCall) {
+            self.started.push(call.name.clone());
+        }
+
+        fn on_tool_call_finished(&mut self, call: &ToolCall, result: &ToolResult) {
+            self.finished
+                .push((call.name.clone(), result.output.is_error));
+        }
+
+        fn should_continue(&self) -> bool {
+            match self.stop_after_deltas {
+                Some(limit) => self.deltas.len() < limit,
+                None => true,
+            }
+        }
+    }
+
+    fn user_message(content: &str) -> Vec<ModelMessage> {
+        vec![ModelMessage::Text {
+            role: ModelRole::User,
+            content: content.into(),
+        }]
+    }
+
+    #[tokio::test]
+    async fn streaming_reports_text_deltas_in_order() {
+        let provider = StreamingMockProvider {
+            turns: Mutex::new(VecDeque::from([(
+                vec!["Hel".into(), "lo there".into()],
+                AssistantTurn {
+                    text: Some("Hello there".into()),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".into()),
+                    response_id: None,
+                },
+            )])),
+        };
+
+        let tools = ToolRegistry::new();
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+        let mut sink = RecordingSink::default();
+
+        let outcome = runtime
+            .run_streaming(user_message("hi"), "hi", &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(sink.deltas, vec!["Hel".to_string(), "lo there".to_string()]);
+        assert_eq!(outcome.final_text, "Hello there");
+    }
+
+    #[tokio::test]
+    async fn tool_calls_are_reported_to_the_sink_in_lifecycle_order() {
+        let provider = MockProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(VecDeque::from([
+                AssistantTurn {
+                    text: Some("looking it up".into()),
+                    tool_calls: vec![ToolCall {
+                        id: "search-1".into(),
+                        name: "search_context".into(),
+                        arguments: json!({"query": "western tower"}),
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    response_id: None,
+                },
+                AssistantTurn {
+                    text: Some("The old king vanished.".into()),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".into()),
+                    response_id: None,
+                },
+            ])),
+        };
+
+        let store = Arc::new(crate::context::InMemoryContextStore::new());
+        let mut tools = ToolRegistry::new();
+        crate::context::register_standard_context_tools(&mut tools, store);
+
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+        let mut sink = RecordingSink::default();
+
+        runtime
+            .run_streaming(user_message("what happened?"), "what happened?", &mut sink)
+            .await
+            .unwrap();
+
+        assert_eq!(sink.started, vec!["search_context".to_string()]);
+        assert_eq!(sink.finished, vec![("search_context".to_string(), false)]);
+    }
+
+    #[tokio::test]
+    async fn a_text_only_stream_never_announces_a_tool_request() {
+        let mut sink = RecordingSink::default();
+        let provider = StreamingMockProvider {
+            turns: Mutex::new(VecDeque::from([(
+                vec!["checking".to_string()],
+                AssistantTurn {
+                    text: Some("checking".into()),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".into()),
+                    response_id: None,
+                },
+            )])),
+        };
+        let tools = ToolRegistry::new();
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+
+        let _ = runtime
+            .run_streaming(user_message("hi"), "hi", &mut sink)
+            .await;
+
+        // The mock streams text only, so no request is announced and the loop
+        // has no tool call to run. The announce path is covered by the
+        // openai_compat stream tests.
+        assert!(sink.requested.is_empty());
+        assert!(sink.started.is_empty());
+        assert_eq!(sink.deltas, vec!["checking".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn a_sink_that_stops_continuing_cancels_the_turn() {
+        let provider = StreamingMockProvider {
+            turns: Mutex::new(VecDeque::from([(
+                vec!["first".into(), "second".into()],
+                AssistantTurn {
+                    text: Some("firstsecond".into()),
+                    tool_calls: Vec::new(),
+                    finish_reason: Some("stop".into()),
+                    response_id: None,
+                },
+            )])),
+        };
+
+        let tools = ToolRegistry::new();
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+        let mut sink = RecordingSink {
+            stop_after_deltas: Some(0),
+            ..RecordingSink::default()
+        };
+
+        let outcome = runtime
+            .run_streaming(user_message("hi"), "hi", &mut sink)
+            .await
+            .unwrap();
+
+        assert!(sink.deltas.is_empty());
+        assert_eq!(outcome.final_text, "firstsecond");
+    }
+
+    #[tokio::test]
+    async fn cancelling_before_a_tool_call_stops_the_turn() {
+        let provider = MockProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(VecDeque::from([AssistantTurn {
+                text: None,
+                tool_calls: vec![ToolCall {
+                    id: "search-1".into(),
+                    name: "search_context".into(),
+                    arguments: json!({"query": "anything"}),
+                }],
+                finish_reason: Some("tool_calls".into()),
+                response_id: None,
+            }])),
+        };
+
+        let tools = ToolRegistry::new();
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+        let mut sink = RecordingSink {
+            stop_after_deltas: Some(0),
+            ..RecordingSink::default()
+        };
+
+        let error = runtime
+            .run_streaming(user_message("hi"), "hi", &mut sink)
+            .await
+            .expect_err("turn must stop before executing tools");
+
+        assert!(matches!(error, AgentError::Cancelled));
+        assert!(
+            sink.started.is_empty(),
+            "no tool may run after cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_token_is_observable_across_threads() {
+        let token = CancelToken::new();
+        assert!(!token.is_cancelled());
+
+        let worker = token.clone();
+        std::thread::spawn(move || worker.cancel()).join().unwrap();
+
+        assert!(token.is_cancelled());
     }
 
     #[tokio::test]

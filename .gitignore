@@ -1,8 +1,10 @@
-/target/
 .idea/
 .vscode/
 *.iml
 .DS_Store
+
+# Rust
+/target/
 
 # Android / Gradle
 .gradle/
@@ -23,3 +25,6 @@ apps/harmony/**/build/
 apps/harmony/oh_modules/
 apps/harmony/oh-package-lock.json5
 apps/harmony/local.properties
+
+# Rust
+/target/

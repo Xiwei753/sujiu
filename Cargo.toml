@@ -4,6 +4,7 @@ members = [
     "crates/sujiu-codec",
     "crates/sujiu-ai",
     "crates/sujiu-ffi",
+  "crates/sujiu-napi",
 ]
 resolver = "2"
 

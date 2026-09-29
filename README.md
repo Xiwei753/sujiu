@@ -23,6 +23,7 @@ crates/
   sujiu-ai/      Provider adapters, conversation loop and tool runtime
   sujiu-codec/   SillyTavern / external format compatibility
   sujiu-ffi/     Stable cross-language boundary
+  sujiu-napi/    NAPI module so ArkTS can call the boundary directly
 docs/
   ARCHITECTURE.md
   TOOLS.md
@@ -62,7 +63,7 @@ apps/harmony/   pages/ + components/ + {bridge,presentation,platform}
 ```
 
 See [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md) for the interaction spec,
-the layer rules, the turn state machine and the `sujiu-ffi` gap analysis.
+the layer rules, the turn state machine and the FFI surface.
 
 ## Core checks
 
@@ -71,9 +72,17 @@ cargo fmt --all -- --check
 cargo test --workspace
 ```
 
-All three frontends currently drive a preview application bridge because
-`sujiu-ffi` does not yet expose the conversation surface; each frontend needs
-one wiring change in its composition root when it does.
+The HarmonyOS frontend drives the real runtime today: `sujiu-napi` wraps
+`sujiu-ffi` as a NAPI module, and `SujiuNativeBridge` implements the shared
+bridge contract on top of it. Rebuild the native library after Rust changes:
+
+```bash
+export DEVECO_CLI_CLT_PATH="$HOME/.harmony-cli"
+scripts/build-harmony-runtime.sh
+```
+
+Android and Desktop still drive a preview bridge behind the same contract, so
+switching them over is a change in their composition root only.
 
 ## License
 

@@ -15,7 +15,7 @@ Sujiu follows two hard rules:
 
 Frontends own navigation, input methods, rendering, animations, window state and platform secure-storage integration. They do not rebuild the AI/tool loop independently.
 
-Each frontend is internally split into four layers — view, presentation, application bridge and platform services — so that page layout and OS capabilities stay independent. The interaction spec, the layer rules, the turn state machine and the `sujiu-ffi` gap analysis live in [UI_ARCHITECTURE.md](UI_ARCHITECTURE.md).
+Each frontend is internally split into four layers — view, presentation, application bridge and platform services — so that page layout and OS capabilities stay independent. The interaction spec, the layer rules, the turn state machine and the FFI surface live in [UI_ARCHITECTURE.md](UI_ARCHITECTURE.md).
 
 ### 2. sujiu-core
 
@@ -49,7 +49,11 @@ The runtime accepts zero, one or multiple tool calls from a model turn, executes
 
 ### 4. sujiu-ffi
 
-A deliberately small boundary around Rust. The boundary will expose the conversation runtime to Qt/Kotlin/ArkTS without making any platform reimplement provider or tool semantics.
+A deliberately small boundary around Rust. It exposes the conversation runtime to Qt/Kotlin/ArkTS without making any platform reimplement provider or tool semantics: runtime state lives in Rust, and every call returns either domain data or normalized turn events.
+
+`sujiu-napi` re-exports that same surface as a NAPI module. ArkTS imports it directly, so the HarmonyOS bridge calls the runtime without any C glue in ArkTS. The layer rules are unchanged by either crate: neither one carries UI state, navigation or platform concerns.
+
+See [UI_ARCHITECTURE.md §5](UI_ARCHITECTURE.md) for the exported surface, the event names that cross the boundary, and what is still missing.
 
 ### 5. Compatibility codecs
 

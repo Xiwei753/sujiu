@@ -18,7 +18,7 @@ collapsed by default, and settings follow the platform settings pattern. See
 pages/        ArkUI pages; pages/Index hosts the chat shell and ArkUI Navigation
 components/   reusable views: conversation, composer, history drawer, selector sheets
 presentation/ ChatController: page state, turn state, no I/O and no routing
-bridge/       SujiuBridge contract + preview implementation (-> sujiu-ffi)
+bridge/       SujiuBridge contract + the sujiu-ffi backed implementation
 platform/     clipboard, system appearance, platform info capabilities
 app/          composition root; the only place that picks implementations
 ui/theme/     AppTheme: the UI-layer color tokens
@@ -36,9 +36,17 @@ History is an ArkUI `SideBarContainer`: an overlay drawer on narrow windows and
 a pinned column on expanded ones, decided by one width breakpoint rather than by
 two different screens.
 
-`SujiuBridge` currently has a preview implementation (`InMemorySujiuBridge`)
-because `sujiu-ffi` does not expose the conversation surface yet; switching to
-the real bridge is a one-line change in `app/Controller.ets`.
+`SujiuBridge` is implemented by `SujiuNativeBridge`, which loads the sujiu
+native module and returns whatever the shared Rust runtime returns. Sessions,
+characters, models, context sources, conversation state and the whole turn
+lifecycle come from Rust; the bridge only normalizes Rust turn events into the
+shared event contract so the UI never sees a provider shape.
+
+Provider credentials are not part of this slice. `SujiuNativeBridge` takes the
+api key through `setApiKey` from whoever supplies it (a platform credential
+service) and never persists it. Until such a service exists, a turn without a
+key ends in a structured `missing_credential` failure that the UI shows as a
+normal error, not a crash.
 
 ## Toolchain
 
@@ -53,6 +61,28 @@ devecocli --version
 
 `DEVECO_CLI_CLT_PATH` must point at a Command Line Tools installation;
 otherwise `devecocli` reports that DevEco Studio is unavailable on Linux.
+
+## Building the native runtime
+
+The bridge talks to Rust through a NAPI module, so the runtime is cross
+compiled for `aarch64-unknown-linux-ohos` and staged into the entry module:
+
+```bash
+export DEVECO_CLI_CLT_PATH="$HOME/.harmony-cli"
+scripts/build-harmony-runtime.sh              # release, stripped
+scripts/build-harmony-runtime.sh --debug      # keeps symbols
+```
+
+The script needs the HarmonyOS Command Line Tools, which provide the OHOS NDK
+clang that `ring` needs (not just the linker), plus the Rust target:
+
+```bash
+rustup target add aarch64-unknown-linux-ohos
+```
+
+ArkTS imports the library by name, so a staged copy has to exist before the
+entry module compiles. The staged `entry/libs/arm64-v8a/libsujiu_napi.so` is
+therefore committed; rerun the script whenever the Rust side changes.
 
 ## Lint, build, run
 
@@ -73,18 +103,18 @@ codelinter directly:
 "$DEVECO_CLI_CLT_PATH/bin/codelinter" -c code-linter.json5 entry/src/main/ets
 ```
 
-The debug build produces
-`entry/build/default/outputs/default/entry-default-signed.hap`.
+The debug build produces a HAP in
+`entry/build/default/outputs/default/`. It is `entry-default-signed.hap` when a
+local signature exists, and `entry-default-unsigned.hap` otherwise.
 
 ## Debug signing
 
-`build-profile.json5` is committed with the `default` signing config and the
-product's `signingConfig` reference in place, but with **empty material
-placeholders**. The structure is committed; the key path, key alias, passwords
-and profile path are machine local and never reach Git.
+`build-profile.json5` is committed with **no** `signingConfigs` and no product
+`signingConfig` reference. A signing config whose material is present but empty
+is not a usable default: the HAP signing task fails with `Invalid storeFile
+value` instead of falling back to an unsigned HAP.
 
-Because the product always resolves a signing config, `devecocli build` needs
-generated material. On a fresh clone, generate the local debug signature first:
+To get a signed HAP, generate the local debug signature once per machine:
 
 ```bash
 cd apps/harmony
@@ -92,10 +122,10 @@ devecocli signature generate --product default
 devecocli build --modules entry --build-mode debug
 ```
 
-`devecocli signature generate` fills the existing `default` entry in place: it
-writes `.p12` / `.csr` / `.cer` / `.p7b` material under `~/.ohos/config/` and
-replaces the empty placeholders with real paths, alias and encrypted passwords.
-Those local edits stay uncommitted; restore the empty placeholders before
-committing `build-profile.json5`.
+`devecocli signature generate` writes `.p12` / `.csr` / `.cer` / `.p7b` material
+under `~/.ohos/config/` and adds the signing config plus the product reference to
+`build-profile.json5`. The key paths, key alias and encrypted passwords are
+machine local and secret, so those local edits never reach Git: restore the file
+before committing it.
 
 Add `--force` only to rebuild an already-existing Sujiu signature.

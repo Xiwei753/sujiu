@@ -344,39 +344,76 @@ Rules:
 
 ---
 
-## 5. Current FFI gap analysis
+## 5. FFI surface
 
-`sujiu-ffi` currently exports:
+`sujiu-ffi` owns the runtime state and exposes a coarse C ABI. `sujiu-napi`
+re-exports the same surface as a NAPI module so a platform can call it without
+C glue. The frontend never sees this layer; it only sees §4.
 
 ```text
 sujiu_core_version()
 sujiu_compile_prompt_json(input_json)
 sujiu_string_free(value)
+
+sujiu_runtime_new() / sujiu_runtime_free(runtime)
+sujiu_configure_provider_json(runtime, config_json)
+sujiu_list_sessions_json(runtime)
+sujiu_list_characters_json(runtime, query)
+sujiu_list_models_json(runtime)
+sujiu_list_context_sources_json(runtime)
+sujiu_conversation_state_json(runtime, session_id)
+sujiu_create_session_json(runtime, character_id)
+sujiu_send_turn_json(runtime, request_json)
+sujiu_send_turn_streaming(runtime, request_json, callback, user_data)
+sujiu_cancel_turn(runtime)
 ```
 
-That is enough for prompt compilation only. The following are **missing**, and
-block the chat shell from using real runtime behaviour:
+Every `*_json` entry point returns the same envelope, `{"ok":…,"data":…,"error":…}`,
+and a null pointer becomes an error envelope rather than a crash, so a frontend
+can trust the shape without knowing what failed.
 
-| Need | Status in `sujiu-ffi` | Consequence |
+### 5.1 Turn events cross the boundary already normalized
+
+`send_turn_streaming` reports application events, not provider events:
+
+```text
+turn_started
+text_delta
+thinking_delta
+tool_call_requested     the model asked for a tool
+tool_call_started       the runtime is running it
+tool_call_finished      the result is back
+turn_completed / turn_failed / turn_cancelled
+```
+
+`tool_call_requested` is what lets a frontend show *WaitingForTool* while the
+model is still streaming, instead of jumping straight to *ExecutingTool*. On
+the Rust side it exists because `StreamSink` can observe a tool call in the
+SSE stream before the turn finishes.
+
+The agent loop reports through `StreamSink` and takes a `CancelToken`; a
+provider that cannot stream still works, because `AiProvider::stream` has a
+default body that calls `complete` and emits the result as one delta.
+
+### 5.2 What is still missing
+
+| Need | Status | Consequence |
 | --- | --- | --- |
-| session/character/model listing | missing | selectors and history cannot be filled from Rust |
-| conversation turn entry point | missing | `sendTurn` has no runtime to call |
-| streaming events | missing | `Streaming` / `WaitingForTool` cannot be driven by real data |
-| tool call records | missing | the context/tool inspector has no source |
-| context source/record listing | missing | the context sheet has no source |
-| cancellation | missing | `Cancelled` cannot be produced |
-| credential storage | intentionally **not** in Rust | owned by `CredentialService` |
+| credential storage | intentionally **not** in Rust | owned by `CredentialService`; until it exists a turn without a key ends in a structured `missing_credential` failure |
+| persistence | in-memory catalog | sessions and messages do not survive a restart |
+| imported character cards | codec only | the character library has no import yet |
+| long-term memory writes | not started | see AGENTS.md §11 |
 
-`AgentRuntime::run` is also currently **non-streaming**: it awaits one provider
-turn, executes tools, and returns a final `AgentOutcome`. A streaming event
-source is required before any frontend can render incremental text or a live
-tool row.
+### 5.3 Per-platform status
 
-Until those land, each frontend ships a single bridge implementation that is
-sourced from local preview data (`InMemorySujiuBridge` and equivalents) behind
-the same interface, so that presentation code and tests are already written
-against the contract in §4. Replacing it with the FFI-backed implementation must
-not change any UI or presentation file.
+HarmonyOS talks to the real runtime today: `SujiuNativeBridge` imports the NAPI
+module and implements §4 on top of it, and the preview bridge is gone. The
+native library is cross compiled and staged by
+`scripts/build-harmony-runtime.sh`.
+
+Android and Desktop still ship preview bridges behind the same interface, so
+their presentation code is already written against §4. Replacing them with the
+FFI-backed implementation must not change any UI or presentation file.
 
 ---
 
@@ -389,7 +426,7 @@ match §2.
 apps/android/app/src/main/java/io/sujiu/app/
   ui/            Compose screens, components, theme
   presentation/  view state, intents, view models
-  bridge/        sujiu-ffi boundary + preview implementation
+  bridge/        sujiu-ffi boundary (preview implementation for now)
   platform/      capability services (clipboard/appearance/platform info today)
   MainActivity   composition root (AppGraph)
 
@@ -397,7 +434,7 @@ apps/harmony/entry/src/main/ets/
   pages/         navigation destinations
   components/    reusable ArkUI components
   presentation/  observable view state + controllers
-  bridge/        sujiu-ffi boundary + preview implementation
+  bridge/        sujiu-ffi boundary; SujiuNativeBridge talks to the real runtime
   platform/      capability services (clipboard/appearance/platform info today)
   app/           composition root (AppGraph)
 

@@ -10,5 +10,7 @@ crate-type = ["rlib", "cdylib", "staticlib"]
 
 [dependencies]
 serde.workspace = true
+tokio.workspace = true
 serde_json.workspace = true
+sujiu-ai = { path = "../sujiu-ai" }
 sujiu-core = { path = "../sujiu-core" }

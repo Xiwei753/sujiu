@@ -1,5 +1,5 @@
 import { common } from '@kit.AbilityKit';
-import { InMemorySujiuBridge } from '../bridge/InMemorySujiuBridge';
+import { SujiuNativeBridge } from '../bridge/SujiuNativeBridge';
 import { SujiuBridge } from '../bridge/SujiuBridge';
 import {
   AppearanceMode,
@@ -14,8 +14,8 @@ import { AppTheme } from '../ui/theme/Theme';
 /**
  * Composition root.
  *
- * The only place that knows concrete implementations. Swapping the preview
- * bridge for the `sujiu-ffi` bridge is a one-line change here.
+ * The only place that knows concrete implementations. The bridge is the real
+ * one: it talks to the shared Rust runtime through sujiu-ffi.
  *
  * Navigation is *not* here: pages are owned by ArkUI `Navigation` in the view
  * layer, and the runtime does not know a navigation stack exists.
@@ -30,7 +30,7 @@ export class AppGraph {
   private context: common.Context | null = null;
 
   constructor() {
-    this.bridge = new InMemorySujiuBridge();
+    this.bridge = new SujiuNativeBridge();
     this.platform = new PlatformServices(
       new HarmonyClipboardService(),
       new HarmonySystemAppearanceService(),
