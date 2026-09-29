@@ -5,6 +5,10 @@
       "value": "Sujiu"
     },
     {
+      "name": "permission_internet",
+      "value": "Sujiu sends your messages to the model provider you configured."
+    },
+    {
       "name": "module_desc",
       "value": "Sujiu, a chat-first AI role-play client"
     },

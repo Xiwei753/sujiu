@@ -10,6 +10,7 @@ import {
   TurnEvent,
   TurnEventKind
 } from '../bridge/SujiuBridge';
+import { hilog } from '@kit.PerformanceAnalysisKit';
 import { AppearanceMode, CredentialService, PlatformServices } from '../platform/PlatformServices';
 
 /** Where the api key is filed in the platform credential store. */
@@ -192,6 +193,8 @@ export class ChatController {
       this.providerDraft = draft;
       this.models = await this.bridge.listModels();
     } catch (error) {
+      // The UI shows a localized code, so the runtime detail is logged here.
+      hilog.error(0x0000, 'Sujiu', 'saveProvider failed: %{public}s', (error as Error).message);
       this.fail('provider_not_saved', (error as Error).message);
     } finally {
       this.savingProvider = false;
@@ -276,6 +279,7 @@ export class ChatController {
   }
 
   private fail(code: string, detail: string = ''): void {
+    hilog.error(0x0000, 'Sujiu', 'failure %{public}s: %{public}s', code, detail);
     this.errorCode = code;
     this.errorDetail = detail;
   }

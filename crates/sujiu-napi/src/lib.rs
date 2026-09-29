@@ -8,6 +8,8 @@
 #![deny(clippy::all)]
 
 mod bridge;
+#[cfg(target_env = "ohos")]
+mod ohos_registration;
 
 pub use bridge::{
     CharacterSummaryDto, ContextSourceDto, ConversationSnapshotDto, MessageDto, ModelSummaryDto,

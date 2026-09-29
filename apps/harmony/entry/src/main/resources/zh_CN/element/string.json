@@ -5,6 +5,10 @@
       "value": "Sujiu"
     },
     {
+      "name": "permission_internet",
+      "value": "Sujiu 需要联网把你发送的消息发给你配置的服务商。"
+    },
+    {
       "name": "module_desc",
       "value": "Sujiu，以聊天为先的 AI 角色扮演客户端"
     },
