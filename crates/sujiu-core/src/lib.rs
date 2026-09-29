@@ -1,10 +1,12 @@
 pub mod character;
+pub mod context;
 pub mod prompt;
 pub mod provider;
 pub mod session;
 pub mod worldbook;
 
 pub use character::Character;
+pub use context::{ContextKind, ContextRecord, ContextScope, ContextSource};
 pub use prompt::{PromptCompiler, PromptPlan, PromptSegment, PromptSource};
 pub use provider::{ProviderConfig, ProviderKind};
 pub use session::{ChatMessage, ChatRole, Session};
