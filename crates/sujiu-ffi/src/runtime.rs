@@ -6,25 +6,29 @@
 //! normalized turn events from `events`, never provider wire formats or tool
 //! internals.
 
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sujiu_ai::{
-    register_standard_context_tools, AgentConfig, AgentError, AgentOutcome, AgentRuntime,
+    register_standard_context_tools, AgentConfig, AgentOutcome, AgentRuntime, AgentStop,
     CancelToken, ContextStore, ContextStoreError, InMemoryContextStore, OpenAiCompatConfig,
-    OpenAiCompatProvider, ToolRegistry,
+    OpenAiCompatProvider, ProviderContinuation, ToolRegistry,
 };
 use sujiu_core::{
     Character, ChatMessage, ChatRole, ContextKind, ContextRecord, ContextSource, PromptCompiler,
-    ProviderConfig, ProviderKind, Session, DEFAULT_APP_SYSTEM_PROMPT,
+    ProviderConfig, ProviderKind, Session, Transcript, Turn, DEFAULT_APP_SYSTEM_PROMPT,
 };
 
 use crate::events::{TurnEventKind, TurnEventReporter, TurnEventSink};
 use crate::storage::{AppStorage, FileStorage, MemoryStorage};
 
-/// Upper bound on the transcript a single conversation state call returns.
+/// Upper bound on the conversation state a single call returns.
+///
+/// This bounds what crosses the FFI boundary, not what the session stores. A
+/// transcript is never trimmed to satisfy it: dropping old turns here would
+/// change the request prefix and invalidate a provider prompt cache, and the
+/// full transcript is still sent to the model.
 const MAX_TRANSCRIPT_MESSAGES: usize = 200;
 
 /// Provider kinds this runtime can actually drive.
@@ -93,6 +97,10 @@ pub struct ToolCallSummary {
     pub id: String,
     pub name: String,
     pub title: String,
+    /// `completed`, `failed`, `interrupted` or `cancelled`.
+    ///
+    /// A call that never produced a result still appears here, because dropping
+    /// it would hide a step the model was actually shown.
     pub status: String,
     pub is_error: bool,
     pub result_text: String,
@@ -160,8 +168,6 @@ impl std::fmt::Display for TurnError {
 struct Catalog {
     characters: Vec<Character>,
     sessions: Vec<Session>,
-    /// Tool calls of the most recent turn, keyed by the assistant message id.
-    tool_calls: Vec<(String, Vec<ToolCallSummary>)>,
 }
 
 struct Inner {
@@ -194,8 +200,110 @@ struct Snapshot {
     sessions: Vec<Session>,
     sources: Vec<ContextSource>,
     records: Vec<ContextRecord>,
-    tool_calls: Vec<(String, Vec<ToolCallSummary>)>,
     provider_config: Option<ProviderConfig>,
+}
+
+/// A session as version 1 stored it: a flat list of text messages.
+///
+/// Reading one of these is a migration, not a normal load. The old shape had
+/// no place to record a tool call, so a migration can restore the turn/step
+/// structure but never the steps that were already lost.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacySession {
+    id: String,
+    #[serde(default)]
+    character_id: Option<String>,
+    #[serde(default)]
+    messages: Vec<ChatMessage>,
+    #[serde(default)]
+    metadata: serde_json::Map<String, Value>,
+}
+
+impl LegacySession {
+    fn into_session(self) -> Session {
+        let mut transcript = Transcript::default();
+
+        for message in self.messages {
+            let at_ms = message.metadata.get("atMs").and_then(Value::as_i64);
+
+            match message.role {
+                // A user message opens a turn. Reusing the message id as the
+                // turn id keeps the ids a platform already stored recognizable.
+                ChatRole::User => transcript.push(Turn {
+                    id: message.id,
+                    user: message.content,
+                    steps: Vec::new(),
+                    state: sujiu_core::TurnState::Completed,
+                    created_at_ms: at_ms,
+                }),
+                ChatRole::Assistant => {
+                    let step = sujiu_core::AssistantStep::text_only(message.content);
+                    match transcript.turns.last_mut() {
+                        Some(turn) => {
+                            turn.steps.push(step);
+                            turn.created_at_ms = turn.created_at_ms.or(at_ms);
+                        }
+                        // An assistant message with no turn before it is kept,
+                        // so a migration never silently drops history.
+                        None => {
+                            let mut turn = Turn::new(message.id, String::new());
+                            turn.created_at_ms = at_ms;
+                            turn.steps.push(step);
+                            transcript.push(turn);
+                        }
+                    }
+                }
+                ChatRole::System | ChatRole::Developer => {}
+            }
+        }
+
+        Session {
+            id: self.id,
+            character_id: self.character_id,
+            transcript,
+            metadata: self.metadata,
+        }
+    }
+}
+
+/// Version 1 of the document, read only to migrate it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacySnapshot {
+    #[serde(default)]
+    characters: Vec<Character>,
+    #[serde(default)]
+    sessions: Vec<LegacySession>,
+    #[serde(default)]
+    sources: Vec<ContextSource>,
+    #[serde(default)]
+    records: Vec<ContextRecord>,
+    #[serde(default)]
+    provider_config: Option<ProviderConfig>,
+}
+
+/// Read a persisted document, migrating an older shape when necessary.
+fn parse_snapshot(document: &str) -> Option<Snapshot> {
+    let value: Value = serde_json::from_str(document).ok()?;
+
+    if value.get("version").and_then(Value::as_u64).unwrap_or(1) < SNAPSHOT_VERSION as u64 {
+        let legacy: LegacySnapshot = serde_json::from_value(value).ok()?;
+        return Some(Snapshot {
+            version: SNAPSHOT_VERSION,
+            characters: legacy.characters,
+            sessions: legacy
+                .sessions
+                .into_iter()
+                .map(LegacySession::into_session)
+                .collect(),
+            sources: legacy.sources,
+            records: legacy.records,
+            provider_config: legacy.provider_config,
+        });
+    }
+
+    serde_json::from_value(value).ok()
 }
 
 /// A new session id that cannot collide with one already in the catalog.
@@ -212,7 +320,7 @@ fn next_session_id(sessions: &[Session]) -> String {
 
 /// Document name the runtime keeps its state in.
 const SNAPSHOT_FILE: &str = "sujiu-runtime.json";
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 
 /// The stateful runtime exported across the FFI boundary.
 pub struct SujiuRuntime {
@@ -241,7 +349,7 @@ impl SujiuRuntime {
         let snapshot = if restore {
             storage
                 .load(SNAPSHOT_FILE)
-                .and_then(|document| serde_json::from_str::<Snapshot>(&document).ok())
+                .and_then(|document| parse_snapshot(&document))
         } else {
             None
         };
@@ -275,12 +383,10 @@ impl SujiuRuntime {
             Some(snapshot) => Catalog {
                 characters: snapshot.characters.clone(),
                 sessions: snapshot.sessions.clone(),
-                tool_calls: snapshot.tool_calls.clone(),
             },
             None => Catalog {
                 characters: seed.characters,
                 sessions: seed.sessions,
-                tool_calls: Vec::new(),
             },
         };
 
@@ -314,12 +420,11 @@ impl SujiuRuntime {
     pub fn use_directory(&self, path: &str) -> Result<(), String> {
         let storage = FileStorage::new(path).map_err(|error| error.to_string())?;
         if let Some(document) = storage.load(SNAPSHOT_FILE) {
-            if let Ok(snapshot) = serde_json::from_str::<Snapshot>(&document) {
+            if let Some(snapshot) = parse_snapshot(&document) {
                 let mut inner = self.inner.lock().unwrap();
                 inner.catalog = Catalog {
                     characters: snapshot.characters,
                     sessions: snapshot.sessions,
-                    tool_calls: snapshot.tool_calls,
                 };
                 inner.provider_config = snapshot.provider_config;
                 inner.store.clear();
@@ -352,7 +457,6 @@ impl SujiuRuntime {
                 sessions: inner.catalog.sessions.clone(),
                 sources,
                 records,
-                tool_calls: inner.catalog.tool_calls.clone(),
                 provider_config: inner.provider_config.clone(),
             }
         };
@@ -407,15 +511,20 @@ impl SujiuRuntime {
                         .find(|character| &character.id == id)
                 });
 
+                // The folded conversation, because this is a list. The
+                // transcript behind it keeps every step.
+                let messages = session.ui_messages();
+
                 SessionSummary {
                     // A projection of the last message, not a display string. The
                     // bound exists so a session list does not carry whole
                     // messages across the boundary; how a platform renders or
                     // further clips it is that platform's business.
-                    preview: session
-                        .messages
-                        .last()
-                        .map(|message| projected_preview(&message.content))
+                    preview: messages
+                        .iter()
+                        .rev()
+                        .find(|message| !message.text.trim().is_empty())
+                        .map(|message| projected_preview(&message.text))
                         .unwrap_or_default(),
                     character_name: character
                         .map(|character| character.name.clone())
@@ -438,7 +547,7 @@ impl SujiuRuntime {
                         .get("updatedAtMs")
                         .and_then(Value::as_i64)
                         .unwrap_or(0),
-                    message_count: session.messages.len(),
+                    message_count: messages.len(),
                 }
             })
             .collect()
@@ -532,26 +641,33 @@ impl SujiuRuntime {
                 description: character.description.clone(),
             });
 
+        // The UI projection: one user message and one assistant message per
+        // turn, with the turn's tool calls folded into the assistant message.
+        // This is a view of the transcript, not a replacement for it.
         let messages = session
-            .messages
-            .iter()
+            .ui_messages()
+            .into_iter()
             .rev()
             .take(MAX_TRANSCRIPT_MESSAGES)
             .collect::<Vec<_>>()
             .into_iter()
             .rev()
             .map(|message| MessageSummary {
-                id: message.id.clone(),
+                id: message.id,
                 role: message.role,
-                text: message.content.clone(),
-                tool_calls: inner
-                    .catalog
+                text: message.text,
+                tool_calls: message
                     .tool_calls
-                    .iter()
-                    .find(|(id, _)| id == &message.id)
-                    .map(|(_, calls)| calls)
-                    .cloned()
-                    .unwrap_or_default(),
+                    .into_iter()
+                    .map(|call| ToolCallSummary {
+                        id: call.id,
+                        name: call.name,
+                        title: call.title,
+                        status: tool_call_status(call.state).to_string(),
+                        is_error: call.is_error,
+                        result_text: call.result_text,
+                    })
+                    .collect(),
             })
             .collect();
 
@@ -573,7 +689,7 @@ impl SujiuRuntime {
                 Session {
                     id: id.clone(),
                     character_id: character_id.map(str::to_owned),
-                    messages: Vec::new(),
+                    transcript: Transcript::default(),
                     metadata: serde_json::Map::new(),
                 },
             );
@@ -583,6 +699,40 @@ impl SujiuRuntime {
 
         self.persist();
         id
+    }
+
+    /// Replace the oldest turns of a session with a summary, keeping the last
+    /// `keep_recent` turns verbatim.
+    ///
+    /// The summary text is supplied by the caller because producing it needs a
+    /// model turn of its own. The runtime's job is to guarantee that compaction
+    /// cannot break the tool protocol: it cuts on a turn boundary, keeps the
+    /// compacted turns retrievable, and reports whether anything changed.
+    pub fn compact_session(
+        &self,
+        session_id: &str,
+        keep_recent: usize,
+        summary: &str,
+    ) -> Result<bool, TurnError> {
+        let compacted = {
+            let mut inner = self.inner.lock().unwrap();
+            let session = inner
+                .catalog
+                .sessions
+                .iter_mut()
+                .find(|session| session.id == session_id)
+                .ok_or_else(|| TurnError::SessionNotFound("unknown session".to_string()))?;
+
+            session
+                .transcript
+                .compact(keep_recent, |_| summary.to_owned())
+        };
+
+        if compacted {
+            self.persist();
+        }
+
+        Ok(compacted)
     }
 
     /// Run one agent turn, reporting normalized events to `reporter`.
@@ -595,8 +745,7 @@ impl SujiuRuntime {
 
         match self.run_turn(&request, &mut sink).await {
             Ok(()) => {}
-            Err(TurnFailure::Cancelled) => sink.turn_cancelled(),
-            Err(TurnFailure::Error(error)) => sink.turn_failed(&error.to_string()),
+            Err(TurnFailure(error)) => sink.turn_failed(&error),
         }
 
         *self.cancel.lock().unwrap() = None;
@@ -607,31 +756,55 @@ impl SujiuRuntime {
         request: &SendTurnRequest,
         sink: &mut TurnEventSink<'_>,
     ) -> Result<(), TurnFailure> {
-        let (messages, provider) = self
+        let (messages, continuation, provider) = self
             .prepare(request)
-            .map_err(|error| TurnFailure::Error(error.to_string()))?;
+            .map_err(|error| TurnFailure(error.to_string()))?;
         let tools = self.inner.lock().unwrap().tools.clone();
 
         let runtime = AgentRuntime::new(provider.as_ref(), tools.as_ref(), AgentConfig::default());
+        // A turn that stops early is still a turn. Everything the model already
+        // produced is committed, so the next request continues from the same
+        // transcript instead of replaying a conversation the model has half
+        // forgotten.
         let outcome = runtime
-            .run_streaming(messages, &request.user_text, sink)
+            .run_streaming(messages, continuation, &request.user_text, sink)
             .await
-            .map_err(|error| match error {
-                AgentError::Cancelled => TurnFailure::Cancelled,
-                other => TurnFailure::Error(other.to_string()),
-            })?;
+            .map_err(|error| TurnFailure(error.to_string()))?;
 
         self.persist_turn(request, &outcome);
-        sink.turn_completed(&outcome.final_text);
 
-        Ok(())
+        match outcome.stop {
+            AgentStop::Completed => {
+                sink.turn_completed(&outcome.final_text);
+                Ok(())
+            }
+            // The turn is committed, but it did not answer. A cancelled turn
+            // is not an error the user needs to dismiss, and a turn that ran
+            // out of rounds never will answer on its own.
+            AgentStop::Cancelled => {
+                sink.turn_cancelled();
+                Ok(())
+            }
+            AgentStop::MaxRounds(rounds) => {
+                sink.turn_failed(&format!("max_tool_rounds_exceeded: {rounds}"));
+                Ok(())
+            }
+        }
     }
 
-    /// Build the model messages and the provider for one turn.
+    /// Build the model messages, the reusable provider state, and the provider
+    /// for one turn.
     fn prepare(
         &self,
         request: &SendTurnRequest,
-    ) -> Result<(Vec<sujiu_ai::ModelMessage>, TurnProvider), TurnError> {
+    ) -> Result<
+        (
+            Vec<sujiu_ai::ModelMessage>,
+            Option<ProviderContinuation>,
+            TurnProvider,
+        ),
+        TurnError,
+    > {
         let inner = self.inner.lock().unwrap();
 
         let session = inner
@@ -680,9 +853,17 @@ impl SujiuRuntime {
         let plan = PromptCompiler::compile(
             Some(DEFAULT_APP_SYSTEM_PROMPT),
             &character,
-            &session.messages,
+            &session.transcript,
             &request.user_text,
         );
+
+        // Only replay provider state that belongs to this provider and model.
+        // After a switch this is `None`, and the adapter rebuilds the request
+        // from the normalized transcript instead.
+        let continuation = session
+            .transcript
+            .continuation_for(config.kind, &config.model)
+            .cloned();
 
         let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
             base_url: config.base_url.clone(),
@@ -711,7 +892,8 @@ impl SujiuRuntime {
         });
 
         Ok((
-            sujiu_ai::messages_from_prompt_plan(&plan),
+            plan.model_messages(),
+            continuation,
             TurnProvider {
                 provider: Box::new(provider),
             },
@@ -724,7 +906,15 @@ impl SujiuRuntime {
         }
     }
 
+    /// Commit a turn to its session.
+    ///
+    /// The whole turn is stored: the user message, every assistant step, every
+    /// tool call with its result, and the provider continuation state. Only
+    /// `final_text` is what the user reads; the rest is what the model was
+    /// given, and dropping it here is what used to make a tool-using turn
+    /// collapse into two messages on the next request.
     fn persist_turn(&self, request: &SendTurnRequest, outcome: &AgentOutcome) {
+        let now_ms = now_ms();
         let mut inner = self.inner.lock().unwrap();
         let Some(session) = inner
             .catalog
@@ -735,58 +925,14 @@ impl SujiuRuntime {
             return;
         };
 
-        let user_id = next_message_id(session);
-        session.messages.push(ChatMessage {
-            id: user_id,
-            role: ChatRole::User,
-            content: request.user_text.clone(),
-            metadata: serde_json::Map::new(),
-        });
+        let mut turn = outcome.turn.clone();
+        turn.id = next_turn_id(&session.transcript);
+        turn.created_at_ms = Some(now_ms);
+        session.transcript.push(turn);
+        session
+            .metadata
+            .insert("updatedAtMs".to_string(), Value::from(now_ms));
 
-        let assistant_id = next_message_id(session);
-        session.messages.push(ChatMessage {
-            id: assistant_id.clone(),
-            role: ChatRole::Assistant,
-            content: outcome.final_text.clone(),
-            metadata: serde_json::Map::new(),
-        });
-
-        // The tool's own title is the display name the runtime already carries,
-        // so pass it through. Deriving one from the tool id here would both
-        // discard that title and put English casing in the runtime, which is not
-        // where display text belongs.
-        let titles: BTreeMap<String, String> = inner
-            .tools
-            .definitions_for(outcome.tool_results.iter().map(|r| &r.name))
-            .into_iter()
-            .filter_map(|definition| definition.title.map(|title| (definition.name, title)))
-            .collect();
-
-        let calls = outcome
-            .tool_results
-            .iter()
-            .map(|result| ToolCallSummary {
-                id: result.call_id.clone(),
-                name: result.name.clone(),
-                title: titles
-                    .get(&result.name)
-                    .cloned()
-                    .unwrap_or_else(|| result.name.clone()),
-                status: if result.output.is_error {
-                    "failed".to_string()
-                } else {
-                    "completed".to_string()
-                },
-                is_error: result.output.is_error,
-                result_text: result.output.model_text(),
-            })
-            .collect();
-
-        inner
-            .catalog
-            .tool_calls
-            .retain(|(id, _)| id != &assistant_id);
-        inner.catalog.tool_calls.push((assistant_id, calls));
         drop(inner);
 
         self.persist();
@@ -801,10 +947,11 @@ impl Drop for SujiuRuntime {
     }
 }
 
-enum TurnFailure {
-    Cancelled,
-    Error(String),
-}
+/// Why a turn could not be started.
+///
+/// A turn that started and then stopped is not a failure here: it is committed
+/// to the transcript and reported through the event sink.
+struct TurnFailure(String);
 
 /// The provider used for one turn, erased so callers never see an adapter.
 struct TurnProvider {
@@ -817,8 +964,34 @@ impl TurnProvider {
     }
 }
 
-fn next_message_id(session: &Session) -> String {
-    format!("msg-{}", session.messages.len() + 1)
+/// A turn id that cannot collide with one already in the transcript.
+fn next_turn_id(transcript: &Transcript) -> String {
+    let mut number = transcript.len() + 1;
+    loop {
+        let id = format!("turn-{number}");
+        if !transcript.turns.iter().any(|turn| turn.id == id) {
+            return id;
+        }
+        number += 1;
+    }
+}
+
+/// The wire label of a tool call state.
+fn tool_call_status(state: sujiu_core::ToolCallState) -> &'static str {
+    match state {
+        sujiu_core::ToolCallState::Completed => "completed",
+        sujiu_core::ToolCallState::Failed => "failed",
+        sujiu_core::ToolCallState::Interrupted => "interrupted",
+        sujiu_core::ToolCallState::Cancelled => "cancelled",
+    }
+}
+
+/// Wall-clock milliseconds, for the metadata a session list sorts on.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 fn provider_kind_label(kind: sujiu_core::ProviderKind) -> String {

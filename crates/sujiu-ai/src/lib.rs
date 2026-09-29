@@ -6,7 +6,7 @@ pub mod provider;
 pub mod tool;
 pub mod types;
 
-pub use agent::{AgentConfig, AgentError, AgentOutcome, AgentRuntime, CancelToken};
+pub use agent::{AgentConfig, AgentError, AgentOutcome, AgentRuntime, AgentStop, CancelToken};
 pub use context::{
     register_standard_context_tools, ContextHit, ContextSearchQuery, ContextStore,
     ContextStoreError, InMemoryContextStore, ListContextSourcesTool, ReadContextTool,
@@ -16,6 +16,7 @@ pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 pub use provider::{AiProvider, NullStreamSink, ProviderError, StreamSink};
 pub use tool::{Tool, ToolError, ToolRegistry};
 pub use types::{
-    messages_from_prompt_plan, AssistantTurn, ModelMessage, ModelRole, ProviderRequest,
-    ToolAnnotations, ToolCall, ToolContent, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
+    messages_from_prompt_plan, AssistantTurn, ModelMessage, ModelRole, ProviderContinuation,
+    ProviderRequest, TokenUsage, ToolAnnotations, ToolCall, ToolCallState, ToolContent,
+    ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
 };

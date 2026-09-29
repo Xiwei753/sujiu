@@ -4,9 +4,14 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use sujiu_core::ProviderKind;
+
 use crate::{
     provider::{AiProvider, ProviderError, StreamSink},
-    types::{AssistantTurn, ModelMessage, ModelRole, ProviderRequest, ToolCall},
+    types::{
+        AssistantTurn, ModelMessage, ModelRole, ProviderContinuation, ProviderRequest, TokenUsage,
+        ToolCall,
+    },
 };
 
 #[derive(Clone, Debug)]
@@ -62,6 +67,9 @@ impl OpenAiCompatProvider {
     fn streaming_request_body(&self, request: ProviderRequest) -> Value {
         let mut body = self.request_body(request);
         body["stream"] = json!(true);
+        // Cached token counts are the only way to tell whether a request reused
+        // its prefix, so ask for them instead of guessing.
+        body["stream_options"] = json!({ "include_usage": true });
         body
     }
 
@@ -96,7 +104,6 @@ impl OpenAiCompatProvider {
             body["tools"] = Value::Array(tools);
             body["tool_choice"] = Value::String("auto".into());
         }
-
         if let Some(max_tokens) = self.config.max_tokens {
             body["max_tokens"] = json!(max_tokens);
         }
@@ -174,6 +181,34 @@ impl OpenAiCompatProvider {
     }
 }
 
+/// Read token accounting out of an OpenAI-compatible `usage` object.
+///
+/// `prompt_tokens_details.cached_tokens` is the cache read count, which is the
+/// only direct evidence that a request reused its prefix. Endpoints that do not
+/// report a field simply leave it absent.
+fn parse_usage(usage: &Value) -> Option<TokenUsage> {
+    let input = usage.get("prompt_tokens").and_then(Value::as_u64);
+    let output = usage.get("completion_tokens").and_then(Value::as_u64);
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64);
+    let cache_write = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64);
+
+    if input.is_none() && output.is_none() && cached.is_none() && cache_write.is_none() {
+        return None;
+    }
+
+    Some(TokenUsage {
+        input_tokens: input,
+        output_tokens: output,
+        cached_input_tokens: cached,
+        cache_write_tokens: cache_write,
+    })
+}
+
 /// Accumulates streamed tool call fragments. OpenAI-compatible endpoints split
 /// the name and the JSON arguments across several deltas.
 #[derive(Default)]
@@ -192,6 +227,7 @@ struct StreamAccumulator {
     text: String,
     response_id: Option<String>,
     finish_reason: Option<String>,
+    usage: Option<TokenUsage>,
     tool_calls: BTreeMap<usize, ToolCallAccumulator>,
 }
 
@@ -211,6 +247,12 @@ impl StreamAccumulator {
 
         if self.response_id.is_none() {
             self.response_id = chunk.get("id").and_then(Value::as_str).map(str::to_owned);
+        }
+
+        // Streamed usage arrives in its own chunk, after the choices, and is
+        // only sent when the request asked for it.
+        if let Some(usage) = chunk.get("usage").and_then(parse_usage) {
+            self.usage = Some(usage);
         }
 
         let Some(choice) = chunk
@@ -289,7 +331,7 @@ impl StreamAccumulator {
         Ok(())
     }
 
-    fn finish(self) -> Result<AssistantTurn, ProviderError> {
+    fn finish(self, config: &OpenAiCompatConfig) -> Result<AssistantTurn, ProviderError> {
         let tool_calls = self
             .tool_calls
             .into_values()
@@ -313,7 +355,16 @@ impl StreamAccumulator {
             text: (!self.text.is_empty()).then_some(self.text),
             tool_calls,
             finish_reason: self.finish_reason,
-            response_id: self.response_id,
+            // The response id is kept as continuation state, tied to the
+            // provider and model that produced it, so the transcript can decide
+            // later whether it may be replayed.
+            continuation: Some(ProviderContinuation {
+                provider_kind: ProviderKind::OpenAiCompatible,
+                model: config.model.clone(),
+                response_id: self.response_id,
+                state: Default::default(),
+            }),
+            usage: self.usage,
         })
     }
 }
@@ -378,7 +429,13 @@ impl AiProvider for OpenAiCompatProvider {
             text: choice.message.content.filter(|text| !text.is_empty()),
             tool_calls,
             finish_reason: choice.finish_reason,
-            response_id: response.id,
+            continuation: Some(ProviderContinuation {
+                provider_kind: ProviderKind::OpenAiCompatible,
+                model: self.config.model.clone(),
+                response_id: response.id,
+                state: Default::default(),
+            }),
+            usage: response.usage.as_ref().and_then(parse_usage),
         })
     }
 
@@ -443,7 +500,7 @@ impl AiProvider for OpenAiCompatProvider {
             accumulator.push_line(&pending, sink)?;
         }
 
-        accumulator.finish()
+        accumulator.finish(&self.config)
     }
 }
 
@@ -452,6 +509,8 @@ struct ChatCompletionResponse {
     #[serde(default)]
     id: Option<String>,
     choices: Vec<ChatChoice>,
+    #[serde(default)]
+    usage: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -519,7 +578,8 @@ mod tests {
             accumulator.push_line(line, &mut sink).unwrap();
         }
 
-        (accumulator.finish().unwrap(), sink)
+        let config = OpenAiCompatConfig::new("https://example.invalid/v1", "secret", "model");
+        (accumulator.finish(&config).unwrap(), sink)
     }
 
     #[test]
@@ -542,11 +602,8 @@ mod tests {
         ));
 
         let request = ProviderRequest {
-            messages: vec![ModelMessage::Text {
-                role: ModelRole::User,
-                content: "hi".into(),
-            }],
-            tools: Vec::new(),
+            messages: vec![ModelMessage::user("hi")],
+            ..ProviderRequest::default()
         };
 
         assert!(provider
@@ -572,9 +629,72 @@ mod tests {
 
         assert_eq!(sink.deltas, vec!["Hel".to_string(), "lo".to_string()]);
         assert_eq!(turn.text.as_deref(), Some("Hello"));
-        assert_eq!(turn.response_id.as_deref(), Some("resp-1"));
         assert_eq!(turn.finish_reason.as_deref(), Some("stop"));
         assert!(turn.tool_calls.is_empty());
+
+        // The response id is kept as continuation state, tagged with the model
+        // that produced it, so the transcript can decide later whether a
+        // different provider may replay it.
+        let continuation = turn.continuation.expect("the response id must be kept");
+        assert_eq!(continuation.response_id.as_deref(), Some("resp-1"));
+        assert_eq!(continuation.model, "model");
+        assert_eq!(continuation.provider_kind, ProviderKind::OpenAiCompatible);
+    }
+
+    #[test]
+    fn streamed_usage_is_recorded_including_cache_reads() {
+        let (turn, _sink) = feed(&[
+            r#"data: {"id":"resp-1","choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":40,"prompt_tokens_details":{"cached_tokens":1024}}}"#,
+        ]);
+
+        let usage = turn.usage.expect("usage must be recorded");
+        assert_eq!(usage.input_tokens, Some(1200));
+        assert_eq!(usage.output_tokens, Some(40));
+        // The cache read count is what shows whether the prefix was reused.
+        assert_eq!(usage.cached_input_tokens, Some(1024));
+    }
+
+    #[test]
+    fn streaming_request_asks_for_usage() {
+        let provider = OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+            "https://example.invalid/v1",
+            "secret",
+            "model",
+        ));
+
+        let body = provider.streaming_request_body(ProviderRequest {
+            messages: vec![ModelMessage::user("hi")],
+            ..ProviderRequest::default()
+        });
+
+        assert_eq!(body["stream_options"]["include_usage"], json!(true));
+    }
+
+    #[test]
+    fn continuation_state_is_never_sent_to_a_different_provider() {
+        let provider = OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+            "https://example.invalid/v1",
+            "secret",
+            "model",
+        ));
+
+        // Chat Completions has no place for another provider's continuation
+        // items, so the wire body must not grow one. The normalized messages
+        // already carry everything the model needs.
+        let body = provider.request_body(ProviderRequest {
+            messages: vec![ModelMessage::user("hi")],
+            continuation: Some(ProviderContinuation {
+                provider_kind: ProviderKind::Anthropic,
+                model: "other".into(),
+                response_id: Some("resp_1".into()),
+                state: Default::default(),
+            }),
+            ..ProviderRequest::default()
+        });
+
+        assert!(body.get("previous_response_id").is_none());
+        assert!(body.get("continuation").is_none());
     }
 
     #[test]
@@ -598,7 +718,8 @@ mod tests {
             "the tool must not be reported as running yet"
         );
 
-        let turn = accumulator.finish().unwrap();
+        let config = OpenAiCompatConfig::new("https://example.invalid/v1", "secret", "model");
+        let turn = accumulator.finish(&config).unwrap();
 
         // A second fragment for the same call must not announce it twice.
         assert_eq!(sink.requested.len(), 1);

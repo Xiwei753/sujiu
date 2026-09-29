@@ -81,12 +81,11 @@ pub trait AiProvider: Send + Sync {
             }
         }
 
-        // A non-streaming provider can still be cancelled once it answers, and
-        // it must report that the same way a streaming one does.
-        if !sink.should_continue() {
-            return Err(ProviderError::Cancelled);
-        }
-
+        // The turn completed, so it is returned even if the sink has stopped.
+        // Throwing it away here would drop work the model actually did, and the
+        // agent loop is what decides whether a stopped turn counts as finished.
+        // An adapter that can still be interrupted mid-answer reports that as
+        // `Cancelled` instead, because there is no complete turn to return.
         Ok(turn)
     }
 }

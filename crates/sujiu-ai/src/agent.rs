@@ -7,16 +7,17 @@ use std::{
 };
 
 use serde_json::{json, Value};
-use sujiu_core::PromptPlan;
+use sujiu_core::{
+    AssistantStep, ModelMessage, ModelRole, PromptPlan, ProviderContinuation, ProviderRequest,
+    ToolCall, ToolCallRecord, ToolCallState, ToolDefinition, ToolOutput, ToolResult,
+    ToolResultRecord, Turn, TurnState,
+};
 use thiserror::Error;
 
 use crate::{
     provider::{AiProvider, NullStreamSink, ProviderError, StreamSink},
     tool::ToolRegistry,
-    types::{
-        messages_from_prompt_plan, ModelMessage, ModelRole, ProviderRequest, ToolAnnotations,
-        ToolCall, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
-    },
+    types::{messages_from_prompt_plan, ToolAnnotations, ToolDiscovery},
 };
 
 const SEARCH_TOOLS_NAME: &str = "sujiu_search_tools";
@@ -44,12 +45,36 @@ impl Default for AgentConfig {
 pub enum AgentError {
     #[error(transparent)]
     Provider(#[from] ProviderError),
+}
 
-    #[error("tool loop exceeded {0} rounds")]
-    MaxRounds(usize),
-
-    #[error("turn cancelled")]
+/// Why a turn stopped.
+///
+/// Stopping is not the same as failing. A cancelled turn still produced steps
+/// the model saw, and those steps belong in the transcript, so a stop is
+/// reported as a state rather than as an error that discards the work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentStop {
+    /// The assistant produced a final answer.
+    Completed,
+    /// The turn was cancelled while a tool call was still open.
     Cancelled,
+    /// The tool loop hit its round limit.
+    MaxRounds(usize),
+}
+
+impl AgentStop {
+    pub fn turn_state(self) -> TurnState {
+        match self {
+            Self::Completed => TurnState::Completed,
+            Self::Cancelled => TurnState::Cancelled,
+            Self::MaxRounds(_) => TurnState::Failed,
+        }
+    }
+
+    /// Whether a platform should treat the stop as a failure to report.
+    pub fn is_error(self) -> bool {
+        !matches!(self, Self::Completed)
+    }
 }
 
 /// Cooperative cancellation for an in-flight turn.
@@ -74,12 +99,27 @@ impl CancelToken {
     }
 }
 
+/// What one turn produced.
+///
+/// `turn` holds every step the model took, not only the last one, so a caller
+/// that stores it keeps the tool calls and their results that a later request
+/// has to repeat.
 #[derive(Clone, Debug)]
 pub struct AgentOutcome {
     pub final_text: String,
     pub rounds: usize,
-    pub transcript: Vec<ModelMessage>,
+    /// The steps this turn produced. The id is left to the session that stores
+    /// it, because only that knows the session's own numbering.
+    pub turn: Turn,
     pub tool_results: Vec<ToolResult>,
+    pub stop: AgentStop,
+}
+
+impl AgentOutcome {
+    /// Exactly the messages this turn added, in wire order.
+    pub fn messages(&self) -> Vec<ModelMessage> {
+        self.turn.model_messages()
+    }
 }
 
 pub struct AgentRuntime<'a> {
@@ -97,7 +137,11 @@ impl<'a> AgentRuntime<'a> {
         }
     }
 
-    pub async fn run_prompt(&self, plan: &PromptPlan) -> Result<AgentOutcome, AgentError> {
+    pub async fn run_prompt(
+        &self,
+        plan: &PromptPlan,
+        continuation: Option<ProviderContinuation>,
+    ) -> Result<AgentOutcome, AgentError> {
         let messages = messages_from_prompt_plan(plan);
         let discovery_query = messages
             .iter()
@@ -111,15 +155,16 @@ impl<'a> AgentRuntime<'a> {
             })
             .unwrap_or_default();
 
-        self.run(messages, &discovery_query).await
+        self.run(messages, continuation, &discovery_query).await
     }
 
     pub async fn run(
         &self,
         messages: Vec<ModelMessage>,
+        continuation: Option<ProviderContinuation>,
         discovery_query: &str,
     ) -> Result<AgentOutcome, AgentError> {
-        self.run_streaming(messages, discovery_query, &mut NullStreamSink)
+        self.run_streaming(messages, continuation, discovery_query, &mut NullStreamSink)
             .await
     }
 
@@ -127,9 +172,15 @@ impl<'a> AgentRuntime<'a> {
     ///
     /// This is the single agent loop. Non-streaming callers get the same
     /// semantics through `run`, which simply discards the events.
+    ///
+    /// A turn that stops early still returns what it produced. Dropping the
+    /// partial steps would leave a tool call that the model asked for with no
+    /// result, which the next request cannot repair without rewriting history
+    /// the provider has already seen.
     pub async fn run_streaming(
         &self,
         mut messages: Vec<ModelMessage>,
+        continuation: Option<ProviderContinuation>,
         discovery_query: &str,
         sink: &mut dyn StreamSink,
     ) -> Result<AgentOutcome, AgentError> {
@@ -143,87 +194,147 @@ impl<'a> AgentRuntime<'a> {
         }
 
         let mut all_results = Vec::new();
+        let mut turn = Turn::new("", last_user_text(&messages));
 
         for round in 1..=self.config.max_rounds {
             let definitions = self.request_tool_definitions(&active);
 
-            // A provider reports a cancelled turn as an error rather than
-            // completing it, so a stop the user asked for never looks like a
-            // finished answer.
-            let turn = self
+            let mut observed = ObservedSink::new(sink);
+            let produced = match self
                 .provider
                 .stream(
                     ProviderRequest {
                         messages: messages.clone(),
                         tools: definitions,
+                        continuation: continuation.clone(),
                     },
-                    sink,
+                    &mut observed,
                 )
                 .await
-                .map_err(|error| match error {
-                    ProviderError::Cancelled => AgentError::Cancelled,
-                    other => AgentError::Provider(other),
-                })?;
-
-            if turn.tool_calls.is_empty() {
-                let final_text = turn.text.unwrap_or_default();
-                if !final_text.is_empty() {
-                    messages.push(ModelMessage::Text {
-                        role: ModelRole::Assistant,
-                        content: final_text.clone(),
-                    });
+            {
+                Ok(produced) => produced,
+                // The round never finished, so its partial text is not a step.
+                // Everything that already completed stays in the transcript.
+                Err(ProviderError::Cancelled) => {
+                    return Ok(outcome(turn, all_results, round, AgentStop::Cancelled))
                 }
+                Err(error) => return Err(AgentError::Provider(error)),
+            };
 
-                return Ok(AgentOutcome {
-                    final_text,
-                    rounds: round,
-                    transcript: messages,
-                    tool_results: all_results,
-                });
-            }
+            let step = AssistantStep {
+                text: produced.text,
+                reasoning: observed.take_reasoning(),
+                continuation: produced.continuation,
+                usage: produced.usage,
+                finish_reason: produced.finish_reason,
+                ..AssistantStep::default()
+            };
 
-            let calls = turn.tool_calls;
-            messages.push(ModelMessage::AssistantToolCalls {
-                content: turn.text,
-                calls: calls.clone(),
-            });
+            if produced.tool_calls.is_empty() {
+                messages.extend(step.model_messages());
+                turn.steps.push(step);
 
-            for call in calls {
-                if !sink.should_continue() {
-                    return Err(AgentError::Cancelled);
-                }
-
-                sink.on_tool_call_started(&call);
-
-                let result = if call.name == SEARCH_TOOLS_NAME {
-                    self.execute_tool_search(&call, &mut active)
-                } else if active.contains(&call.name) {
-                    self.tools
-                        .execute(call.id.clone(), call.name.clone(), call.arguments.clone())
-                        .await
+                // The answer arrived, but a user who stopped the turn still asked
+                // to stop. The step is kept, because the model really did say
+                // it, while the stop stays visible to the platform.
+                let stop = if sink.should_continue() {
+                    AgentStop::Completed
                 } else {
-                    ToolResult {
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        output: ToolOutput::error(
-                            "tool_not_exposed: this tool was not loaded for the current turn",
-                        ),
-                    }
+                    AgentStop::Cancelled
                 };
 
-                messages.push(ModelMessage::ToolResult {
-                    call_id: result.call_id.clone(),
-                    name: result.name.clone(),
-                    content: result.output.model_text(),
-                    structured_content: result.output.structured_content.clone(),
-                    is_error: result.output.is_error,
-                });
-                sink.on_tool_call_finished(&call, &result);
+                return Ok(outcome(turn, all_results, round, stop));
+            }
+
+            let mut cancelled_from = false;
+            let mut records = Vec::with_capacity(produced.tool_calls.len());
+
+            for call in &produced.tool_calls {
+                if cancelled_from || !sink.should_continue() {
+                    // This call, and every call after it in the same step, never
+                    // ran. Each one is stored with an explicit result so the next
+                    // request still pairs it with the call the model asked for,
+                    // and so a platform can show it as stopped.
+                    cancelled_from = true;
+                    records.push(self.tool_record(
+                        call,
+                        ToolResultRecord::unfinished(ToolCallState::Cancelled, &call.name),
+                    ));
+                    continue;
+                }
+
+                sink.on_tool_call_started(call);
+                let result = self.execute_call(call, &mut active).await;
+                records.push(
+                    self.tool_record(call, ToolResultRecord::completed(result.output.clone())),
+                );
+                sink.on_tool_call_finished(call, &result);
                 all_results.push(result);
+            }
+
+            let step = AssistantStep {
+                tool_calls: records,
+                ..step
+            };
+            messages.extend(step.model_messages());
+            turn.steps.push(step);
+
+            if cancelled_from {
+                return Ok(outcome(turn, all_results, round, AgentStop::Cancelled));
             }
         }
 
-        Err(AgentError::MaxRounds(self.config.max_rounds))
+        Ok(outcome(
+            turn,
+            all_results,
+            self.config.max_rounds,
+            AgentStop::MaxRounds(self.config.max_rounds),
+        ))
+    }
+
+    fn tool_record(&self, call: &ToolCall, result: ToolResultRecord) -> ToolCallRecord {
+        ToolCallRecord {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            title: self.tool_title(&call.name),
+            arguments: call.arguments.clone(),
+            result,
+        }
+    }
+
+    /// The tool's own title, passed through. Deriving one from the tool name
+    /// would discard the display name the tool published.
+    fn tool_title(&self, name: &str) -> Option<String> {
+        if name == SEARCH_TOOLS_NAME {
+            return search_tools_definition().title;
+        }
+
+        self.tools.title_for(name)
+    }
+
+    /// Run one tool call, or explain why it cannot run.
+    ///
+    /// A tool that was not loaded for this turn still produces a result, so the
+    /// model learns why instead of seeing a call it cannot pair.
+    async fn execute_call(&self, call: &ToolCall, active: &mut BTreeSet<String>) -> ToolResult {
+        if call.name == SEARCH_TOOLS_NAME {
+            return self.execute_tool_search(call, active);
+        }
+
+        if active.contains(&call.name) {
+            return self
+                .tools
+                .execute(call.id.clone(), call.name.clone(), call.arguments.clone())
+                .await;
+        }
+
+        ToolResult {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
+            output: ToolOutput::error(
+                "tool_not_exposed: this tool was not loaded for the current turn",
+            ),
+        }
     }
 
     fn request_tool_definitions(&self, active: &BTreeSet<String>) -> Vec<ToolDefinition> {
@@ -286,6 +397,90 @@ impl<'a> AgentRuntime<'a> {
                     .collect::<Vec<_>>()
             })),
         }
+    }
+}
+
+/// The user text this turn answers.
+fn last_user_text(messages: &[ModelMessage]) -> String {
+    messages
+        .iter()
+        .rev()
+        .find_map(|message| match message {
+            ModelMessage::Text {
+                role: ModelRole::User,
+                content,
+            } => Some(content.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Close out a turn, whatever stopped it.
+fn outcome(
+    mut turn: Turn,
+    tool_results: Vec<ToolResult>,
+    rounds: usize,
+    stop: AgentStop,
+) -> AgentOutcome {
+    let final_text = turn.final_text().unwrap_or_default().to_owned();
+    turn.state = stop.turn_state();
+
+    AgentOutcome {
+        final_text,
+        rounds,
+        turn,
+        tool_results,
+        stop,
+    }
+}
+
+/// Forwards events to the caller's sink while keeping the reasoning text.
+///
+/// Reasoning arrives as a stream of deltas, so the transcript can only learn
+/// what the model thought if something collects them. Keeping it here is also
+/// what stops it from being mistaken for visible assistant text.
+struct ObservedSink<'a> {
+    inner: &'a mut dyn StreamSink,
+    reasoning: String,
+}
+
+impl<'a> ObservedSink<'a> {
+    fn new(inner: &'a mut dyn StreamSink) -> Self {
+        Self {
+            inner,
+            reasoning: String::new(),
+        }
+    }
+
+    fn take_reasoning(&mut self) -> Option<String> {
+        (!self.reasoning.is_empty()).then(|| std::mem::take(&mut self.reasoning))
+    }
+}
+
+impl StreamSink for ObservedSink<'_> {
+    fn on_text_delta(&mut self, delta: &str) {
+        self.inner.on_text_delta(delta);
+    }
+
+    fn on_reasoning_delta(&mut self, delta: &str) {
+        self.reasoning.push_str(delta);
+        self.inner.on_reasoning_delta(delta);
+    }
+
+    fn on_tool_call_requested(&mut self, call: &ToolCall) {
+        self.inner.on_tool_call_requested(call);
+    }
+
+    fn on_tool_call_started(&mut self, call: &ToolCall) {
+        self.inner.on_tool_call_started(call);
+    }
+
+    fn on_tool_call_finished(&mut self, call: &ToolCall, result: &ToolResult) {
+        self.inner.on_tool_call_finished(call, result);
+    }
+
+    fn should_continue(&self) -> bool {
+        self.inner.should_continue()
     }
 }
 
@@ -451,11 +646,13 @@ mod tests {
             ..RecordingSink::default()
         };
 
-        let error = runtime
-            .run_streaming(user_message("hi"), "hello", &mut sink)
+        let outcome = runtime
+            .run_streaming(user_message("hi"), None, "hello", &mut sink)
             .await
-            .expect_err("a stopped sink must not complete the turn");
-        assert!(matches!(error, AgentError::Cancelled), "got {error:?}");
+            .expect("a stopped round is still a turn that produced work");
+
+        assert_eq!(outcome.stop, AgentStop::Cancelled);
+        assert_eq!(outcome.turn.state, TurnState::Cancelled);
         assert_eq!(sink.deltas.len(), 1, "the answer is still reported once");
     }
 
@@ -501,6 +698,9 @@ mod tests {
         started: Vec<String>,
         finished: Vec<(String, bool)>,
         stop_after_deltas: Option<usize>,
+        /// Stop the turn once this many tools have finished, which leaves any
+        /// later call in the same step unexecuted.
+        stop_after_tools: Option<usize>,
     }
 
     impl StreamSink for RecordingSink {
@@ -526,8 +726,14 @@ mod tests {
         }
 
         fn should_continue(&self) -> bool {
-            match self.stop_after_deltas {
-                Some(limit) => self.deltas.len() < limit,
+            if let Some(limit) = self.stop_after_deltas {
+                if self.deltas.len() >= limit {
+                    return false;
+                }
+            }
+
+            match self.stop_after_tools {
+                Some(limit) => self.finished.len() < limit,
                 None => true,
             }
         }
@@ -549,7 +755,7 @@ mod tests {
                     text: Some("Hello there".into()),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".into()),
-                    response_id: None,
+                    ..AssistantTurn::default()
                 },
             )])),
         };
@@ -559,7 +765,7 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         let outcome = runtime
-            .run_streaming(user_message("hi"), "hi", &mut sink)
+            .run_streaming(user_message("hi"), None, "hi", &mut sink)
             .await
             .unwrap();
 
@@ -580,13 +786,13 @@ mod tests {
                         arguments: json!({"query": "western tower"}),
                     }],
                     finish_reason: Some("tool_calls".into()),
-                    response_id: None,
+                    ..AssistantTurn::default()
                 },
                 AssistantTurn {
                     text: Some("The old king vanished.".into()),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".into()),
-                    response_id: None,
+                    ..AssistantTurn::default()
                 },
             ])),
         };
@@ -599,7 +805,12 @@ mod tests {
         let mut sink = RecordingSink::default();
 
         runtime
-            .run_streaming(user_message("what happened?"), "what happened?", &mut sink)
+            .run_streaming(
+                user_message("what happened?"),
+                None,
+                "what happened?",
+                &mut sink,
+            )
             .await
             .unwrap();
 
@@ -617,7 +828,7 @@ mod tests {
                     text: Some("checking".into()),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".into()),
-                    response_id: None,
+                    ..AssistantTurn::default()
                 },
             )])),
         };
@@ -625,7 +836,7 @@ mod tests {
         let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
 
         let _ = runtime
-            .run_streaming(user_message("hi"), "hi", &mut sink)
+            .run_streaming(user_message("hi"), None, "hi", &mut sink)
             .await;
 
         // The mock streams text only, so no request is announced and the loop
@@ -645,7 +856,7 @@ mod tests {
                     text: Some("firstsecond".into()),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".into()),
-                    response_id: None,
+                    ..AssistantTurn::default()
                 },
             )])),
         };
@@ -658,7 +869,7 @@ mod tests {
         };
 
         let outcome = runtime
-            .run_streaming(user_message("hi"), "hi", &mut sink)
+            .run_streaming(user_message("hi"), None, "hi", &mut sink)
             .await
             .unwrap();
 
@@ -678,7 +889,7 @@ mod tests {
                     arguments: json!({"query": "anything"}),
                 }],
                 finish_reason: Some("tool_calls".into()),
-                response_id: None,
+                ..AssistantTurn::default()
             }])),
         };
 
@@ -689,16 +900,111 @@ mod tests {
             ..RecordingSink::default()
         };
 
-        let error = runtime
-            .run_streaming(user_message("hi"), "hi", &mut sink)
+        let outcome = runtime
+            .run_streaming(user_message("hi"), None, "hi", &mut sink)
             .await
-            .expect_err("turn must stop before executing tools");
+            .expect("a stopped turn still reports what it produced");
 
-        assert!(matches!(error, AgentError::Cancelled));
+        assert_eq!(outcome.stop, AgentStop::Cancelled);
         assert!(
             sink.started.is_empty(),
             "no tool may run after cancellation"
         );
+
+        // The call the model made is still stored, paired with an explicit
+        // result. Dropping it would leave the next request with a tool call the
+        // provider cannot match, which it answers with a 400.
+        let call = &outcome.turn.steps[0].tool_calls[0];
+        assert_eq!(call.id, "search-1");
+        assert_eq!(call.result.state, ToolCallState::Cancelled);
+
+        let messages = outcome.messages();
+        let results = messages
+            .iter()
+            .filter_map(|message| match message {
+                ModelMessage::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results, vec!["search-1"]);
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_turn_keeps_the_steps_that_already_finished() {
+        let provider = MockProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(VecDeque::from([
+                AssistantTurn {
+                    text: None,
+                    tool_calls: vec![ToolCall {
+                        id: "search-1".into(),
+                        name: "search_context".into(),
+                        arguments: json!({"query": "western tower"}),
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    ..AssistantTurn::default()
+                },
+                // Two more calls in the next step, which the cancellation below
+                // must record rather than erase.
+                AssistantTurn {
+                    text: Some("found the first one".into()),
+                    tool_calls: vec![
+                        ToolCall {
+                            id: "read-1".into(),
+                            name: "read_context".into(),
+                            arguments: json!({"uri": "lore://western-tower"}),
+                        },
+                        ToolCall {
+                            id: "read-2".into(),
+                            name: "read_context".into(),
+                            arguments: json!({"uri": "lore://western-tower/2"}),
+                        },
+                    ],
+                    finish_reason: Some("tool_calls".into()),
+                    ..AssistantTurn::default()
+                },
+            ])),
+        };
+
+        let store = Arc::new(crate::context::InMemoryContextStore::new());
+        let mut tools = ToolRegistry::new();
+        crate::context::register_standard_context_tools(&mut tools, store);
+
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+        // Stop once the first tool has finished, so every call in the second
+        // step is left unexecuted.
+        let mut sink = RecordingSink {
+            stop_after_tools: Some(1),
+            ..RecordingSink::default()
+        };
+
+        let outcome = runtime
+            .run_streaming(
+                user_message("what happened?"),
+                None,
+                "what happened?",
+                &mut sink,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome.stop, AgentStop::Cancelled);
+        assert_eq!(outcome.turn.steps.len(), 2, "both steps stay in the turn");
+        assert_eq!(outcome.turn.steps[0].tool_calls[0].id, "search-1");
+        assert_eq!(
+            outcome.turn.steps[0].tool_calls[0].result.state,
+            ToolCallState::Completed
+        );
+
+        // Both calls of the second step are recorded as cancelled, so the next
+        // request pairs every call with a result.
+        let unexecuted = &outcome.turn.steps[1].tool_calls;
+        assert_eq!(unexecuted.len(), 2);
+        assert_eq!(unexecuted[0].id, "read-1");
+        assert_eq!(unexecuted[1].id, "read-2");
+        assert!(unexecuted
+            .iter()
+            .all(|call| call.result.state == ToolCallState::Cancelled));
     }
 
     #[tokio::test]
@@ -726,7 +1032,7 @@ mod tests {
                         arguments: json!({"query":"kingdom history"}),
                     }],
                     finish_reason: Some("tool_calls".into()),
-                    response_id: None,
+                    ..AssistantTurn::default()
                 },
                 AssistantTurn {
                     text: None,
@@ -736,13 +1042,13 @@ mod tests {
                         arguments: json!({"query":"old king"}),
                     }],
                     finish_reason: Some("tool_calls".into()),
-                    response_id: None,
+                    ..AssistantTurn::default()
                 },
                 AssistantTurn {
                     text: Some("The old king vanished beneath the western tower.".into()),
                     tool_calls: Vec::new(),
                     finish_reason: Some("stop".into()),
-                    response_id: None,
+                    ..AssistantTurn::default()
                 },
             ])),
         };
@@ -765,6 +1071,7 @@ mod tests {
                     role: ModelRole::User,
                     content: "What happened to the old king?".into(),
                 }],
+                None,
                 "unrelated initial selector text",
             )
             .await

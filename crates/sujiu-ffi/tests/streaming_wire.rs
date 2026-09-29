@@ -369,15 +369,15 @@ fn cancelling_mid_stream_stops_the_turn() {
         "a cancelled turn must not also complete: {kinds:?}"
     );
 
-    // Nothing partial was written into the session. This uses a session that
-    // is empty to begin with, so the check is about the cancelled turn rather
-    // than about whatever the seed shipped with.
+    // A cancelled turn is still committed. The tool call that already finished
+    // is a step the model was actually shown, so the next request has to carry
+    // it — and carry its result with it. Dropping the turn instead would make
+    // the model re-ask for the same search, and would leave the caller with a
+    // tool call that has no result.
+    //
+    // This uses a session that is empty to begin with, so the check is about
+    // the cancelled turn rather than about whatever the seed shipped with.
     let empty = runtime.create_session(Some("character-lin"));
-    let before = runtime
-        .conversation_state(&empty)
-        .expect("state")
-        .messages
-        .len();
     let mut reporter = CancellingReporter {
         runtime: &runtime,
         deltas: 0,
@@ -394,11 +394,18 @@ fn cancelling_mid_stream_stops_the_turn() {
         &mut reporter,
     );
     let after = runtime.conversation_state(&empty).expect("state");
+    let assistant = after
+        .messages
+        .iter()
+        .find(|message| !message.tool_calls.is_empty())
+        .expect("a cancelled turn keeps the steps that already finished");
     assert_eq!(
-        after.messages.len(),
-        before,
-        "a cancelled turn must not persist anything: {:?}",
-        after.messages
+        assistant.tool_calls[0].id, "call-1",
+        "the call id must survive unchanged so the next request can pair it: {assistant:?}"
+    );
+    assert_eq!(
+        assistant.tool_calls[0].status, "completed",
+        "a call that produced a result is completed, not interrupted: {assistant:?}"
     );
 
     drop(provider.server);

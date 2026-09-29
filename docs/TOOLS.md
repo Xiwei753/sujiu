@@ -146,6 +146,33 @@ Older material can be represented by:
 This lets Sujiu eventually compact long sessions without losing the ability to
 retrieve an exact old event.
 
+`Transcript::compact` moves the oldest turns into a `CompactedTurns` record and
+replaces them with a summary, so the exact turns stay retrievable through the
+context protocol after they leave the prompt.
+
+## A turn is many steps, not one message
+
+A turn that used tools is:
+
+```text
+U1 -> A1(tool_call T1) -> R1 -> A2(tool_call T2) -> R2 -> A3(final)
+```
+
+The final answer is the last assistant step, not the only assistant content of
+the turn.
+
+A tool call and its tool result are one nested record, so an unpaired call
+cannot be represented. A call the runtime never got to run is stored with an
+explicit state (`Completed`, `Failed`, `Interrupted`, `Cancelled`) plus an
+explanatory result, so cancelling a turn never leaves a dangling call.
+
+History is append-only apart from explicit compaction, and neither the stable
+system prefix nor already-sent history is rewritten. That keeps prompt-cache
+prefixes intact and keeps call/result correspondence intact.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the full three-layer contract: model
+transcript, UI projection, and provider continuation state.
+
 ## External tools and MCP
 
 Sujiu's internal contract is not a claim that Sujiu itself is an MCP server.

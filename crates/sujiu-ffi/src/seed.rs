@@ -7,8 +7,8 @@
 
 use serde_json::{Map, Value};
 use sujiu_core::{
-    Character, ChatMessage, ChatRole, ContextKind, ContextRecord, ContextScope, ContextSource,
-    Session,
+    AssistantStep, Character, ContextKind, ContextRecord, ContextScope, ContextSource, Session,
+    Transcript, Turn,
 };
 
 use crate::runtime::Seed;
@@ -46,13 +46,18 @@ fn character(
     }
 }
 
-fn message(id: &str, role: ChatRole, content: &str, at_ms: i64) -> ChatMessage {
-    ChatMessage {
-        id: id.to_string(),
-        role,
-        content: content.to_string(),
-        metadata: metadata(&[("atMs", Value::from(at_ms))]),
-    }
+/// One recorded turn: what was asked, and every assistant step that answered.
+///
+/// The seed records steps rather than a single answer, so seeded data has the
+/// same shape a real tool-using turn produces.
+fn turn(id: &str, user: &str, answers: &[&str], at_ms: i64) -> Turn {
+    let mut turn = Turn::new(id, user);
+    turn.created_at_ms = Some(at_ms);
+    turn.steps = answers
+        .iter()
+        .map(|answer| AssistantStep::text_only(*answer))
+        .collect();
+    turn
 }
 
 fn session(
@@ -60,12 +65,15 @@ fn session(
     character_id: &str,
     title: &str,
     updated_at_ms: i64,
-    messages: Vec<ChatMessage>,
+    turns: Vec<Turn>,
 ) -> Session {
     Session {
         id: id.to_string(),
         character_id: Some(character_id.to_string()),
-        messages,
+        transcript: Transcript {
+            turns,
+            compacted: None,
+        },
         metadata: metadata(&[
             ("title", Value::from(title)),
             ("updatedAtMs", Value::from(updated_at_ms)),
@@ -129,30 +137,22 @@ pub fn seed() -> Seed {
             "character-lin",
             "The blinking light",
             NOW_MS,
-            vec![
-                message(
-                    "msg-1",
-                    ChatRole::User,
-                    "You said the frequency was dead. Why is the light on the console blinking?",
-                    NOW_MS - 60_000,
-                ),
-                message(
-                    "msg-2",
-                    ChatRole::Assistant,
-                    "Because the console and I are arguing about who owns the night shift. The blinking is a caller who has not decided to speak yet.",
-                    NOW_MS - 55_000,
-                ),
-            ],
+            vec![turn(
+                "turn-1",
+                "You said the frequency was dead. Why is the light on the console blinking?",
+                &["Because the console and I are arguing about who owns the night shift. The blinking is a caller who has not decided to speak yet."],
+                NOW_MS - 60_000,
+            )],
         ),
         session(
             "session-2",
             "character-wen",
             "Flood order",
             NOW_MS - 86_400_000,
-            vec![message(
-                "msg-1",
-                ChatRole::User,
+            vec![turn(
+                "turn-1",
                 "Which shelves move first?",
+                &[],
                 NOW_MS - 86_400_000,
             )],
         ),

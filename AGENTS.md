@@ -642,7 +642,48 @@ At minimum:
 
 Do not leave the code and documented architecture contradicting each other.
 
-## 24. Completion standard
+## 24. Transcript, session, and provider continuation state
+
+Sujiu keeps three different views of one conversation. They must stay separate:
+
+1. **Model transcript** — the complete, ordered record of user messages, assistant steps, tool calls, and tool results. This is the canonical history. It is never flattened.
+2. **UI projection** — what the user finally sees. It may fold, hide, or merge tool steps. Folding the UI must never delete transcript steps.
+3. **Provider continuation state** — provider-specific metadata such as call ids, response ids, and encrypted reasoning/continuation items. It is stored with the transcript, not treated as disposable UI scratch data.
+
+The correct shape of a turn that used tools is:
+
+```text
+U1 -> A1(tool_call T1) -> R1(tool_result) -> A2(tool_call T2) -> R2 -> A3(final)
+```
+
+The next turn's model context continues from `U1, A1+T1, R1, A2+T2, R2, A3, U2`. Persisting only `U1, A3, U2` is a bug, not a display choice.
+
+Rules:
+
+- one turn contains many steps; the final answer is only the **last** assistant step, never the only assistant content of the turn
+- history is append-only. Apart from explicit compaction or context editing, anything already sent to the model stays byte-for-byte; new content is appended at the tail
+- a tool call and its tool result are one atomic pair. No trimming, compaction, or migration may leave a call without a result, a result with no matching call id, reordered calls, or a deleted interrupted call
+- interruption and cancellation must be recorded as an explicit interrupted/cancelled tool result, not by discarding the partial transcript
+- provider continuation state may be reused raw only when the provider **and** model match. Otherwise fall back to the normalized model transcript and let the adapter convert
+- reasoning metadata is kept separate from ordinary visible assistant text
+- prompt cache is a design goal: stable system/developer prefix, stable tool definitions and order, unchanged history prefix, new content appended at the tail. Do not rewrite or drop already-sent steps just to make the stored history "look clean" or to make the UI show only the final answer
+
+The stored session must be the transcript itself, not a derived text projection. When persisting a turn, keep every assistant step, tool call, and tool result that the model actually saw.
+
+Required automated coverage:
+
+- one tool call, then a second round
+- three or more consecutive tool calls, then a second round
+- a tool call interrupted, then continued
+- a tool error, then continued
+- session persisted, runtime closed, reopened, then continued
+- after compaction, then continued
+- after a provider/model switch, then continued
+- UI hides tool details while the model transcript stays complete
+- tool call/result ids and ordering match strictly
+- for cache-capable providers, consecutive turns do not break the cache prefix
+
+## 25. Completion standard
 
 Before declaring a task complete, verify:
 
@@ -652,6 +693,9 @@ Before declaring a task complete, verify:
 - new readable data reused the Context protocol where appropriate
 - tool schemas are not unnecessarily exposed every turn
 - no unrestricted RP memory write path was introduced
+- intermediate assistant/tool/result steps stayed in the model transcript
+- tool calls and their results stayed atomically paired
+- UI folding did not delete transcript steps
 - relevant tests were added or updated
 - Rust formatting passes
 - Rust workspace tests pass

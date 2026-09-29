@@ -155,6 +155,16 @@ impl ToolRegistry {
             .collect()
     }
 
+    /// The display title a tool published for itself.
+    ///
+    /// The runtime stores this rather than inventing one, so the same title
+    /// reaches every platform that shows a tool call.
+    pub fn title_for(&self, name: &str) -> Option<String> {
+        self.tools
+            .get(name)
+            .and_then(|tool| tool.definition().title)
+    }
+
     pub async fn execute(&self, call_id: String, name: String, arguments: Value) -> ToolResult {
         let output = match self.tools.get(&name) {
             Some(tool) => match tool.execute(arguments).await {

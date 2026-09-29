@@ -17,7 +17,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sujiu_core::{Character, ChatMessage, PromptCompiler, PromptPlan, ProviderConfig};
+use sujiu_core::{Character, PromptCompiler, PromptPlan, ProviderConfig, Transcript};
 
 pub use sujiu_core::CORE_VERSION;
 
@@ -33,8 +33,12 @@ struct CompilePromptInput {
     #[serde(default)]
     app_system_prompt: Option<String>,
     character: Character,
+    /// The stored transcript, not a flattened message list.
+    ///
+    /// A preview of a tool-using turn is only honest when the tool steps are
+    /// passed in, so this takes the same transcript a session stores.
     #[serde(default)]
-    history: Vec<ChatMessage>,
+    history: Transcript,
     user_input: String,
 }
 
