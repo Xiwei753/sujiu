@@ -8,7 +8,8 @@ Current bootstrap intentionally uses platform views with no UI framework depende
 
 Build baseline:
 
-- Android Gradle Plugin 9.4.x
+- Android Gradle Plugin 9.4.x with built-in Kotlin
+- Gradle 9.6+
 - JDK 17
 - compileSdk/targetSdk 36
 - minSdk 26
