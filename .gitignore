@@ -1,0 +1,19 @@
+/target/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+
+# Qt
+CMakeFiles/
+CMakeCache.txt
+cmake-build-*/
+
+# HarmonyOS
+.ohpm/
+.hvigor/
