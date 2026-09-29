@@ -66,7 +66,7 @@ impl ToolRegistry {
         let query = query.to_lowercase();
         let terms = query
             .split(|ch: char| !ch.is_alphanumeric() && ch != '_' && ch != '-')
-            .filter(|term| !term.is_empty())
+            .filter(|term| is_significant_term(term))
             .collect::<Vec<_>>();
 
         let mut scored =
@@ -85,11 +85,7 @@ impl ToolRegistry {
                         .map(|keyword| keyword.to_lowercase())
                         .collect::<Vec<_>>();
 
-                    let mut score = if definition.discovery.always_available {
-                        10_000
-                    } else {
-                        0
-                    };
+                    let mut score = 0;
 
                     if !query.is_empty() {
                         if name.contains(&query) || query.contains(&name) {
@@ -134,7 +130,7 @@ impl ToolRegistry {
 
                     (score, definition)
                 })
-                .filter(|(score, _)| *score > 0)
+                .filter(|(score, _)| *score >= 15)
                 .collect::<Vec<_>>();
 
         scored.sort_by(|(left_score, left), (right_score, right)| {
@@ -174,6 +170,11 @@ impl ToolRegistry {
             output,
         }
     }
+}
+
+fn is_significant_term(term: &str) -> bool {
+    let char_count = term.chars().count();
+    char_count >= 3 || (char_count >= 2 && term.chars().any(|ch| !ch.is_ascii()))
 }
 
 #[cfg(test)]
