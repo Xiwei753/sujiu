@@ -8,8 +8,8 @@ use crate::{
     provider::{AiProvider, ProviderError},
     tool::ToolRegistry,
     types::{
-        messages_from_prompt_plan, ModelMessage, ModelRole, ProviderRequest, ToolCall,
-        ToolDefinition, ToolResult,
+        messages_from_prompt_plan, ModelMessage, ModelRole, ProviderRequest, ToolAnnotations,
+        ToolCall, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
     },
 };
 
@@ -144,19 +144,18 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
                     ToolResult {
                         call_id: call.id.clone(),
                         name: call.name.clone(),
-                        output: json!({
-                            "error": "tool_not_exposed",
-                            "message": "This tool was not loaded for the current turn."
-                        }),
-                        is_error: true,
+                        output: ToolOutput::error(
+                            "tool_not_exposed: this tool was not loaded for the current turn",
+                        ),
                     }
                 };
 
                 messages.push(ModelMessage::ToolResult {
                     call_id: result.call_id.clone(),
                     name: result.name.clone(),
-                    output: result.output.clone(),
-                    is_error: result.is_error,
+                    content: result.output.model_text(),
+                    structured_content: result.output.structured_content.clone(),
+                    is_error: result.output.is_error,
                 });
                 all_results.push(result);
             }
@@ -198,8 +197,7 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
             return ToolResult {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
-                output: json!({"error":"query_required"}),
-                is_error: true,
+                output: ToolOutput::error("query_required"),
             };
         }
 
@@ -211,16 +209,17 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
         ToolResult {
             call_id: call.id.clone(),
             name: call.name.clone(),
-            output: json!({
+            output: ToolOutput::structured(json!({
                 "loaded": matches
                     .iter()
                     .map(|definition| json!({
                         "name": definition.name,
+                        "title": definition.title,
                         "description": definition.description,
+                        "category": definition.discovery.category,
                     }))
                     .collect::<Vec<_>>()
-            }),
-            is_error: false,
+            })),
         }
     }
 }
@@ -228,8 +227,9 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
 fn search_tools_definition() -> ToolDefinition {
     ToolDefinition {
         name: SEARCH_TOOLS_NAME.into(),
-        description: "Search Sujiu's deferred local tool catalog. Use this when the currently visible tools do not cover a capability you need. Matching tools become available on the next model turn.".into(),
-        parameters: json!({
+        title: Some("Search tools".into()),
+        description: "Search Sujiu's deferred local tool catalog. Use this only when the currently visible tools do not cover a capability you need. Matching tool schemas become available on the next model turn.".into(),
+        input_schema: json!({
             "type": "object",
             "properties": {
                 "query": {
@@ -239,14 +239,44 @@ fn search_tools_definition() -> ToolDefinition {
                 "limit": {
                     "type": "integer",
                     "minimum": 1,
-                    "maximum": 8
+                    "maximum": 8,
+                    "default": 5
                 }
             },
             "required": ["query"],
             "additionalProperties": false
         }),
-        keywords: Vec::new(),
-        always_available: true,
+        output_schema: Some(json!({
+            "type":"object",
+            "properties":{
+                "loaded":{
+                    "type":"array",
+                    "items":{
+                        "type":"object",
+                        "properties":{
+                            "name":{"type":"string"},
+                            "title":{"type":["string","null"]},
+                            "description":{"type":"string"},
+                            "category":{"type":"string"}
+                        },
+                        "required":["name","description","category"]
+                    }
+                }
+            },
+            "required":["loaded"]
+        })),
+        annotations: ToolAnnotations {
+            title: Some("Search tools".into()),
+            read_only_hint: true,
+            destructive_hint: false,
+            idempotent_hint: true,
+            open_world_hint: false,
+        },
+        discovery: ToolDiscovery {
+            category: "system".into(),
+            keywords: Vec::new(),
+            always_available: true,
+        },
     }
 }
 
@@ -273,22 +303,34 @@ mod tests {
         fn definition(&self) -> ToolDefinition {
             ToolDefinition {
                 name: "search_lore".into(),
+                title: Some("Search lore".into()),
                 description: "Search detailed world lore.".into(),
-                parameters: json!({
+                input_schema: json!({
                     "type": "object",
                     "properties": {"query":{"type":"string"}},
                     "required": ["query"]
                 }),
-                keywords: vec!["lore".into(), "history".into(), "kingdom".into()],
-                always_available: false,
+                output_schema: Some(json!({"type":"object"})),
+                annotations: ToolAnnotations {
+                    title: Some("Search lore".into()),
+                    read_only_hint: true,
+                    destructive_hint: false,
+                    idempotent_hint: true,
+                    open_world_hint: false,
+                },
+                discovery: ToolDiscovery {
+                    category: "context".into(),
+                    keywords: vec!["lore".into(), "history".into(), "kingdom".into()],
+                    always_available: false,
+                },
             }
         }
 
-        async fn execute(&self, arguments: Value) -> Result<Value, ToolError> {
-            Ok(json!({
+        async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
+            Ok(ToolOutput::structured(json!({
                 "query": arguments.get("query"),
                 "result": "The old king vanished beneath the western tower."
-            }))
+            })))
         }
     }
 
