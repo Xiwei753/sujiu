@@ -167,8 +167,19 @@ explicit state (`Completed`, `Failed`, `Interrupted`, `Cancelled`) plus an
 explanatory result, so cancelling a turn never leaves a dangling call.
 
 History is append-only apart from explicit compaction, and already-sent history
-is never rewritten. That keeps prompt-cache prefixes intact and keeps
-call/result correspondence intact.
+is never rewritten. That keeps call/result correspondence intact, and the
+prompt block above it stays put.
+
+It does not make every request append-only: the near-history entries, the
+post-history instruction and the current input are turn-local, so the previous
+turn's tail moves down behind the answer. That is a real cache break and it is
+reported as one, rather than papered over by moving world-book entries away from
+the positions their meaning asks for.
+
+Thinking-mode endpoints additionally require the reasoning that produced an
+assistant tool call to be sent back with it, or they reject the request. The
+step keeps that reasoning, and it is replayed only where the endpoint declared
+the requirement.
 
 A tool loop that stops early — cancelled, out of rounds, or cut short by a
 provider error — still commits the rounds that finished, so the calls the model

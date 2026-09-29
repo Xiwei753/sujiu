@@ -86,24 +86,27 @@ A call the runtime never got to run is stored with an explicit state — `Comple
 
 Apart from explicit compaction, anything already sent to the model stays exactly as it was and new content is appended at the tail. Rewriting old history costs prompt-cache prefix hits and risks breaking call/result correspondence.
 
-`PromptPlan` has four regions, because "the prefix" is not one thing:
+`PromptPlan` has three regions:
 
 | Region | Contents | Stable across turns? |
 | --- | --- | --- |
-| `prefix` | app system prompt, character system prompt, character definition, example dialogue | yes — it changes only when the app or the character is edited |
-| `injections` | world-book entries triggered `BeforeCharacter` / `AfterCharacter` this turn | no — turn-local by nature |
-| `history` | the verbatim transcript | append-only |
-| `suffix` | world-book entries triggered `NearHistory`, the post-history instruction, the current user input | no — turn-local |
+| `prefix` | the prompt block: app system prompt, `BeforeCharacter` world book, character system prompt, character definition, `AfterCharacter` world book, example dialogue | yes, as long as the app prompt, the character and the triggered lore stay put |
+| `history` | the verbatim transcript | append-only apart from compaction |
+| `suffix` | `NearHistory` world book, the post-history instruction, the current user input | no — turn-local by nature |
 
-The world-book injections sit **after** the whole stable prefix rather than straddling the character definition. Injecting between the system prompt and the definition is the reason a turn-activated lore entry used to rewrite the cacheable prefix.
+Each piece of the prompt block sits at **its semantic position**. Moving a `BeforeCharacter` entry after the character definition would have bought a more stable prefix at the cost of changing what the model reads, and a cache miss is a performance cost while prompt semantics are the product. So the block is ordered honestly and the cache consequence is reported instead of designed away.
 
-Turn-local content changing is not a bug, but it is a real cache break and Sujiu says so instead of claiming an append-only request. `PromptPlan::cache_continuity_with(previous)` reports which of the three happened:
+The suffix is the reason a request is not always append-only. In turn 2 the previous turn's near-history, instruction and user message have moved down behind the answer, so request 1 is not a prefix of request 2. That is normal, and it is not hidden.
 
-- `Unchanged` — the request only appended
-- `BrokeAtTurnLocalInjection` — a lore entry started or stopped being triggered
-- `BrokeAtStablePrefix` — the app prompt or the character was edited, or history was rewritten
+`PromptPlan::cache_continuity_with(previous)` judges this on the **real provider-visible message list** — the longest common prefix of the two `model_messages()` sequences, not the internal regions — and reports what happened:
 
-Editing a character *should* invalidate the prefix; hiding that would only make the next cache miss harder to explain.
+- `Unchanged` — the new request is the old one plus appended content
+- `BrokeAtTurnLocalTail` — the block and the transcript are intact; the previous tail was pushed down
+- `BrokeAtWorldBook` — a lore entry started or stopped being triggered inside the block
+- `BrokeAtPromptBlock` — the app prompt or the character was edited
+- `BrokeAtHistory` — the transcript itself was rewritten, which only compaction does
+
+Editing a character *should* invalidate the block; hiding that would only make the next cache miss harder to explain.
 
 ### A turn that fails keeps what already finished
 
@@ -121,6 +124,16 @@ Compaction cuts on turn boundaries. Because a call and its result live in the sa
 
 A second compaction must **not** silently overwrite the first summary. The summarizer receives every archived turn — previously archived ones included — together with the previous summary text, so the caller can produce a cumulative summary or deliberately re-summarize everything it still holds.
 
+`Transcript::compaction_input(keep_recent)` and the FFI's `SujiuRuntime::compaction_input` expose that material directly, and `CompactionInput::to_prompt_text` renders it for a summarizer prompt. Without it a caller can only see the turns being archived *now*, so it has no way to write a cumulative summary and would quietly drop the older half of the conversation. Documenting "must be cumulative" is not enough when the caller cannot see what it must be cumulative over.
+
+### Reasoning is replayed when the endpoint needs it
+
+An assistant step keeps the reasoning it was produced with. Thinking-mode transports such as DeepSeek reject a request whose earlier assistant tool call comes back without the reasoning that produced it, so a step's reasoning has to travel with the assistant message on the next request.
+
+`ModelMessage::AssistantToolCalls` therefore carries an optional provider-neutral `reasoning` sidecar, and `AssistantStep::model_messages()` fills it from the step. The **wire field name** is the adapter's business, decided by a capability flag rather than guessed: `OpenAiCompatConfig::requires_reasoning_content_for_tool_calls`, set from the provider config's `requiresReasoningContentForToolCalls`, emits `reasoning_content` only where the endpoint asked for it.
+
+That flag is also what stops one provider's reasoning metadata from reaching another. An endpoint that never declared the requirement is not sent a field it does not know, and a blank sidecar is dropped rather than sent as an empty string. The reasoning is deliberately left out of the flat text view in `PromptPlan::segments()`, because that text is what the world book is scanned against and private reasoning should not match keywords.
+
 ### Provider continuation state
 
 `ProviderContinuation` is stored with the transcript step that produced it. Two conditions must both hold before it is reused raw:
@@ -130,7 +143,13 @@ A second compaction must **not** silently overwrite the first summary. The summa
 
 Matching only on kind and model is not enough: two OpenAI-compatible gateways can both serve a model called `gpt-4o-mini` and have entirely unrelated conversation state. On any mismatch the runtime falls back to the normalized model transcript and lets the adapter convert.
 
-Continuation is also **chained within a turn**. Round 2 continues from round 1's handle, not from the handle the session had before the turn began. A provider that returns no continuation means "I have nothing to chain", which is not the same as "discard what you had", so the previous handle is carried forward.
+Continuation is also **chained within a turn**. Round 2 continues from round 1's handle, not from the handle the session had before the turn began. What a round says about the handle is a `ContinuationUpdate`, not an `Option`, because "I have nothing to chain" and "that handle is dead" are different answers:
+
+- `Unchanged` — no opinion, keep carrying what was in hand
+- `Clear` — the handle is no longer usable; the next round runs on the transcript alone
+- `Replace(state)` — continue from this handle
+
+`Option<ProviderContinuation>` cannot express `Clear`, so a provider that had just lost the ability to resume would have been handed a dead handle for the rest of the turn.
 
 Chat Completions has no continuation concept, so the adapter records the completion id for reference but marks the state `ContinuationSupport::Unsupported`, which makes it permanently ineligible for replay. The field exists so adapters such as OpenAI Responses, which do have a `previous_response_id`, can use it.
 
@@ -177,12 +196,14 @@ This keeps large lore books and large plugin catalogs outside the prompt unless 
 
 ```text
 App system prompt
+  -> BeforeCharacter world book
+  -> character system prompt
   -> character definition
-  -> deterministically triggered world-book entries
+  -> AfterCharacter world book
   -> example dialogue
-  -> stable prefix        <- unchanged between turns, cacheable
-  -> turn-local injections (world book)
-  -> conversation history <- verbatim transcript, append-only
+  -> prompt block          <- cacheable; each piece at its semantic position
+  -> conversation history  <- verbatim transcript, append-only
+  -> NearHistory world book
   -> post-history instruction
   -> current user input
   -> PromptPlan

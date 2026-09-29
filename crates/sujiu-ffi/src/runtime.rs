@@ -16,8 +16,8 @@ use sujiu_ai::{
     OpenAiCompatProvider, ProviderContinuation, ToolRegistry,
 };
 use sujiu_core::{
-    Character, ChatMessage, ChatRole, ContextKind, ContextRecord, ContextSource, PromptCompiler,
-    ProviderConfig, ProviderIdentity, ProviderKind, Session, Transcript, Turn,
+    Character, ChatMessage, ChatRole, CompactionInput, ContextKind, ContextRecord, ContextSource,
+    PromptCompiler, ProviderConfig, ProviderIdentity, ProviderKind, Session, Transcript, Turn,
     DEFAULT_APP_SYSTEM_PROMPT,
 };
 
@@ -710,10 +710,11 @@ impl SujiuRuntime {
     /// cannot break the tool protocol: it cuts on a turn boundary, keeps the
     /// compacted turns retrievable, and reports whether anything changed.
     ///
-    /// `summary` must be **cumulative**. Every archived turn, including the ones
-    /// archived by an earlier compaction, is passed to the summarizer together
-    /// with the previous summary, because replacing the summary instead of
-    /// extending it silently drops the older half of the conversation.
+    /// `summary` must be **cumulative**: it has to stand in for every archived
+    /// turn, not just the ones this call moves. Get the material to write it from
+    /// [`SujiuRuntime::compaction_input`] — that is what carries the previous
+    /// summary and the already-archived turns, so a caller can actually build one
+    /// instead of being asked to remember what it cannot see.
     pub fn compact_session(
         &self,
         session_id: &str,
@@ -739,6 +740,29 @@ impl SujiuRuntime {
         }
 
         Ok(compacted)
+    }
+
+    /// What a caller has to summarize to compact this session, or `None` when
+    /// nothing is old enough.
+    ///
+    /// This exists so compaction cannot quietly lose the older half of a
+    /// conversation. A layer above that only ever saw the turns being archived
+    /// now has no way to write a summary covering the rest, and would replace
+    /// the existing summary with one that no longer mentions it.
+    pub fn compaction_input(
+        &self,
+        session_id: &str,
+        keep_recent: usize,
+    ) -> Result<Option<CompactionInput>, TurnError> {
+        let inner = self.inner.lock().unwrap();
+        let session = inner
+            .catalog
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| TurnError::SessionNotFound("unknown session".to_string()))?;
+
+        Ok(session.transcript.compaction_input(keep_recent))
     }
 
     /// Run one agent turn, reporting normalized events to `reporter`.
@@ -905,6 +929,16 @@ impl SujiuRuntime {
                     .unwrap_or(DEFAULT_TEMPERATURE),
             ),
             supports_developer_role: false,
+            // Whether the replay of assistant reasoning is a requirement of the
+            // endpoint rather than a preference. It defaults to off because
+            // sending a field a service does not know is worse than omitting
+            // one, and a thinking-mode transport that requires it can declare
+            // it without the adapter guessing.
+            requires_reasoning_content_for_tool_calls: config
+                .extra
+                .get("requiresReasoningContentForToolCalls")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
         });
 
         Ok((

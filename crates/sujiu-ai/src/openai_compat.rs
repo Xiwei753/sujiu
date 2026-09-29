@@ -7,8 +7,8 @@ use serde_json::{json, Value};
 use crate::{
     provider::{AiProvider, ProviderError, StreamSink},
     types::{
-        AssistantTurn, ContinuationSupport, ModelMessage, ModelRole, ProviderContinuation,
-        ProviderIdentity, ProviderRequest, TokenUsage, ToolCall,
+        AssistantTurn, ContinuationSupport, ContinuationUpdate, ModelMessage, ModelRole,
+        ProviderContinuation, ProviderIdentity, ProviderRequest, TokenUsage, ToolCall,
     },
 };
 
@@ -30,6 +30,21 @@ pub struct OpenAiCompatConfig {
     /// Some third-party OpenAI-compatible endpoints do not understand
     /// the newer developer role. Map it to system unless explicitly enabled.
     pub supports_developer_role: bool,
+
+    /// Whether this transport rejects an assistant tool call that comes back
+    /// without the reasoning that produced it.
+    ///
+    /// DeepSeek's thinking mode is the documented case: a multi-round tool
+    /// loop has to replay every previous assistant `reasoning_content`, and the
+    /// API answers 400 when one is missing. Other OpenAI-compatible services
+    /// have no such field, so the reasoning is left out of the wire entirely
+    /// rather than sent under a name that service may not understand.
+    ///
+    /// This is also what keeps one provider's reasoning wire metadata from
+    /// reaching another: the sidecar is stored provider-neutral in the
+    /// transcript, and only a transport that declared the requirement is told
+    /// the field name.
+    pub requires_reasoning_content_for_tool_calls: bool,
 }
 
 impl OpenAiCompatConfig {
@@ -54,6 +69,7 @@ impl OpenAiCompatConfig {
             max_tokens: None,
             temperature: None,
             supports_developer_role: false,
+            requires_reasoning_content_for_tool_calls: false,
         }
     }
 }
@@ -137,7 +153,11 @@ impl OpenAiCompatProvider {
                     "content": content,
                 })
             }
-            ModelMessage::AssistantToolCalls { content, calls } => {
+            ModelMessage::AssistantToolCalls {
+                content,
+                calls,
+                reasoning,
+            } => {
                 let calls = calls
                     .into_iter()
                     .map(|call| {
@@ -152,11 +172,22 @@ impl OpenAiCompatProvider {
                     })
                     .collect::<Vec<_>>();
 
-                json!({
+                let mut message = json!({
                     "role": "assistant",
                     "content": content,
                     "tool_calls": calls,
-                })
+                });
+
+                // Only a transport that asked for it is told the field name.
+                // A blank sidecar is dropped rather than sent as an empty
+                // string, which some gateways treat as a malformed turn.
+                if self.config.requires_reasoning_content_for_tool_calls {
+                    if let Some(reasoning) = reasoning.filter(|value| !value.is_empty()) {
+                        message["reasoning_content"] = json!(reasoning);
+                    }
+                }
+
+                message
             }
             ModelMessage::ToolResult {
                 call_id,
@@ -373,11 +404,12 @@ impl StreamAccumulator {
             //
             // `chat/completions` has no `previous_response_id` and no server
             // side conversation handle: the only way to continue a conversation
-            // on this transport is to resend the transcript. Marking the state
-            // unsupported is what stops the agent loop from replaying this id
-            // to a provider that would not understand it, and stops
-            // `is_reusable_for` from treating the id as a continuation token.
-            continuation: Some(ProviderContinuation {
+            // on this transport is to resend the transcript. Recording the id
+            // as `Unsupported` is what stops `is_reusable_for` from treating it
+            // as a continuation token, and reporting `Unchanged` says this
+            // transport has no opinion about any handle instead of pretending
+            // to have produced one.
+            continuation: ContinuationUpdate::Replace(ProviderContinuation {
                 identity: config.identity.clone(),
                 support: ContinuationSupport::Unsupported,
                 response_id: self.response_id,
@@ -448,7 +480,7 @@ impl AiProvider for OpenAiCompatProvider {
             text: choice.message.content.filter(|text| !text.is_empty()),
             tool_calls,
             finish_reason: choice.finish_reason,
-            continuation: Some(ProviderContinuation {
+            continuation: ContinuationUpdate::Replace(ProviderContinuation {
                 identity: self.config.identity.clone(),
                 // See `StreamAccumulator::finish`: a `chat/completions`
                 // completion id is a label, not a chainable handle.
@@ -656,7 +688,10 @@ mod tests {
         // The completion id is recorded, but not as chainable state. This
         // transport has no way to resume from it, so replaying it would be
         // meaningless and `is_reusable_for` must refuse it.
-        let continuation = turn.continuation.expect("the response id must be kept");
+        let continuation = turn
+            .continuation
+            .produced()
+            .expect("the response id must be kept");
         assert_eq!(continuation.response_id.as_deref(), Some("resp-1"));
         assert_eq!(continuation.identity.model, "model");
         assert_eq!(
@@ -783,6 +818,87 @@ mod tests {
 
         assert_eq!(sink.reasoning, vec!["think".to_string()]);
         assert_eq!(turn.text.as_deref(), Some("answer"));
+    }
+
+    /// A thinking-mode endpoint answers a tool call, and its follow-up request
+    /// has to carry the reasoning back. A transport that never declared the
+    /// requirement must not be handed a field it does not know, so the same
+    /// message encodes two different ways.
+    #[test]
+    fn assistant_reasoning_is_replayed_only_where_the_endpoint_requires_it() {
+        let assistant = ModelMessage::AssistantToolCalls {
+            content: Some("looking it up".into()),
+            calls: vec![ToolCall {
+                id: "call-1".into(),
+                name: "search_context".into(),
+                arguments: json!({"query": "lore"}),
+            }],
+            reasoning: Some("The western tower is the likely place.".into()),
+        };
+
+        let demanding = OpenAiCompatProvider::new(OpenAiCompatConfig {
+            requires_reasoning_content_for_tool_calls: true,
+            ..OpenAiCompatConfig::new("https://example.invalid/v1", "secret", "deepseek-chat")
+        });
+        let indifferent = OpenAiCompatProvider::new(OpenAiCompatConfig::new(
+            "https://example.invalid/v1",
+            "secret",
+            "model",
+        ));
+
+        let request = ProviderRequest {
+            messages: vec![ModelMessage::user("hi"), assistant],
+            ..ProviderRequest::default()
+        };
+
+        let encoded = demanding.request_body(request.clone());
+        let assistant_message = encoded["messages"]
+            .as_array()
+            .expect("messages")
+            .last()
+            .expect("the assistant message is the last one");
+        assert_eq!(
+            assistant_message["reasoning_content"],
+            json!("The western tower is the likely place.")
+        );
+
+        let encoded = indifferent.request_body(request);
+        let assistant_message = encoded["messages"]
+            .as_array()
+            .expect("messages")
+            .last()
+            .expect("the assistant message is the last one");
+        assert!(
+            assistant_message.get("reasoning_content").is_none(),
+            "an endpoint that never asked for it must not receive one: {assistant_message:?}"
+        );
+    }
+
+    /// An empty sidecar is worse than none: a blank reasoning block reads as a
+    /// truncated one.
+    #[test]
+    fn a_blank_reasoning_sidecar_is_not_sent() {
+        let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
+            requires_reasoning_content_for_tool_calls: true,
+            ..OpenAiCompatConfig::new("https://example.invalid/v1", "secret", "deepseek-chat")
+        });
+
+        let request = ProviderRequest {
+            messages: vec![ModelMessage::AssistantToolCalls {
+                content: None,
+                calls: vec![ToolCall {
+                    id: "call-1".into(),
+                    name: "search_context".into(),
+                    arguments: json!({}),
+                }],
+                reasoning: Some(String::new()),
+            }],
+            ..ProviderRequest::default()
+        };
+
+        let encoded = provider.request_body(request);
+        let assistant_message = &encoded["messages"][0];
+        assert!(assistant_message.get("reasoning_content").is_none());
     }
 
     #[test]

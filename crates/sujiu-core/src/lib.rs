@@ -10,9 +10,9 @@ pub mod worldbook;
 pub use character::Character;
 pub use context::{ContextKind, ContextRecord, ContextScope, ContextSource};
 pub use model::{
-    AssistantTurn, ContinuationSupport, ModelMessage, ModelRole, ProviderContinuation,
-    ProviderIdentity, ProviderRequest, TokenUsage, ToolAnnotations, ToolCall, ToolCallState,
-    ToolContent, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
+    AssistantTurn, ContinuationSupport, ContinuationUpdate, ModelMessage, ModelRole,
+    ProviderContinuation, ProviderIdentity, ProviderRequest, TokenUsage, ToolAnnotations, ToolCall,
+    ToolCallState, ToolContent, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
 };
 pub use prompt::{
     CacheContinuity, PromptCompiler, PromptPlan, PromptSegment, PromptSource,
@@ -21,8 +21,9 @@ pub use prompt::{
 pub use provider::{ProviderConfig, ProviderKind};
 pub use session::{ChatMessage, ChatRole, Session};
 pub use transcript::{
-    model_messages_from_transcript, validate_pairing, AssistantStep, CompactedTurns, PairingError,
-    ToolCallRecord, ToolResultRecord, Transcript, Turn, TurnState, UiMessage, UiToolCall,
+    model_messages_from_transcript, validate_pairing, AssistantStep, CompactedTurns,
+    CompactionInput, PairingError, ToolCallRecord, ToolResultRecord, Transcript, Turn, TurnState,
+    UiMessage, UiToolCall,
 };
 pub use worldbook::{WorldBook, WorldBookEntry, WorldBookPosition};
 

@@ -26,6 +26,12 @@ enum Step {
     Text(&'static str),
     /// The model asks for tools, in one step.
     Calls(&'static [(&'static str, &'static str, &'static str)]),
+    /// The model thinks out loud and then asks for tools, which is what a
+    /// thinking-mode endpoint does.
+    ReasoningThenCalls(
+        &'static str,
+        &'static [(&'static str, &'static str, &'static str)],
+    ),
     /// The provider answers with an HTTP error.
     Http(u16),
     /// The provider claims to stream and then sends something that is not a
@@ -114,6 +120,28 @@ fn read_request(stream: &TcpStream) -> Option<String> {
     String::from_utf8(body).ok()
 }
 
+/// Streams a step's tool calls, each split into fragments exactly as a real
+/// stream delivers them, so reassembly is exercised rather than assumed.
+fn write_tool_calls(frames: &mut Vec<String>, calls: &[(&str, &str, &str)]) {
+    for (position, (id, name, arguments)) in calls.iter().enumerate() {
+        frames.push(frame(&json!({"choices": [{"delta": {"tool_calls": [
+            {"index": position, "id": id, "function": {"name": name, "arguments": ""}}
+        ]}}]})));
+        let split = arguments.len() / 2;
+        let head: String = arguments.chars().take(split).collect();
+        let tail: String = arguments.chars().skip(split).collect();
+        frames.push(frame(&json!({"choices": [{"delta": {"tool_calls": [
+            {"index": position, "function": {"arguments": head}}
+        ]}}]})));
+        frames.push(frame(&json!({"choices": [{"delta": {"tool_calls": [
+            {"index": position, "function": {"arguments": tail}}
+        ]}}]})));
+    }
+    frames.push(frame(
+        &json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+    ));
+}
+
 /// Streams one step the way a real provider does, then reports usage so the
 /// runtime can record what a cache read was worth.
 fn write_response(stream: &TcpStream, index: usize, step: &Step) {
@@ -131,27 +159,13 @@ fn write_response(stream: &TcpStream, index: usize, step: &Step) {
                 &json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
             ));
         }
-        Step::Calls(calls) => {
-            for (position, (id, name, arguments)) in calls.iter().enumerate() {
-                // A tool call arrives in fragments, exactly as a real stream
-                // does, so reassembly is exercised too.
-                frames.push(frame(&json!({"choices": [{"delta": {"tool_calls": [
-                    {"index": position, "id": id, "function": {"name": name, "arguments": ""}}
-                ]}}]})));
-                let split = arguments.len() / 2;
-                let head: String = arguments.chars().take(split).collect();
-                let tail: String = arguments.chars().skip(split).collect();
-                frames.push(frame(&json!({"choices": [{"delta": {"tool_calls": [
-                    {"index": position, "function": {"arguments": head}}
-                ]}}]})));
-                frames.push(frame(&json!({"choices": [{"delta": {"tool_calls": [
-                    {"index": position, "function": {"arguments": tail}}
-                ]}}]})));
-            }
+        Step::ReasoningThenCalls(reasoning, calls) => {
             frames.push(frame(
-                &json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+                &json!({"choices": [{"delta": {"reasoning_content": reasoning}}]}),
             ));
+            write_tool_calls(&mut frames, calls);
         }
+        Step::Calls(calls) => write_tool_calls(&mut frames, calls),
     }
 
     frames.push(frame(&json!({
@@ -260,6 +274,31 @@ fn configure(runtime: &SujiuRuntime, base_url: &str, model: &str) {
         .expect("provider config");
 }
 
+/// Points a runtime at an endpoint that declares it needs assistant reasoning
+/// replayed alongside a tool call, which is what a thinking-mode service does.
+fn configure_thinking(runtime: &SujiuRuntime, base_url: &str, model: &str) {
+    runtime
+        .set_provider_config(Some(ProviderConfig {
+            id: "mock".to_string(),
+            name: "Mock".to_string(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+            credential_ref: None,
+            extra: serde_json::from_value(json!({
+                "requiresReasoningContentForToolCalls": true
+            }))
+            .expect("the extra map is a serde value"),
+        }))
+        .expect("provider config");
+}
+
+fn thinking_runtime_for(base_url: &str, model: &str) -> SujiuRuntime {
+    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    configure_thinking(&runtime, base_url, model);
+    runtime
+}
+
 fn run_turn(runtime: &SujiuRuntime, session_id: &str, user_text: &str) -> Recorder {
     let mut recorder = Recorder::default();
     runtime.tokio.block_on(runtime.send_turn(
@@ -338,6 +377,20 @@ fn result_ids(request: &Value) -> Vec<String> {
     tool_results(request)
         .into_iter()
         .map(|(id, _)| id)
+        .collect()
+}
+
+/// The `reasoning_content` of every assistant tool call in a request, in order.
+fn reasoning_of(request: &Value) -> Vec<String> {
+    messages(request)
+        .into_iter()
+        .filter(|message| !tool_call_ids(message).is_empty())
+        .map(|message| {
+            message["reasoning_content"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        })
         .collect()
 }
 
@@ -896,6 +949,158 @@ fn a_second_turn_does_not_rewrite_what_the_first_turn_sent() {
     assert_eq!(
         third["tools"], second["tools"],
         "the tool catalog and its order must stay stable across turns"
+    );
+
+    drop(runtime);
+    drop(provider.server);
+}
+
+/// Thinking-mode endpoints reject a request whose earlier assistant tool call
+/// comes back without the reasoning that produced it, so the reasoning a step
+/// recorded has to be sent again on the next request. Storing it and never
+/// replaying it would fail every such turn at the second round.
+#[test]
+fn the_reasoning_behind_a_tool_call_is_replayed_to_the_next_request() {
+    const THINKING: Step = Step::ReasoningThenCalls(
+        "The console light is a caller, so the context sources come first.",
+        &[("call-1", "search_context", r#"{"query":"blinking light"}"#)],
+    );
+    let provider = ScriptedProvider::start(vec![
+        THINKING,
+        Step::Text("The light is a caller holding the line open."),
+    ]);
+    let runtime = thinking_runtime_for(&provider.base_url(), "deepseek-chat");
+    let session = runtime.create_session(Some("character-lin"));
+
+    run_turn(&runtime, &session, "Why is the console light blinking?");
+    let _ = provider.next_request();
+    let _ = provider.next_request();
+
+    // As in the other tests, the finished turn only enters a request once the
+    // user speaks again.
+    run_turn(&runtime, &session, "So who is on the other end?");
+    let second = provider.next_request();
+
+    assert_eq!(
+        reasoning_of(&second),
+        vec!["The console light is a caller, so the context sources come first.".to_string()],
+        "the reasoning that produced the call must be sent back: {second:?}"
+    );
+
+    drop(runtime);
+    drop(provider.server);
+}
+
+/// The same reasoning, read back out of a persisted session, has to survive.
+#[test]
+fn replayed_reasoning_survives_a_restart() {
+    const THINKING: Step = Step::ReasoningThenCalls(
+        "The old king vanished beneath the western tower.",
+        &[("call-1", "search_context", r#"{"query":"western tower"}"#)],
+    );
+    let provider = ScriptedProvider::start(vec![
+        THINKING,
+        Step::Text("The old king vanished beneath the western tower."),
+    ]);
+
+    let directory = scratch_dir("reasoning-restart");
+    let session;
+    {
+        let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        runtime.use_directory(&directory.to_string_lossy());
+        configure_thinking(&runtime, &provider.base_url(), "deepseek-chat");
+        session = runtime.create_session(Some("character-wen"));
+        run_turn(&runtime, &session, "What happened to the old king?");
+        let _ = provider.next_request();
+        let _ = provider.next_request();
+    }
+
+    {
+        let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        runtime.use_directory(&directory.to_string_lossy());
+        configure_thinking(&runtime, &provider.base_url(), "deepseek-chat");
+        run_turn(&runtime, &session, "Who took the throne?");
+        let second = provider.next_request();
+
+        assert_eq!(
+            reasoning_of(&second),
+            vec!["The old king vanished beneath the western tower.".to_string()],
+            "reasoning read back from a snapshot must still be replayed: {second:?}"
+        );
+    }
+
+    drop(provider.server);
+}
+
+/// A second compaction has to be told about the turns an earlier one archived,
+/// otherwise the new summary cannot mention them and the older half of the
+/// conversation silently leaves the model's view.
+#[test]
+fn a_second_compaction_is_given_the_older_turns_and_the_previous_summary() {
+    const SEARCH_TWO: Step =
+        Step::Calls(&[("call-1", "search_context", r#"{"query":"blinking light"}"#)]);
+    let provider = ScriptedProvider::start(vec![
+        SEARCH_TWO,
+        Step::Text("The light is a caller holding the line."),
+        SEARCH_TWO,
+        Step::Text("The station runs unattended."),
+    ]);
+    let runtime = runtime_for(&provider.base_url(), "mock-model");
+    let session = runtime.create_session(Some("character-lin"));
+
+    run_turn(&runtime, &session, "Why is the light blinking?");
+    for _ in 0..2 {
+        let _ = provider.next_request();
+    }
+    run_turn(&runtime, &session, "Who keeps the shift?");
+    for _ in 0..2 {
+        let _ = provider.next_request();
+    }
+
+    let first_input = runtime
+        .compaction_input(&session, 1)
+        .expect("compaction input")
+        .expect("one turn is old enough to compact");
+    assert_eq!(
+        first_input.previous_summary, "",
+        "nothing has been compacted yet, so there is no earlier summary"
+    );
+    assert_eq!(first_input.turns.len(), 1);
+    assert!(
+        first_input.to_prompt_text().contains("blinking"),
+        "the input is usable as summarizer material: {:?}",
+        first_input.to_prompt_text()
+    );
+
+    assert!(runtime
+        .compact_session(&session, 1, "The light is a caller holding the line.")
+        .expect("compact"));
+
+    // A second compaction must be given the archived turn too, not only the
+    // newly moved one.
+    let second_input = runtime
+        .compaction_input(&session, 0)
+        .expect("compaction input")
+        .expect("the retained turn is now old enough to compact as well");
+    assert_eq!(
+        second_input.previous_summary, "The light is a caller holding the line.",
+        "the summary that already stands in for older turns has to be handed back"
+    );
+    assert_eq!(
+        second_input.turns.len(),
+        2,
+        "both turns a new summary must cover: {:?}",
+        second_input.turns
+    );
+    let prompt_text = second_input.to_prompt_text();
+    assert!(prompt_text.contains("holding the line"), "{prompt_text}");
+    assert!(
+        prompt_text.contains("Who keeps the shift?"),
+        "{prompt_text}"
+    );
+    assert!(
+        prompt_text.contains("The station runs unattended."),
+        "{prompt_text}"
     );
 
     drop(runtime);

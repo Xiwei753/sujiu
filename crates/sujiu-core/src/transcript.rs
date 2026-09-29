@@ -157,6 +157,10 @@ impl AssistantStep {
     /// followed by one `ToolResult` per call, in call order. A call that never
     /// finished still gets a result, because a provider rejects a call with no
     /// result at all.
+    ///
+    /// The step's reasoning travels with the assistant message, so a
+    /// transport that requires it to be replayed can find it. Which wire field
+    /// it belongs in, and whether it is sent at all, is the adapter's call.
     pub fn model_messages(&self) -> Vec<ModelMessage> {
         let mut messages = Vec::new();
 
@@ -172,6 +176,7 @@ impl AssistantStep {
                         arguments: call.arguments.clone(),
                     })
                     .collect(),
+                reasoning: self.reasoning.clone(),
             });
 
             messages.extend(self.tool_calls.iter().map(|call| ModelMessage::ToolResult {
@@ -294,6 +299,50 @@ pub struct CompactedTurns {
     pub summary: String,
 }
 
+/// What a caller must fold into a new summary when it compacts a transcript.
+///
+/// A summary produced from only the turns being archived *now* would drop
+/// everything older out of the model's view, so the input always carries the
+/// previous summary and every turn archived so far.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CompactionInput {
+    /// The summary that already stands in for the archived turns, empty before
+    /// the first compaction.
+    pub previous_summary: String,
+    /// Every turn a new summary has to cover: the already-archived ones first,
+    /// then the ones this compaction would move.
+    pub turns: Vec<Turn>,
+}
+
+impl CompactionInput {
+    /// A plain-text rendering for a summarizer prompt, with the previous summary
+    /// first so the model extends it instead of starting over.
+    pub fn to_prompt_text(&self) -> String {
+        let mut text = String::new();
+
+        if !self.previous_summary.trim().is_empty() {
+            text.push_str("Summary of the conversation so far:\n");
+            text.push_str(self.previous_summary.trim());
+            text.push_str("\n\n");
+        }
+
+        text.push_str("Turns to fold into that summary:\n");
+        for turn in &self.turns {
+            text.push_str("\nUSER: ");
+            text.push_str(turn.user.as_str());
+            for step in turn.steps.iter().filter_map(|step| step.text.as_deref()) {
+                if step.trim().is_empty() {
+                    continue;
+                }
+                text.push_str("\nASSISTANT: ");
+                text.push_str(step.trim());
+            }
+        }
+
+        text
+    }
+}
+
 /// The ordered transcript of a session.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Transcript {
@@ -338,6 +387,36 @@ impl Transcript {
     ///
     /// Returns `false` when there is nothing old enough to compact, which keeps a
     /// caller from rewriting a history that did not need rewriting.
+    /// What a caller has to summarize in order to compact this transcript.
+    ///
+    /// Exposing it matters: an upper layer that only ever sees the turns being
+    /// archived *now* cannot write a summary of the whole compacted history, and
+    /// would silently overwrite the summary that stood in for the older turns.
+    /// The input always carries the previous summary and every already-archived
+    /// turn, so a cumulative summary is something the caller can actually build.
+    pub fn compaction_input(&self, keep_recent: usize) -> Option<CompactionInput> {
+        let keep_from = self.turns.len().saturating_sub(keep_recent);
+        if keep_from == 0 {
+            return None;
+        }
+
+        let mut turns: Vec<Turn> = self
+            .compacted
+            .as_ref()
+            .map(|archived| archived.turns.clone())
+            .unwrap_or_default();
+        turns.extend(self.turns[..keep_from].iter().cloned());
+
+        Some(CompactionInput {
+            previous_summary: self
+                .compacted
+                .as_ref()
+                .map(|archived| archived.summary.clone())
+                .unwrap_or_default(),
+            turns,
+        })
+    }
+
     pub fn compact(
         &mut self,
         keep_recent: usize,

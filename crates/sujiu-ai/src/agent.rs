@@ -201,10 +201,9 @@ impl<'a> AgentRuntime<'a> {
         // The continuation this turn starts from, and the one the most recent
         // round produced. They are the same on the first round.
         //
-        // A round that produces no continuation state does not invalidate the
-        // state the turn started with: `None` from a provider means "I have
-        // nothing to chain", not "discard what you had". So the carried value
-        // is only replaced when a round actually produced one.
+        // What happens in between is the provider's call, not a default:
+        // `ContinuationUpdate` names whether a round replaced the handle, said
+        // nothing, or dropped it, so no round has to guess on its behalf.
         let mut carried = continuation;
 
         for round in 1..=self.config.max_rounds {
@@ -241,14 +240,15 @@ impl<'a> AgentRuntime<'a> {
                 }
             };
 
-            if let Some(produced_continuation) = produced.continuation.clone() {
-                carried = Some(produced_continuation);
-            }
+            // The next round continues from whatever this round said, which is
+            // either a new handle, a dropped one, or no opinion at all. The
+            // three cases are named rather than inferred from an empty value.
+            carried = produced.continuation.apply(carried);
 
             let step = AssistantStep {
                 text: produced.text,
                 reasoning: observed.take_reasoning(),
-                continuation: produced.continuation,
+                continuation: produced.continuation.produced(),
                 usage: produced.usage,
                 finish_reason: produced.finish_reason,
                 ..AssistantStep::default()
@@ -577,7 +577,7 @@ mod tests {
     use crate::{
         provider::AiProvider,
         tool::{Tool, ToolError},
-        types::{AssistantTurn, ContinuationSupport, ProviderIdentity},
+        types::{AssistantTurn, ContinuationSupport, ContinuationUpdate, ProviderIdentity},
     };
 
     struct LoreTool;
@@ -707,13 +707,19 @@ mod tests {
                         arguments: json!({"query": "western tower"}),
                     }],
                     finish_reason: Some("tool_calls".into()),
-                    continuation: Some(chainable(identity.clone(), "round-1")),
+                    continuation: ContinuationUpdate::Replace(chainable(
+                        identity.clone(),
+                        "round-1",
+                    )),
                     ..AssistantTurn::default()
                 },
                 AssistantTurn {
                     text: Some("The old king vanished.".into()),
                     finish_reason: Some("stop".into()),
-                    continuation: Some(chainable(identity.clone(), "round-2")),
+                    continuation: ContinuationUpdate::Replace(chainable(
+                        identity.clone(),
+                        "round-2",
+                    )),
                     ..AssistantTurn::default()
                 },
             ])),
@@ -754,8 +760,8 @@ mod tests {
     }
 
     /// A provider that produces no continuation must not invalidate the handle
-    /// the session already had. `None` means "I have nothing to chain", which
-    /// is a different statement from "forget what you had".
+    /// the session already had. `Unchanged` means "I have nothing to chain",
+    /// which is a different statement from "forget what you had".
     #[tokio::test]
     async fn a_round_without_new_state_keeps_the_previous_handle() {
         let identity = ProviderIdentity {
@@ -775,7 +781,7 @@ mod tests {
                         arguments: json!({"query": "western tower"}),
                     }],
                     finish_reason: Some("tool_calls".into()),
-                    // No continuation of its own.
+                    // `Unchanged`, the default: the provider has no opinion.
                     ..AssistantTurn::default()
                 },
                 AssistantTurn {
@@ -808,6 +814,64 @@ mod tests {
             .as_ref()
             .expect("the handle the session already had is still carried");
         assert_eq!(second.response_id.as_deref(), Some("session-0"));
+    }
+
+    /// A provider that says its handle died must not have the dead handle
+    /// carried into the next round. Under the old `Option` shape this was
+    /// indistinguishable from "nothing to say", so a dead handle was carried.
+    #[tokio::test]
+    async fn a_provider_can_drop_a_handle_it_no_longer_honours() {
+        let identity = ProviderIdentity {
+            kind: sujiu_core::ProviderKind::OpenAiCompatible,
+            provider_id: "primary".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "example-1".into(),
+        };
+
+        let provider = ChainedProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(VecDeque::from([
+                AssistantTurn {
+                    tool_calls: vec![ToolCall {
+                        id: "search-1".into(),
+                        name: "search_context".into(),
+                        arguments: json!({"query": "western tower"}),
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    continuation: ContinuationUpdate::Clear,
+                    ..AssistantTurn::default()
+                },
+                AssistantTurn {
+                    text: Some("The old king vanished.".into()),
+                    finish_reason: Some("stop".into()),
+                    ..AssistantTurn::default()
+                },
+            ])),
+        };
+
+        let store = Arc::new(crate::context::InMemoryContextStore::new());
+        let mut tools = ToolRegistry::new();
+        crate::context::register_standard_context_tools(&mut tools, store);
+
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+        let mut sink = RecordingSink::default();
+
+        runtime
+            .run_streaming(
+                user_message("what happened?"),
+                Some(chainable(identity, "session-0")),
+                "what happened?",
+                &mut sink,
+            )
+            .await;
+
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests[1].continuation.is_none(),
+            "a handle the provider dropped must not be replayed: {:?}",
+            requests[1].continuation
+        );
     }
 
     /// A turn whose first round produced a tool result and whose second round

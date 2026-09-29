@@ -53,6 +53,19 @@ pub enum ModelMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<String>,
         calls: Vec<ToolCall>,
+        /// The reasoning the model produced alongside those calls, kept
+        /// provider-neutral.
+        ///
+        /// Several thinking-mode transports reject a request whose previous
+        /// assistant tool call arrives without the reasoning that produced it,
+        /// so the reasoning has to travel back with the call. It is stored
+        /// here rather than inside the tool call because it belongs to the
+        /// assistant message, and it is emitted as a wire field only by an
+        /// adapter that has been told the transport requires it. An adapter
+        /// that does not know the field leaves it behind instead of guessing
+        /// a name for it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning: Option<String>,
     },
     ToolResult {
         call_id: String,
@@ -315,6 +328,50 @@ impl ContinuationSupport {
     }
 }
 
+/// What a provider's response says should happen to the continuation the next
+/// round will send.
+///
+/// An earlier shape used `Option<ProviderContinuation>` and read "no state" as
+/// "keep what you had", which is a guess: a transport that has just lost the
+/// ability to resume would have been carried a handle that no longer works.
+/// The three cases are named instead, so a provider has to say which one it
+/// means.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationUpdate {
+    /// The provider has no opinion: keep carrying whatever was in hand. A
+    /// transport that simply replays the whole conversation always reports
+    /// this, because it never had a handle to begin with.
+    #[default]
+    Unchanged,
+    /// The handle is no longer usable. The next round continues from the
+    /// normalized transcript alone.
+    Clear,
+    /// Continue from this state.
+    Replace(ProviderContinuation),
+}
+
+impl ContinuationUpdate {
+    /// The state this update produced, if it produced one. `Clear` and
+    /// `Unchanged` both produce nothing; they differ in what the next round
+    /// sends, not in what is stored.
+    pub fn produced(&self) -> Option<ProviderContinuation> {
+        match self {
+            Self::Replace(state) => Some(state.clone()),
+            Self::Unchanged | Self::Clear => None,
+        }
+    }
+
+    /// Apply this update to the handle the next round will carry.
+    pub fn apply(&self, carried: Option<ProviderContinuation>) -> Option<ProviderContinuation> {
+        match self {
+            Self::Unchanged => carried,
+            Self::Clear => None,
+            Self::Replace(state) => Some(state.clone()),
+        }
+    }
+}
+
 /// Provider-specific continuation state for one assistant step.
 ///
 /// This is metadata the provider may need to continue a conversation exactly,
@@ -391,7 +448,7 @@ pub struct AssistantTurn {
     /// travels with the transcript instead of being dropped, so a later turn
     /// can replay it to the same provider and model.
     #[serde(default)]
-    pub continuation: Option<ProviderContinuation>,
+    pub continuation: ContinuationUpdate,
     #[serde(default)]
     pub usage: Option<TokenUsage>,
 }
