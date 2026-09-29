@@ -38,9 +38,11 @@ docs/
 - a hard maximum number of tool rounds
 - keyword-based initial tool selection
 - a deferred `sujiu_search_tools` meta-tool so the model can load a capability without receiving the entire tool catalog
-- a built-in `search_world_book` tool that retrieves only matching lore entries
+- standard `list_context_sources` / `search_context` / `read_context` tools shared by lore, plot history, durable memory, old chats, persona data and notes
 
 The provider-neutral loop is intentionally separate from provider wire formats so Anthropic, Gemini and newer OpenAI transports can reuse the same tool runtime.
+
+See [docs/TOOLS.md](docs/TOOLS.md) for the stable tool/context protocol.
 
 ## Core checks
 
