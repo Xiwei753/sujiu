@@ -321,10 +321,23 @@ Copy is a **UI-layer** concern, and it is the only layer that produces sentences
   detail string for diagnostics, but it must not decide what the user reads.
 - Rust returns keys, codes and enums. It must not format display copy for the
   UI, and an untitled session stays untitled rather than being given a name.
+- When the runtime already has the right string, it passes it through. A tool
+  call is described by the `title` its definition already carries; the runtime
+  does not re-derive one from the tool id, because `search_context` would become
+  "Search Context" and English casing in the runtime cannot be localized.
+
+The same rule runs the other way. **A platform supplies values, not semantics.**
+A settings form that types a base URL, a model and a key hands those three
+fields to presentation; it does not also decide the provider kind, a sampling
+`max_tokens` or a `temperature`. Those are provider semantics, so they live in
+the runtime as defaults that a platform may override through `extra` but never
+has to restate. Otherwise two platforms can configure the same endpoint into two
+different conversations.
 
 The consequence for translators: they edit one JSON file per locale and never
 read ArkTS. The consequence for reviewers: grepping the Rust or presentation
-sources for a user-visible sentence is a bug.
+sources for a user-visible sentence is a bug, and so is grepping a view for a
+provider default.
 
 ---
 

@@ -6,6 +6,7 @@
 //! normalized turn events from `events`, never provider wire formats or tool
 //! internals.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,10 @@ const MAX_TRANSCRIPT_MESSAGES: usize = 200;
 /// A frontend must only offer these. Accepting a kind it cannot serve would let
 /// a user configure a provider and then fail every turn.
 const SUPPORTED_PROVIDER_KINDS: &[ProviderKind] = &[ProviderKind::OpenAiCompatible];
+
+/// Sampling defaults for a turn, overridable per provider through `extra`.
+const DEFAULT_MAX_TOKENS: u32 = 1024;
+const DEFAULT_TEMPERATURE: f32 = 0.8;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -673,16 +678,25 @@ impl SujiuRuntime {
             base_url: config.base_url.clone(),
             api_key,
             model: config.model.clone(),
-            max_tokens: config
-                .extra
-                .get("maxTokens")
-                .and_then(Value::as_u64)
-                .map(|value| value as u32),
-            temperature: config
-                .extra
-                .get("temperature")
-                .and_then(Value::as_f64)
-                .map(|value| value as f32),
+            // Sampling defaults are provider semantics, so they live here and not
+            // in a platform's settings form. A platform may still override them
+            // through `extra`; it just should not have to know the defaults.
+            max_tokens: Some(
+                config
+                    .extra
+                    .get("maxTokens")
+                    .and_then(Value::as_u64)
+                    .map(|value| value as u32)
+                    .unwrap_or(DEFAULT_MAX_TOKENS),
+            ),
+            temperature: Some(
+                config
+                    .extra
+                    .get("temperature")
+                    .and_then(Value::as_f64)
+                    .map(|value| value as f32)
+                    .unwrap_or(DEFAULT_TEMPERATURE),
+            ),
             supports_developer_role: false,
         });
 
@@ -727,13 +741,27 @@ impl SujiuRuntime {
             metadata: serde_json::Map::new(),
         });
 
+        // The tool's own title is the display name the runtime already carries,
+        // so pass it through. Deriving one from the tool id here would both
+        // discard that title and put English casing in the runtime, which is not
+        // where display text belongs.
+        let titles: BTreeMap<String, String> = inner
+            .tools
+            .definitions_for(outcome.tool_results.iter().map(|r| &r.name))
+            .into_iter()
+            .filter_map(|definition| definition.title.map(|title| (definition.name, title)))
+            .collect();
+
         let calls = outcome
             .tool_results
             .iter()
             .map(|result| ToolCallSummary {
                 id: result.call_id.clone(),
                 name: result.name.clone(),
-                title: tool_title(&result.name),
+                title: titles
+                    .get(&result.name)
+                    .cloned()
+                    .unwrap_or_else(|| result.name.clone()),
                 status: if result.output.is_error {
                     "failed".to_string()
                 } else {
@@ -789,19 +817,6 @@ fn provider_kind_label(kind: sujiu_core::ProviderKind) -> String {
         sujiu_core::ProviderKind::Anthropic => "anthropic".to_string(),
         sujiu_core::ProviderKind::Gemini => "gemini".to_string(),
     }
-}
-
-fn tool_title(name: &str) -> String {
-    name.split('_')
-        .map(|word| {
-            let mut chars = word.chars();
-            match chars.next() {
-                Some(first) => format!("{}{}", first.to_uppercase(), chars.as_str()),
-                None => String::new(),
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 /// One short line for a list row, without dragging the whole message along.

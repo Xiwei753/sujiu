@@ -348,27 +348,15 @@ struct Index {
   }
 
   /**
-   * Builds the description from the form, keeps the only supported kind, and
-   * hands the key to the presentation layer rather than storing it here.
+   * Hands the typed fields to presentation and clears the secret field. The
+   * view supplies no provider semantics: the kind comes from the runtime's own
+   * list and sampling defaults are the runtime's, so a settings form here
+   * cannot disagree with how a turn is actually driven.
    */
   private saveProvider(): void {
-    const kind: string =
-      this.controller.providerKinds.length > 0 ? this.controller.providerKinds[0] : '';
-    const baseUrl: string = this.providerBaseUrl.trim();
-    const model: string = this.providerModel.trim();
-    if (kind.length === 0 || baseUrl.length === 0 || model.length === 0) {
-      return;
-    }
-    this.controller.saveProvider(
-      {
-        id: 'provider-default',
-        name: model,
-        kind: kind,
-        baseUrl: baseUrl,
-        model: model,
-        maxTokens: 1024,
-        temperature: 0.8
-      } as ProviderDraft,
+    this.controller.saveProviderFromForm(
+      this.providerBaseUrl.trim(),
+      this.providerModel.trim(),
       this.providerKey.trim()
     );
     this.providerKey = '';

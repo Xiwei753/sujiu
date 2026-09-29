@@ -290,6 +290,21 @@ fn a_turn_streams_text_after_a_streamed_tool_call() {
         "the assistant reply must be kept in the session"
     );
 
+    // The recorded call carries the title the tool itself defines. The runtime
+    // must not re-derive one from the tool id: `search_context` would come back
+    // as "Search Context", which discards the curated name and puts English
+    // casing in the runtime, where display text does not belong.
+    let call = state
+        .messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .find(|call| call.name == "search_context")
+        .expect("the tool call was recorded");
+    assert_eq!(
+        call.title, "Search context",
+        "the tool's own title must pass through unchanged"
+    );
+
     drop(runtime);
     drop(provider.server);
 }

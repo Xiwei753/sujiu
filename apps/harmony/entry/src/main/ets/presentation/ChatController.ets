@@ -174,6 +174,26 @@ export class ChatController {
   }
 
   /**
+   * Turns the three fields a settings form actually collects into a provider
+   * description. Everything else is decided here rather than by the view: the
+   * kind must be one the runtime advertised, and sampling parameters are
+   * provider semantics the runtime already defaults, so the form cannot set
+   * values that disagree with how a turn really runs.
+   */
+  async saveProviderFromForm(baseUrl: string, model: string, secret: string): Promise<void> {
+    if (this.providerKinds.length === 0 || baseUrl.length === 0 || model.length === 0) {
+      return;
+    }
+    await this.saveProvider({
+      id: 'provider-default',
+      name: model,
+      kind: this.providerKinds[0],
+      baseUrl: baseUrl,
+      model: model
+    } as ProviderDraft, secret);
+  }
+
+  /**
    * Saves a provider description and, when given, the api key. The description
    * goes to the runtime; the key goes to the credential service. An unsupported
    * kind fails here instead of at the first turn.

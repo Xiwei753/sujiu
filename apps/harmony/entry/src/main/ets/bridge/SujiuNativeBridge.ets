@@ -75,8 +75,8 @@ interface NativeProviderConfig {
   kind: string;
   baseUrl: string;
   model: string;
-  maxTokens: number;
-  temperature: number;
+  maxTokens?: number;
+  temperature?: number;
 }
 
 interface NativeTurnRequest {

@@ -95,8 +95,13 @@ export interface ProviderDraft {
   kind: string;
   baseUrl: string;
   model: string;
-  maxTokens: number;
-  temperature: number;
+  /**
+   * Optional sampling overrides. Left out, the runtime applies its own defaults,
+   * so a platform does not have to restate provider semantics to describe an
+   * endpoint.
+   */
+  maxTokens?: number;
+  temperature?: number;
 }
 
 export interface SujiuBridge {
