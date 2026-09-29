@@ -26,6 +26,11 @@ enum Step {
     Text(&'static str),
     /// The model asks for tools, in one step.
     Calls(&'static [(&'static str, &'static str, &'static str)]),
+    /// The provider answers with an HTTP error.
+    Http(u16),
+    /// The provider claims to stream and then sends something that is not a
+    /// stream at all, which is how a proxy failure usually shows up.
+    Garbage,
 }
 
 struct ScriptedProvider {
@@ -62,7 +67,11 @@ impl ScriptedProvider {
                     .clone();
                 served += 1;
 
-                write_response(&stream, served, &step);
+                match step {
+                    Step::Http(status) => write_http_error(&stream, status),
+                    Step::Garbage => write_garbage(&stream),
+                    answer => write_response(&stream, served, &answer),
+                }
             }
         });
 
@@ -111,6 +120,9 @@ fn write_response(stream: &TcpStream, index: usize, step: &Step) {
     let mut frames: Vec<String> = Vec::new();
 
     match step {
+        // The failure steps never reach here: the server matches on them first
+        // and answers with something that is not a stream.
+        Step::Http(_) | Step::Garbage => return,
         Step::Text(text) => {
             for word in text.split_inclusive(' ') {
                 frames.push(frame(&json!({"choices": [{"delta": {"content": word}}]})));
@@ -163,6 +175,29 @@ fn write_response(stream: &TcpStream, index: usize, step: &Step) {
         body.len(),
         body
     );
+    let mut writer = stream;
+    let _ = writer.write_all(response.as_bytes());
+    let _ = writer.flush();
+}
+
+/// An ordinary provider-level failure, the kind a gateway returns when a
+/// request is too large, rate limited, or simply broken.
+fn write_http_error(stream: &TcpStream, status: u16) {
+    let body =
+        json!({"error": {"message": "upstream is unwell", "type": "server_error"}}).to_string();
+    let response = format!(
+        "HTTP/1.1 {status} Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let mut writer = stream;
+    let _ = writer.write_all(response.as_bytes());
+    let _ = writer.flush();
+}
+
+/// A stream that stops being one half way through, which is what a dropped
+/// connection looks like from the client side.
+fn write_garbage(stream: &TcpStream) {
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 64\r\nConnection: close\r\n\r\nthis is not an event stream at all, not even close\r\n";
     let mut writer = stream;
     let _ = writer.write_all(response.as_bytes());
     let _ = writer.flush();
@@ -477,6 +512,107 @@ fn a_tool_error_is_still_paired_with_its_call() {
 
     drop(runtime);
     drop(provider.server);
+}
+
+/// A turn whose tool round succeeded and whose next round hit an HTTP error is
+/// the exact case that used to lose the whole turn. The call and its result
+/// already reached the model, so dropping them would leave the next request
+/// inconsistent with what the model has seen.
+#[test]
+fn a_provider_error_keeps_the_tool_round_that_already_succeeded() {
+    for (label, failure) in [("http 500", Step::Http(500)), ("garbage", Step::Garbage)] {
+        let provider = ScriptedProvider::start(vec![SEARCH, failure]);
+        let runtime = runtime_for(&provider.base_url(), "mock-model");
+        let session = runtime.create_session(Some("character-lin"));
+
+        let recorder = run_turn(&runtime, &session, "Why is the light blinking?");
+        let _ = provider.next_request();
+
+        // The platform is told the turn failed, rather than being left hanging.
+        assert!(
+            recorder
+                .events
+                .iter()
+                .any(|event| event.kind == TurnEventKind::TurnFailed),
+            "{label}: a failed turn must still be reported to the platform"
+        );
+
+        // The completed tool round is committed.
+        let state = runtime.conversation_state(&session).expect("state");
+        let assistant = state
+            .messages
+            .iter()
+            .find(|message| !message.tool_calls.is_empty())
+            .unwrap_or_else(|| panic!("{label}: the tool round must be kept: {state:?}"));
+        assert_eq!(assistant.tool_calls[0].id, "call-1", "{label}");
+        assert_eq!(assistant.tool_calls[0].status, "completed", "{label}");
+        assert!(!assistant.tool_calls[0].is_error, "{label}");
+
+        // And the next turn still pairs that call with its result.
+        run_turn(&runtime, &session, "Try again.");
+        let next = provider.next_request();
+        assert_eq!(
+            result_ids(&next),
+            vec!["call-1"],
+            "{label}: the next request must still pair the call with its result"
+        );
+
+        drop(runtime);
+        drop(provider.server);
+    }
+}
+
+/// The same failure, but across a restart: the committed tool round has to
+/// survive being written to disk, not just living in memory. A turn that
+/// failed mid-loop is exactly the one most likely to be thrown away by a
+/// naive "only persist successful turns" rule, so it is the one worth
+/// reopening the app to check.
+#[test]
+fn a_turn_that_failed_mid_loop_still_survives_a_restart() {
+    let directory = scratch_dir("failed-turn-restart");
+    let path = directory.to_string_lossy().to_string();
+    let session;
+
+    {
+        let provider = ScriptedProvider::start(vec![SEARCH, Step::Http(503)]);
+        let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        runtime.use_directory(&path).expect("directory");
+        configure(&runtime, &provider.base_url(), "mock-model");
+        session = runtime.create_session(Some("character-lin"));
+
+        run_turn(&runtime, &session, "Why is the light blinking?");
+        let _ = provider.next_request();
+    }
+
+    // A brand new runtime, reading the same directory from disk.
+    {
+        let provider = ScriptedProvider::start(vec![Step::Text("Still here.")]);
+        let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        runtime.use_directory(&path).expect("reopen");
+        configure(&runtime, &provider.base_url(), "mock-model");
+
+        let restored = runtime
+            .conversation_state(&session)
+            .expect("the session is restored");
+        let assistant = restored
+            .messages
+            .iter()
+            .find(|message| !message.tool_calls.is_empty())
+            .unwrap_or_else(|| panic!("the committed call must survive the restart: {restored:?}"));
+        assert_eq!(assistant.tool_calls[0].id, "call-1");
+        assert_eq!(assistant.tool_calls[0].status, "completed");
+
+        run_turn(&runtime, &session, "Try again.");
+        let after = provider.next_request();
+        assert_eq!(
+            result_ids(&after),
+            vec!["call-1"],
+            "the next request must still pair the restored call with its result"
+        );
+
+        drop(runtime);
+        drop(provider.server);
+    }
 }
 
 #[test]

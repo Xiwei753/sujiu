@@ -48,7 +48,7 @@ It owns:
 
 The runtime accepts zero, one or multiple tool calls from a model turn, executes client-owned tools in Rust, appends tool results to the transcript and asks the provider to continue until a final assistant response is produced or the configured round limit is reached.
 
-A turn that runs out of rounds or gets cancelled still returns what it produced. The loop reports how it stopped (`AgentStop::Completed`, `Cancelled`, `MaxRounds`) and hands back a complete `Turn`, because discarding a partial turn would drop steps the model actually saw.
+A turn that runs out of rounds, gets cancelled, or hits a provider error still returns what it produced. The loop reports how it stopped — `AgentStop::Completed`, `Cancelled`, `MaxRounds(n)` or `Failed(reason)` — and hands back a complete `Turn`. There is deliberately no error-only return path: every exit has a transcript, because discarding a partial turn drops steps the model actually saw.
 
 ## Conversation transcript
 
@@ -82,23 +82,57 @@ A call the runtime never got to run is stored with an explicit state — `Comple
 
 `validate_pairing` still exists as a last check against a corrupted snapshot: duplicate call ids and calls with neither text nor structured content are rejected.
 
-### History is append-only
+### History is append-only, and a cache break is declared rather than hidden
 
 Apart from explicit compaction, anything already sent to the model stays exactly as it was and new content is appended at the tail. Rewriting old history costs prompt-cache prefix hits and risks breaking call/result correspondence.
 
-`PromptPlan` reflects this: it is split into a stable `prefix`, a verbatim `history` of model messages, and a `suffix` holding the post-history instruction and the current user input.
+`PromptPlan` has four regions, because "the prefix" is not one thing:
+
+| Region | Contents | Stable across turns? |
+| --- | --- | --- |
+| `prefix` | app system prompt, character system prompt, character definition, example dialogue | yes — it changes only when the app or the character is edited |
+| `injections` | world-book entries triggered `BeforeCharacter` / `AfterCharacter` this turn | no — turn-local by nature |
+| `history` | the verbatim transcript | append-only |
+| `suffix` | world-book entries triggered `NearHistory`, the post-history instruction, the current user input | no — turn-local |
+
+The world-book injections sit **after** the whole stable prefix rather than straddling the character definition. Injecting between the system prompt and the definition is the reason a turn-activated lore entry used to rewrite the cacheable prefix.
+
+Turn-local content changing is not a bug, but it is a real cache break and Sujiu says so instead of claiming an append-only request. `PromptPlan::cache_continuity_with(previous)` reports which of the three happened:
+
+- `Unchanged` — the request only appended
+- `BrokeAtTurnLocalInjection` — a lore entry started or stopped being triggered
+- `BrokeAtStablePrefix` — the app prompt or the character was edited, or history was rewritten
+
+Editing a character *should* invalidate the prefix; hiding that would only make the next cache miss harder to explain.
+
+### A turn that fails keeps what already finished
+
+A provider failure is not a reason to discard the turn. If round 1 produced a tool call whose result the model has already seen, and round 2 hits an HTTP error or a broken stream, those completed rounds stay in the transcript and the turn is committed as `Failed`. The failure reason is reported separately to the platform as a `turn_failed` event.
+
+Throwing the turn away would leave the next request either missing the call or sending it without a matching result.
+
+This is why the agent loop reports how it stopped rather than returning an error: `AgentStop::Completed`, `Cancelled`, `MaxRounds(n)` and `Failed(reason)` all carry a transcript. There is no error path left that has no return value to commit.
 
 ### Compaction
 
 Long sessions are not solved by appending forever. `Transcript::compact` moves the oldest turns into a `CompactedTurns` record and replaces them with a summary. Moved turns are kept, not deleted, so exact older detail stays retrievable through the context protocol.
 
-Compaction cuts on turn boundaries. Because a call and its result live in the same turn, a cut cannot split a pair.
+Compaction cuts on turn boundaries. Because a call and its result live in the same turn, a cut cannot split a pair. Turn ids stay unique across the archive as well as the live turns, since they key the UI bubbles.
+
+A second compaction must **not** silently overwrite the first summary. The summarizer receives every archived turn — previously archived ones included — together with the previous summary text, so the caller can produce a cumulative summary or deliberately re-summarize everything it still holds.
 
 ### Provider continuation state
 
-`ProviderContinuation` is stored with the transcript step that produced it and is only reused raw when the provider **and** the model both match. On a provider or model switch, the runtime falls back to the normalized model transcript and lets the adapter convert.
+`ProviderContinuation` is stored with the transcript step that produced it. Two conditions must both hold before it is reused raw:
 
-Adapters that have no place for continuation state in their wire format (Chat Completions, for example) simply never send it; the field exists so adapters such as OpenAI Responses can use it.
+- `ContinuationSupport::is_chainable()` — the transport really has a continuation handle
+- the `ProviderIdentity` matches: same kind, same provider config id, same base URL, same model
+
+Matching only on kind and model is not enough: two OpenAI-compatible gateways can both serve a model called `gpt-4o-mini` and have entirely unrelated conversation state. On any mismatch the runtime falls back to the normalized model transcript and lets the adapter convert.
+
+Continuation is also **chained within a turn**. Round 2 continues from round 1's handle, not from the handle the session had before the turn began. A provider that returns no continuation means "I have nothing to chain", which is not the same as "discard what you had", so the previous handle is carried forward.
+
+Chat Completions has no continuation concept, so the adapter records the completion id for reference but marks the state `ContinuationSupport::Unsupported`, which makes it permanently ineligible for replay. The field exists so adapters such as OpenAI Responses, which do have a `previous_response_id`, can use it.
 
 ### 4. sujiu-ffi
 
@@ -147,6 +181,7 @@ App system prompt
   -> deterministically triggered world-book entries
   -> example dialogue
   -> stable prefix        <- unchanged between turns, cacheable
+  -> turn-local injections (world book)
   -> conversation history <- verbatim transcript, append-only
   -> post-history instruction
   -> current user input
@@ -159,7 +194,7 @@ App system prompt
 
 `priority` means client-side retention/ordering priority. It is not presented as a magic model attention weight.
 
-Prompt caching is a design goal, so the prefix and the tool definition order stay stable, and a turn only ever appends. See [Conversation transcript](#conversation-transcript).
+Prompt caching is a design goal: the stable prefix is unchanged between turns, and an ordinary turn only appends. Where a turn genuinely cannot append — a newly triggered world-book entry, an edited character, a tool-discovery reload that changes which tool schemas are sent — that is a cache break and is declared as one, not papered over. See [Conversation transcript](#conversation-transcript).
 
 ## Tool catalog
 
@@ -175,6 +210,8 @@ A tool contains:
 The local discovery keywords are **not** sent as model weights. They are only a cheap selector for which schemas deserve context space.
 
 If keyword selection is insufficient, `sujiu_search_tools` lets the model search the deferred catalog without exposing every tool up front.
+
+Deferred discovery has a prompt-cache cost worth stating plainly: when a search makes more schemas visible, the tool definition block changes, and that invalidates the cache from that point on. That is an explicit cache break in exchange for not shipping the whole catalog every turn, which is the trade Sujiu makes on purpose. Tool definition **order** otherwise stays stable, so a catalog that does not change produces an identical block.
 
 ## Provider boundary
 

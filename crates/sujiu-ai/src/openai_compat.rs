@@ -4,13 +4,11 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use sujiu_core::ProviderKind;
-
 use crate::{
     provider::{AiProvider, ProviderError, StreamSink},
     types::{
-        AssistantTurn, ModelMessage, ModelRole, ProviderContinuation, ProviderRequest, TokenUsage,
-        ToolCall,
+        AssistantTurn, ContinuationSupport, ModelMessage, ModelRole, ProviderContinuation,
+        ProviderIdentity, ProviderRequest, TokenUsage, ToolCall,
     },
 };
 
@@ -21,6 +19,13 @@ pub struct OpenAiCompatConfig {
     pub model: String,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
+
+    /// Which endpoint and model this provider talks to.
+    ///
+    /// The adapter stamps it into every continuation state it produces, so the
+    /// transcript can later tell "same endpoint, same model" from "a different
+    /// OpenAI-compatible service that happens to use the same model name".
+    pub identity: ProviderIdentity,
 
     /// Some third-party OpenAI-compatible endpoints do not understand
     /// the newer developer role. Map it to system unless explicitly enabled.
@@ -33,10 +38,19 @@ impl OpenAiCompatConfig {
         api_key: impl Into<String>,
         model: impl Into<String>,
     ) -> Self {
+        let base_url = base_url.into();
+        let model = model.into();
+
         Self {
-            base_url: base_url.into(),
+            identity: ProviderIdentity {
+                kind: sujiu_core::ProviderKind::OpenAiCompatible,
+                provider_id: String::new(),
+                base_url: base_url.clone(),
+                model: model.clone(),
+            },
+            base_url,
             api_key: api_key.into(),
-            model: model.into(),
+            model,
             max_tokens: None,
             temperature: None,
             supports_developer_role: false,
@@ -355,12 +369,17 @@ impl StreamAccumulator {
             text: (!self.text.is_empty()).then_some(self.text),
             tool_calls,
             finish_reason: self.finish_reason,
-            // The response id is kept as continuation state, tied to the
-            // provider and model that produced it, so the transcript can decide
-            // later whether it may be replayed.
+            // The completion id is recorded, but it is not chainable state.
+            //
+            // `chat/completions` has no `previous_response_id` and no server
+            // side conversation handle: the only way to continue a conversation
+            // on this transport is to resend the transcript. Marking the state
+            // unsupported is what stops the agent loop from replaying this id
+            // to a provider that would not understand it, and stops
+            // `is_reusable_for` from treating the id as a continuation token.
             continuation: Some(ProviderContinuation {
-                provider_kind: ProviderKind::OpenAiCompatible,
-                model: config.model.clone(),
+                identity: config.identity.clone(),
+                support: ContinuationSupport::Unsupported,
                 response_id: self.response_id,
                 state: Default::default(),
             }),
@@ -430,8 +449,10 @@ impl AiProvider for OpenAiCompatProvider {
             tool_calls,
             finish_reason: choice.finish_reason,
             continuation: Some(ProviderContinuation {
-                provider_kind: ProviderKind::OpenAiCompatible,
-                model: self.config.model.clone(),
+                identity: self.config.identity.clone(),
+                // See `StreamAccumulator::finish`: a `chat/completions`
+                // completion id is a label, not a chainable handle.
+                support: ContinuationSupport::Unsupported,
                 response_id: response.id,
                 state: Default::default(),
             }),
@@ -632,13 +653,18 @@ mod tests {
         assert_eq!(turn.finish_reason.as_deref(), Some("stop"));
         assert!(turn.tool_calls.is_empty());
 
-        // The response id is kept as continuation state, tagged with the model
-        // that produced it, so the transcript can decide later whether a
-        // different provider may replay it.
+        // The completion id is recorded, but not as chainable state. This
+        // transport has no way to resume from it, so replaying it would be
+        // meaningless and `is_reusable_for` must refuse it.
         let continuation = turn.continuation.expect("the response id must be kept");
         assert_eq!(continuation.response_id.as_deref(), Some("resp-1"));
-        assert_eq!(continuation.model, "model");
-        assert_eq!(continuation.provider_kind, ProviderKind::OpenAiCompatible);
+        assert_eq!(continuation.identity.model, "model");
+        assert_eq!(
+            continuation.identity.kind,
+            sujiu_core::ProviderKind::OpenAiCompatible
+        );
+        assert!(!continuation.support.is_chainable());
+        assert!(!continuation.is_reusable_for(&continuation.identity));
     }
 
     #[test]
@@ -685,8 +711,13 @@ mod tests {
         let body = provider.request_body(ProviderRequest {
             messages: vec![ModelMessage::user("hi")],
             continuation: Some(ProviderContinuation {
-                provider_kind: ProviderKind::Anthropic,
-                model: "other".into(),
+                identity: ProviderIdentity {
+                    kind: sujiu_core::ProviderKind::Anthropic,
+                    provider_id: "other".into(),
+                    base_url: "https://other.invalid".into(),
+                    model: "other".into(),
+                },
+                support: ContinuationSupport::ResponseId,
                 response_id: Some("resp_1".into()),
                 state: Default::default(),
             }),

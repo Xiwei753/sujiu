@@ -272,17 +272,65 @@ impl ToolCallState {
     }
 }
 
+/// Which provider produced something, in enough detail to tell two endpoints
+/// apart.
+///
+/// Provider kind and model are not enough. Two OpenAI-compatible gateways can
+/// serve the same model name while being entirely different providers, and
+/// replaying one provider's state to the other is exactly the kind of mistake
+/// that is only discovered in production.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProviderIdentity {
+    pub kind: ProviderKind,
+    /// The configured provider id.
+    #[serde(default)]
+    pub provider_id: String,
+    /// The endpoint the request is sent to.
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub model: String,
+}
+
+/// Whether a wire format can resume from provider state at all.
+///
+/// A transport that replays the whole conversation every time has nothing to
+/// resume from, even though it still reports a response id. Recording that id
+/// as a continuation token invites the next adapter to send it somewhere it
+/// means nothing, so the capability is stated instead of implied.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContinuationSupport {
+    /// The wire format has no continuation token. The normalized transcript is
+    /// the only way to continue, and any recorded id is metadata, not state.
+    #[default]
+    Unsupported,
+    /// `response_id` is a real continuation token for this protocol.
+    ResponseId,
+}
+
+impl ContinuationSupport {
+    pub fn is_chainable(self) -> bool {
+        matches!(self, Self::ResponseId)
+    }
+}
+
 /// Provider-specific continuation state for one assistant step.
 ///
 /// This is metadata the provider may need to continue a conversation exactly,
 /// such as a response item id or an encrypted reasoning block. It is only
-/// meaningful to the provider and model that produced it, so reuse requires an
-/// exact kind and model match; otherwise the runtime falls back to the
-/// normalized transcript.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+/// meaningful to the provider that produced it, so reuse requires an exact
+/// [`ProviderIdentity`] match *and* a transport that can actually resume from
+/// it; otherwise the runtime falls back to the normalized transcript.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct ProviderContinuation {
-    pub provider_kind: ProviderKind,
-    pub model: String,
+    /// Defaults to an empty identity, which never matches a real provider, so
+    /// state written before identities were recorded degrades to "not
+    /// reusable" instead of being replayed to the wrong endpoint.
+    #[serde(default)]
+    pub identity: ProviderIdentity,
+    #[serde(default)]
+    pub support: ContinuationSupport,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_id: Option<String>,
     /// Opaque provider items, kept verbatim so nothing is lost.
@@ -291,9 +339,9 @@ pub struct ProviderContinuation {
 }
 
 impl ProviderContinuation {
-    /// Whether this state may be replayed to `kind`/`model` unchanged.
-    pub fn is_reusable_for(&self, kind: ProviderKind, model: &str) -> bool {
-        self.provider_kind == kind && self.model == model
+    /// Whether this state may be replayed to `identity` unchanged.
+    pub fn is_reusable_for(&self, identity: &ProviderIdentity) -> bool {
+        self.support.is_chainable() && &self.identity == identity
     }
 }
 

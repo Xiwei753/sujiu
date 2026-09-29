@@ -5,7 +5,7 @@
 //! transcript and the messages sent to a provider can never drift apart.
 
 pub use sujiu_core::model::{
-    messages_from_prompt_plan, AssistantTurn, ModelMessage, ModelRole, ProviderContinuation,
-    ProviderRequest, TokenUsage, ToolAnnotations, ToolCall, ToolCallState, ToolContent,
-    ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
+    messages_from_prompt_plan, AssistantTurn, ContinuationSupport, ModelMessage, ModelRole,
+    ProviderContinuation, ProviderIdentity, ProviderRequest, TokenUsage, ToolAnnotations, ToolCall,
+    ToolCallState, ToolContent, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
 };

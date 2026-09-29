@@ -664,9 +664,11 @@ Rules:
 - history is append-only. Apart from explicit compaction or context editing, anything already sent to the model stays byte-for-byte; new content is appended at the tail
 - a tool call and its tool result are one atomic pair. No trimming, compaction, or migration may leave a call without a result, a result with no matching call id, reordered calls, or a deleted interrupted call
 - interruption and cancellation must be recorded as an explicit interrupted/cancelled tool result, not by discarding the partial transcript
-- provider continuation state may be reused raw only when the provider **and** model match. Otherwise fall back to the normalized model transcript and let the adapter convert
+- provider continuation state may be reused raw only when the transport actually supports chaining **and** the full provider identity matches (kind, config id, endpoint, model). Kind plus model name is not enough: two OpenAI-compatible gateways can serve the same model name with unrelated state. Otherwise fall back to the normalized model transcript and let the adapter convert
+- continuation advances within a turn. Each round continues from the previous round's handle, not from the one the session had before the turn. A provider returning none means "nothing to chain", not "discard what you had"
 - reasoning metadata is kept separate from ordinary visible assistant text
-- prompt cache is a design goal: stable system/developer prefix, stable tool definitions and order, unchanged history prefix, new content appended at the tail. Do not rewrite or drop already-sent steps just to make the stored history "look clean" or to make the UI show only the final answer
+- prompt cache is a design goal: a session-stable system/character prefix, a verbatim history, and new content appended at the tail. Turn-local content (world-book entries, post-history instructions) is expected to vary; when it does, declare it as a cache break instead of calling the request append-only. Do not rewrite or drop already-sent steps just to make the stored history "look clean" or to make the UI show only the final answer
+- a turn that stops for any reason still returns its transcript. Completion, cancellation, exhausted rounds and provider errors all commit what already finished, because those steps contain tool calls whose results the next request must repeat. Report the reason separately; do not use an error return to throw a partial turn away
 
 The stored session must be the transcript itself, not a derived text projection. When persisting a turn, keep every assistant step, tool call, and tool result that the model actually saw.
 

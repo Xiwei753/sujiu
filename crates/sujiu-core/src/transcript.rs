@@ -23,7 +23,7 @@ use serde_json::Value;
 
 use crate::{
     model::{ModelMessage, ToolCall, ToolCallState, ToolContent, ToolOutput},
-    ChatRole, ProviderKind,
+    ChatRole,
 };
 
 /// Why a turn stopped.
@@ -330,16 +330,37 @@ impl Transcript {
     /// state leaves the prompt with them: a provider must not be asked to resume
     /// from turns the model can no longer see.
     ///
+    /// The summarizer is handed *every* archived turn plus the summary that
+    /// already stood in for them, so a second compaction can produce a summary
+    /// of the whole compacted history. Overwriting the previous summary with a
+    /// summary of only the newly archived turns would silently drop everything
+    /// older out of the model's view.
+    ///
     /// Returns `false` when there is nothing old enough to compact, which keeps a
     /// caller from rewriting a history that did not need rewriting.
-    pub fn compact(&mut self, keep_recent: usize, summary: impl FnOnce(&[Turn]) -> String) -> bool {
+    pub fn compact(
+        &mut self,
+        keep_recent: usize,
+        summarize: impl FnOnce(&[Turn], &str) -> String,
+    ) -> bool {
         let keep_from = self.turns.len().saturating_sub(keep_recent);
         if keep_from == 0 {
             return false;
         }
 
-        let summary = summary(&self.turns[..keep_from]);
         let moved: Vec<Turn> = self.turns.drain(..keep_from).collect();
+        let mut to_summarize: Vec<Turn> = self
+            .compacted
+            .as_ref()
+            .map(|archived| archived.turns.clone())
+            .unwrap_or_default();
+        to_summarize.extend(moved.iter().cloned());
+        let previous_summary = self
+            .compacted
+            .as_ref()
+            .map(|archived| archived.summary.clone())
+            .unwrap_or_default();
+        let summary = summarize(&to_summarize, &previous_summary);
 
         let archived = self.compacted.get_or_insert_with(CompactedTurns::default);
         archived.turns.extend(moved);
@@ -364,21 +385,35 @@ impl Transcript {
             .join("\n")
     }
 
-    /// Continuation state that may be replayed to `kind`/`model` as is.
+    /// Continuation state that may be replayed to `identity` as is.
     ///
-    /// Returns `None` after a provider or model switch, which is what makes
-    /// the runtime fall back to the normalized transcript instead of sending
-    /// another provider's state.
+    /// Returns `None` after a provider, endpoint or model switch, and `None`
+    /// for a transport that cannot resume from provider state at all. Either
+    /// way the runtime falls back to the normalized transcript instead of
+    /// sending state the provider never asked for.
     pub fn continuation_for(
         &self,
-        kind: ProviderKind,
-        model: &str,
+        identity: &crate::model::ProviderIdentity,
     ) -> Option<&crate::model::ProviderContinuation> {
         self.turns
             .iter()
             .rev()
             .find_map(Turn::continuation)
-            .filter(|continuation| continuation.is_reusable_for(kind, model))
+            .filter(|continuation| continuation.is_reusable_for(identity))
+    }
+
+    /// Every turn id in the session, including compacted ones.
+    ///
+    /// An id has to stay unique across the whole session, not just across the
+    /// turns that are still in the prompt, or a new turn could be handed an id
+    /// that an archived turn already owns.
+    pub fn turn_ids(&self) -> impl Iterator<Item = &str> {
+        self.turns.iter().map(|turn| turn.id.as_str()).chain(
+            self.compacted
+                .iter()
+                .flat_map(|archived| archived.turns.iter())
+                .map(|turn| turn.id.as_str()),
+        )
     }
 
     /// Every tool call id in the transcript, in order.
@@ -495,7 +530,10 @@ impl std::error::Error for PairingError {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ProviderContinuation, ToolOutput};
+    use crate::{
+        model::{ContinuationSupport, ProviderContinuation, ProviderIdentity, ToolOutput},
+        ProviderKind,
+    };
     use serde_json::json;
 
     fn call(id: &str, name: &str) -> ToolCallRecord {
@@ -556,12 +594,31 @@ mod tests {
         assert!(record.model_text().contains("interrupted"));
     }
 
+    fn identity(
+        kind: ProviderKind,
+        provider_id: &str,
+        base_url: &str,
+        model: &str,
+    ) -> ProviderIdentity {
+        ProviderIdentity {
+            kind,
+            provider_id: provider_id.to_string(),
+            base_url: base_url.to_string(),
+            model: model.to_string(),
+        }
+    }
+
     #[test]
-    fn continuation_state_is_only_reusable_for_the_same_provider_and_model() {
+    fn continuation_state_is_only_reusable_for_the_same_provider_endpoint_and_model() {
         let mut turn = tool_turn();
         turn.steps[0].continuation = Some(ProviderContinuation {
-            provider_kind: ProviderKind::OpenAiCompatible,
-            model: "model-a".into(),
+            identity: identity(
+                ProviderKind::OpenAiCompatible,
+                "provider-a",
+                "https://a.example/v1",
+                "model-a",
+            ),
+            support: ContinuationSupport::ResponseId,
             response_id: Some("resp-1".into()),
             state: Default::default(),
         });
@@ -570,16 +627,90 @@ mod tests {
         transcript.push(turn);
 
         assert!(transcript
-            .continuation_for(ProviderKind::OpenAiCompatible, "model-a")
+            .continuation_for(&identity(
+                ProviderKind::OpenAiCompatible,
+                "provider-a",
+                "https://a.example/v1",
+                "model-a"
+            ))
             .is_some());
-        // A different model, or a different provider, must fall back to the
-        // normalized transcript.
+
+        // Two OpenAI-compatible gateways serving the same model name are still
+        // two different providers.
         assert!(transcript
-            .continuation_for(ProviderKind::OpenAiCompatible, "model-b")
+            .continuation_for(&identity(
+                ProviderKind::OpenAiCompatible,
+                "provider-b",
+                "https://b.example/v1",
+                "model-a"
+            ))
             .is_none());
         assert!(transcript
-            .continuation_for(ProviderKind::Anthropic, "model-a")
+            .continuation_for(&identity(
+                ProviderKind::OpenAiCompatible,
+                "provider-a",
+                "https://a.example/v1",
+                "model-b"
+            ))
             .is_none());
+        assert!(transcript
+            .continuation_for(&identity(
+                ProviderKind::Anthropic,
+                "provider-a",
+                "https://a.example/v1",
+                "model-a"
+            ))
+            .is_none());
+    }
+
+    #[test]
+    fn a_transport_without_native_continuation_never_replays_its_response_id() {
+        let mut turn = tool_turn();
+        turn.steps[0].continuation = Some(ProviderContinuation {
+            identity: identity(
+                ProviderKind::OpenAiCompatible,
+                "provider-a",
+                "https://a.example/v1",
+                "model-a",
+            ),
+            // Chat Completions reports an id but cannot resume from it.
+            support: ContinuationSupport::Unsupported,
+            response_id: Some("chatcmpl-1".into()),
+            state: Default::default(),
+        });
+
+        let mut transcript = Transcript::default();
+        transcript.push(turn);
+
+        assert!(transcript
+            .continuation_for(&identity(
+                ProviderKind::OpenAiCompatible,
+                "provider-a",
+                "https://a.example/v1",
+                "model-a"
+            ))
+            .is_none());
+    }
+
+    #[test]
+    fn continuation_written_before_identities_existed_is_never_replayed() {
+        // The shape recorded before identities and support were tracked. It
+        // still parses, and it must degrade to "not reusable" rather than being
+        // sent to whichever provider happens to be configured.
+        let stored: ProviderContinuation = serde_json::from_value(serde_json::json!({
+            "provider_kind": "open_ai_compatible",
+            "model": "model-a",
+            "response_id": "resp-1"
+        }))
+        .expect("older continuation state still parses");
+
+        let identity = identity(
+            ProviderKind::OpenAiCompatible,
+            "provider-a",
+            "https://a.example/v1",
+            "model-a",
+        );
+        assert!(!stored.is_reusable_for(&identity));
     }
 
     #[test]
@@ -595,7 +726,7 @@ mod tests {
             .push(AssistantStep::text_only("Still listening."));
         transcript.push(third);
 
-        let compacted = transcript.compact(2, |turns| format!("{} earlier turns", turns.len()));
+        let compacted = transcript.compact(2, |turns, _| format!("{} earlier turns", turns.len()));
 
         assert!(compacted, "there was enough history to compact");
         assert_eq!(transcript.len(), 2);
@@ -617,12 +748,54 @@ mod tests {
     }
 
     #[test]
+    fn a_second_compaction_summarizes_every_archived_turn_not_only_the_new_ones() {
+        let mut transcript = Transcript::default();
+        for index in 1..=4 {
+            let mut turn = Turn::new(&format!("turn-{index}"), &format!("question {index}"));
+            turn.steps
+                .push(AssistantStep::text_only(&format!("answer {index}")));
+            transcript.push(turn);
+        }
+
+        assert!(transcript.compact(3, |turns, _| { format!("first: {} turns", turns.len()) }));
+        assert!(transcript.compact(2, |turns, previous| {
+            format!("{previous} then {} more", turns.len())
+        }));
+
+        let archived = transcript.compacted.as_ref().expect("archived turns");
+        // Both compactions archived turns, and neither was deleted.
+        assert_eq!(archived.turns.len(), 2);
+        // The summarizer saw the whole compacted history, not just this round's
+        // share of it, so overwriting the summary cannot drop older history out
+        // of the model's view.
+        assert_eq!(archived.summary, "first: 1 turns then 2 more");
+    }
+
+    #[test]
+    fn turn_ids_cover_compacted_turns_too() {
+        let mut transcript = Transcript::default();
+        for index in 1..=3 {
+            let mut turn = Turn::new(&format!("turn-{index}"), "hello");
+            turn.steps.push(AssistantStep::text_only("hi"));
+            transcript.push(turn);
+        }
+
+        assert!(transcript.compact(1, |_, _| "summary".to_string()));
+        assert_eq!(transcript.len(), 1);
+        // turn-1 and turn-2 left the prompt, but they still own their ids.
+        assert_eq!(
+            transcript.turn_ids().collect::<Vec<_>>(),
+            vec!["turn-3", "turn-1", "turn-2"]
+        );
+    }
+
+    #[test]
     fn compaction_refuses_to_rewrite_a_history_that_does_not_need_it() {
         let mut transcript = Transcript::default();
         transcript.push(tool_turn());
 
         assert!(
-            !transcript.compact(4, |_| "summary".to_string()),
+            !transcript.compact(4, |_, _| "summary".to_string()),
             "nothing old enough to compact means the history stays byte for byte"
         );
         assert_eq!(transcript.len(), 1);

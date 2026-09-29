@@ -12,7 +12,6 @@ use sujiu_core::{
     ToolCall, ToolCallRecord, ToolCallState, ToolDefinition, ToolOutput, ToolResult,
     ToolResultRecord, Turn, TurnState,
 };
-use thiserror::Error;
 
 use crate::{
     provider::{AiProvider, NullStreamSink, ProviderError, StreamSink},
@@ -41,18 +40,12 @@ impl Default for AgentConfig {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum AgentError {
-    #[error(transparent)]
-    Provider(#[from] ProviderError),
-}
-
 /// Why a turn stopped.
 ///
 /// Stopping is not the same as failing. A cancelled turn still produced steps
 /// the model saw, and those steps belong in the transcript, so a stop is
 /// reported as a state rather than as an error that discards the work.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AgentStop {
     /// The assistant produced a final answer.
     Completed,
@@ -60,19 +53,26 @@ pub enum AgentStop {
     Cancelled,
     /// The tool loop hit its round limit.
     MaxRounds(usize),
+    /// A round could not be completed: the transport failed, the provider
+    /// returned an error status, or the response could not be parsed.
+    ///
+    /// The message is reported to the platform separately. It is not a reason
+    /// to throw away the rounds that already succeeded, because those rounds
+    /// contain tool calls whose results the next request has to repeat.
+    Failed(String),
 }
 
 impl AgentStop {
-    pub fn turn_state(self) -> TurnState {
+    pub fn turn_state(&self) -> TurnState {
         match self {
             Self::Completed => TurnState::Completed,
             Self::Cancelled => TurnState::Cancelled,
-            Self::MaxRounds(_) => TurnState::Failed,
+            Self::MaxRounds(_) | Self::Failed(_) => TurnState::Failed,
         }
     }
 
     /// Whether a platform should treat the stop as a failure to report.
-    pub fn is_error(self) -> bool {
+    pub fn is_error(&self) -> bool {
         !matches!(self, Self::Completed)
     }
 }
@@ -141,7 +141,7 @@ impl<'a> AgentRuntime<'a> {
         &self,
         plan: &PromptPlan,
         continuation: Option<ProviderContinuation>,
-    ) -> Result<AgentOutcome, AgentError> {
+    ) -> AgentOutcome {
         let messages = messages_from_prompt_plan(plan);
         let discovery_query = messages
             .iter()
@@ -163,7 +163,7 @@ impl<'a> AgentRuntime<'a> {
         messages: Vec<ModelMessage>,
         continuation: Option<ProviderContinuation>,
         discovery_query: &str,
-    ) -> Result<AgentOutcome, AgentError> {
+    ) -> AgentOutcome {
         self.run_streaming(messages, continuation, discovery_query, &mut NullStreamSink)
             .await
     }
@@ -176,14 +176,16 @@ impl<'a> AgentRuntime<'a> {
     /// A turn that stops early still returns what it produced. Dropping the
     /// partial steps would leave a tool call that the model asked for with no
     /// result, which the next request cannot repair without rewriting history
-    /// the provider has already seen.
+    /// the provider has already seen. A transport failure is therefore a stop
+    /// with a message, not an error: the completed rounds are committed and the
+    /// reason is reported alongside them.
     pub async fn run_streaming(
         &self,
         mut messages: Vec<ModelMessage>,
         continuation: Option<ProviderContinuation>,
         discovery_query: &str,
         sink: &mut dyn StreamSink,
-    ) -> Result<AgentOutcome, AgentError> {
+    ) -> AgentOutcome {
         let mut active = self.tools.always_available_names();
 
         for definition in self
@@ -196,6 +198,15 @@ impl<'a> AgentRuntime<'a> {
         let mut all_results = Vec::new();
         let mut turn = Turn::new("", last_user_text(&messages));
 
+        // The continuation this turn starts from, and the one the most recent
+        // round produced. They are the same on the first round.
+        //
+        // A round that produces no continuation state does not invalidate the
+        // state the turn started with: `None` from a provider means "I have
+        // nothing to chain", not "discard what you had". So the carried value
+        // is only replaced when a round actually produced one.
+        let mut carried = continuation;
+
         for round in 1..=self.config.max_rounds {
             let definitions = self.request_tool_definitions(&active);
 
@@ -206,7 +217,7 @@ impl<'a> AgentRuntime<'a> {
                     ProviderRequest {
                         messages: messages.clone(),
                         tools: definitions,
-                        continuation: continuation.clone(),
+                        continuation: carried.clone(),
                     },
                     &mut observed,
                 )
@@ -214,12 +225,25 @@ impl<'a> AgentRuntime<'a> {
             {
                 Ok(produced) => produced,
                 // The round never finished, so its partial text is not a step.
-                // Everything that already completed stays in the transcript.
+                // Everything that already completed stays in the transcript,
+                // because those rounds contain tool calls whose results the
+                // next request has to repeat.
                 Err(ProviderError::Cancelled) => {
-                    return Ok(outcome(turn, all_results, round, AgentStop::Cancelled))
+                    return outcome(turn, all_results, round, AgentStop::Cancelled)
                 }
-                Err(error) => return Err(AgentError::Provider(error)),
+                Err(error) => {
+                    return outcome(
+                        turn,
+                        all_results,
+                        round,
+                        AgentStop::Failed(error.to_string()),
+                    )
+                }
             };
+
+            if let Some(produced_continuation) = produced.continuation.clone() {
+                carried = Some(produced_continuation);
+            }
 
             let step = AssistantStep {
                 text: produced.text,
@@ -243,7 +267,7 @@ impl<'a> AgentRuntime<'a> {
                     AgentStop::Cancelled
                 };
 
-                return Ok(outcome(turn, all_results, round, stop));
+                return outcome(turn, all_results, round, stop);
             }
 
             let mut cancelled_from = false;
@@ -280,16 +304,16 @@ impl<'a> AgentRuntime<'a> {
             turn.steps.push(step);
 
             if cancelled_from {
-                return Ok(outcome(turn, all_results, round, AgentStop::Cancelled));
+                return outcome(turn, all_results, round, AgentStop::Cancelled);
             }
         }
 
-        Ok(outcome(
+        outcome(
             turn,
             all_results,
             self.config.max_rounds,
             AgentStop::MaxRounds(self.config.max_rounds),
-        ))
+        )
     }
 
     fn tool_record(&self, call: &ToolCall, result: ToolResultRecord) -> ToolCallRecord {
@@ -553,7 +577,7 @@ mod tests {
     use crate::{
         provider::AiProvider,
         tool::{Tool, ToolError},
-        types::AssistantTurn,
+        types::{AssistantTurn, ContinuationSupport, ProviderIdentity},
     };
 
     struct LoreTool;
@@ -632,6 +656,222 @@ mod tests {
         }
     }
 
+    /// A provider that answers with a chainable continuation, so a transport
+    /// that really does resume from a handle can be modelled.
+    struct ChainedProvider {
+        turns: Mutex<VecDeque<AssistantTurn>>,
+        requests: Arc<Mutex<Vec<ProviderRequest>>>,
+    }
+
+    #[async_trait]
+    impl AiProvider for ChainedProvider {
+        async fn complete(&self, request: ProviderRequest) -> Result<AssistantTurn, ProviderError> {
+            self.requests.lock().unwrap().push(request);
+            self.turns
+                .lock()
+                .unwrap()
+                .pop_front()
+                .ok_or_else(|| ProviderError::InvalidResponse("mock exhausted".into()))
+        }
+    }
+
+    fn chainable(identity: ProviderIdentity, response_id: &str) -> ProviderContinuation {
+        ProviderContinuation {
+            identity,
+            support: ContinuationSupport::ResponseId,
+            response_id: Some(response_id.into()),
+            state: Default::default(),
+        }
+    }
+
+    /// The next round of a turn must continue from the round before it, not
+    /// from whatever the session handed in before the turn began. Replaying a
+    /// stale handle is the same class of bug as replaying stale history.
+    #[tokio::test]
+    async fn each_round_continues_from_the_previous_round() {
+        let identity = ProviderIdentity {
+            kind: sujiu_core::ProviderKind::OpenAiCompatible,
+            provider_id: "primary".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "example-1".into(),
+        };
+        let session_start = chainable(identity.clone(), "session-0");
+
+        let provider = ChainedProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(VecDeque::from([
+                AssistantTurn {
+                    tool_calls: vec![ToolCall {
+                        id: "search-1".into(),
+                        name: "search_context".into(),
+                        arguments: json!({"query": "western tower"}),
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    continuation: Some(chainable(identity.clone(), "round-1")),
+                    ..AssistantTurn::default()
+                },
+                AssistantTurn {
+                    text: Some("The old king vanished.".into()),
+                    finish_reason: Some("stop".into()),
+                    continuation: Some(chainable(identity.clone(), "round-2")),
+                    ..AssistantTurn::default()
+                },
+            ])),
+        };
+
+        let store = Arc::new(crate::context::InMemoryContextStore::new());
+        let mut tools = ToolRegistry::new();
+        crate::context::register_standard_context_tools(&mut tools, store);
+
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+        let mut sink = RecordingSink::default();
+
+        runtime
+            .run_streaming(
+                user_message("what happened?"),
+                Some(session_start),
+                "what happened?",
+                &mut sink,
+            )
+            .await;
+
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+
+        // Round 1 continues the session's handle.
+        let first = requests[0]
+            .continuation
+            .as_ref()
+            .expect("the first round resumes the session handle");
+        assert_eq!(first.response_id.as_deref(), Some("session-0"));
+
+        // Round 2 continues round 1, not the session's original handle.
+        let second = requests[1]
+            .continuation
+            .as_ref()
+            .expect("the second round resumes the first round's handle");
+        assert_eq!(second.response_id.as_deref(), Some("round-1"));
+    }
+
+    /// A provider that produces no continuation must not invalidate the handle
+    /// the session already had. `None` means "I have nothing to chain", which
+    /// is a different statement from "forget what you had".
+    #[tokio::test]
+    async fn a_round_without_new_state_keeps_the_previous_handle() {
+        let identity = ProviderIdentity {
+            kind: sujiu_core::ProviderKind::OpenAiCompatible,
+            provider_id: "primary".into(),
+            base_url: "https://api.example.com/v1".into(),
+            model: "example-1".into(),
+        };
+
+        let provider = ChainedProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(VecDeque::from([
+                AssistantTurn {
+                    tool_calls: vec![ToolCall {
+                        id: "search-1".into(),
+                        name: "search_context".into(),
+                        arguments: json!({"query": "western tower"}),
+                    }],
+                    finish_reason: Some("tool_calls".into()),
+                    // No continuation of its own.
+                    ..AssistantTurn::default()
+                },
+                AssistantTurn {
+                    text: Some("The old king vanished.".into()),
+                    finish_reason: Some("stop".into()),
+                    ..AssistantTurn::default()
+                },
+            ])),
+        };
+
+        let store = Arc::new(crate::context::InMemoryContextStore::new());
+        let mut tools = ToolRegistry::new();
+        crate::context::register_standard_context_tools(&mut tools, store);
+
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+        let mut sink = RecordingSink::default();
+
+        runtime
+            .run_streaming(
+                user_message("what happened?"),
+                Some(chainable(identity, "session-0")),
+                "what happened?",
+                &mut sink,
+            )
+            .await;
+
+        let requests = provider.requests.lock().unwrap();
+        let second = requests[1]
+            .continuation
+            .as_ref()
+            .expect("the handle the session already had is still carried");
+        assert_eq!(second.response_id.as_deref(), Some("session-0"));
+    }
+
+    /// A turn whose first round produced a tool result and whose second round
+    /// hit a provider error must still keep those completed rounds. Throwing
+    /// the turn away loses the call and its result, and the next request then
+    /// either drops the call or sends it without a matching result.
+    #[tokio::test]
+    async fn a_provider_error_keeps_the_rounds_that_already_finished() {
+        let provider = ChainedProvider {
+            requests: Arc::new(Mutex::new(Vec::new())),
+            turns: Mutex::new(VecDeque::from([AssistantTurn {
+                text: Some("looking it up".into()),
+                tool_calls: vec![ToolCall {
+                    id: "search-1".into(),
+                    name: "search_context".into(),
+                    arguments: json!({"query": "western tower"}),
+                }],
+                finish_reason: Some("tool_calls".into()),
+                ..AssistantTurn::default()
+            }])),
+        };
+
+        let store = Arc::new(crate::context::InMemoryContextStore::new());
+        let mut tools = ToolRegistry::new();
+        crate::context::register_standard_context_tools(&mut tools, store);
+
+        let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
+        let mut sink = RecordingSink::default();
+
+        // The mock only has one turn, so the second round fails.
+        let outcome = runtime
+            .run_streaming(
+                user_message("what happened?"),
+                None,
+                "what happened?",
+                &mut sink,
+            )
+            .await;
+
+        match &outcome.stop {
+            AgentStop::Failed(reason) => assert!(!reason.is_empty()),
+            other => panic!("expected a failed turn, got {other:?}"),
+        }
+        assert!(outcome.stop.is_error());
+        assert_eq!(outcome.turn.state, TurnState::Failed);
+
+        // The completed round and its tool result are still in the transcript.
+        assert_eq!(outcome.turn.steps.len(), 1);
+        let call = &outcome.turn.steps[0].tool_calls[0];
+        assert_eq!(call.id, "search-1");
+        assert_eq!(call.result.state, ToolCallState::Completed);
+
+        let replayed = outcome.messages();
+        let results = replayed
+            .iter()
+            .filter_map(|message| match message {
+                ModelMessage::ToolResult { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(results, vec!["search-1"]);
+        assert_eq!(outcome.tool_results.len(), 1);
+    }
+
     #[tokio::test]
     async fn a_non_streaming_provider_reports_cancellation() {
         let provider = CompleteOnlyProvider {
@@ -648,8 +888,7 @@ mod tests {
 
         let outcome = runtime
             .run_streaming(user_message("hi"), None, "hello", &mut sink)
-            .await
-            .expect("a stopped round is still a turn that produced work");
+            .await;
 
         assert_eq!(outcome.stop, AgentStop::Cancelled);
         assert_eq!(outcome.turn.state, TurnState::Cancelled);
@@ -766,8 +1005,7 @@ mod tests {
 
         let outcome = runtime
             .run_streaming(user_message("hi"), None, "hi", &mut sink)
-            .await
-            .unwrap();
+            .await;
 
         assert_eq!(sink.deltas, vec!["Hel".to_string(), "lo there".to_string()]);
         assert_eq!(outcome.final_text, "Hello there");
@@ -811,8 +1049,7 @@ mod tests {
                 "what happened?",
                 &mut sink,
             )
-            .await
-            .unwrap();
+            .await;
 
         assert_eq!(sink.started, vec!["search_context".to_string()]);
         assert_eq!(sink.finished, vec![("search_context".to_string(), false)]);
@@ -870,8 +1107,7 @@ mod tests {
 
         let outcome = runtime
             .run_streaming(user_message("hi"), None, "hi", &mut sink)
-            .await
-            .unwrap();
+            .await;
 
         assert!(sink.deltas.is_empty());
         assert_eq!(outcome.final_text, "firstsecond");
@@ -902,8 +1138,7 @@ mod tests {
 
         let outcome = runtime
             .run_streaming(user_message("hi"), None, "hi", &mut sink)
-            .await
-            .expect("a stopped turn still reports what it produced");
+            .await;
 
         assert_eq!(outcome.stop, AgentStop::Cancelled);
         assert!(
@@ -985,8 +1220,7 @@ mod tests {
                 "what happened?",
                 &mut sink,
             )
-            .await
-            .unwrap();
+            .await;
 
         assert_eq!(outcome.stop, AgentStop::Cancelled);
         assert_eq!(outcome.turn.steps.len(), 2, "both steps stay in the turn");
@@ -1074,8 +1308,7 @@ mod tests {
                 None,
                 "unrelated initial selector text",
             )
-            .await
-            .unwrap();
+            .await;
 
         assert_eq!(
             outcome.final_text,

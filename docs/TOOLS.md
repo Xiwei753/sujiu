@@ -166,9 +166,18 @@ cannot be represented. A call the runtime never got to run is stored with an
 explicit state (`Completed`, `Failed`, `Interrupted`, `Cancelled`) plus an
 explanatory result, so cancelling a turn never leaves a dangling call.
 
-History is append-only apart from explicit compaction, and neither the stable
-system prefix nor already-sent history is rewritten. That keeps prompt-cache
-prefixes intact and keeps call/result correspondence intact.
+History is append-only apart from explicit compaction, and already-sent history
+is never rewritten. That keeps prompt-cache prefixes intact and keeps
+call/result correspondence intact.
+
+A tool loop that stops early — cancelled, out of rounds, or cut short by a
+provider error — still commits the rounds that finished, so the calls the model
+has already seen keep their results on the next request.
+
+Deferred discovery has a cache cost: when a `sujiu_search_tools` result makes
+more schemas visible, the tool definition block changes and the cache is
+invalidated from that point. That break is deliberate, and tool order is
+otherwise stable.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the full three-layer contract: model
 transcript, UI projection, and provider continuation state.

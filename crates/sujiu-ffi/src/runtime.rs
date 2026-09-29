@@ -17,7 +17,8 @@ use sujiu_ai::{
 };
 use sujiu_core::{
     Character, ChatMessage, ChatRole, ContextKind, ContextRecord, ContextSource, PromptCompiler,
-    ProviderConfig, ProviderKind, Session, Transcript, Turn, DEFAULT_APP_SYSTEM_PROMPT,
+    ProviderConfig, ProviderIdentity, ProviderKind, Session, Transcript, Turn,
+    DEFAULT_APP_SYSTEM_PROMPT,
 };
 
 use crate::events::{TurnEventKind, TurnEventReporter, TurnEventSink};
@@ -708,6 +709,11 @@ impl SujiuRuntime {
     /// model turn of its own. The runtime's job is to guarantee that compaction
     /// cannot break the tool protocol: it cuts on a turn boundary, keeps the
     /// compacted turns retrievable, and reports whether anything changed.
+    ///
+    /// `summary` must be **cumulative**. Every archived turn, including the ones
+    /// archived by an earlier compaction, is passed to the summarizer together
+    /// with the previous summary, because replacing the summary instead of
+    /// extending it silently drops the older half of the conversation.
     pub fn compact_session(
         &self,
         session_id: &str,
@@ -725,7 +731,7 @@ impl SujiuRuntime {
 
             session
                 .transcript
-                .compact(keep_recent, |_| summary.to_owned())
+                .compact(keep_recent, |_, _| summary.to_owned())
         };
 
         if compacted {
@@ -768,8 +774,7 @@ impl SujiuRuntime {
         // forgotten.
         let outcome = runtime
             .run_streaming(messages, continuation, &request.user_text, sink)
-            .await
-            .map_err(|error| TurnFailure(error.to_string()))?;
+            .await;
 
         self.persist_turn(request, &outcome);
 
@@ -787,6 +792,13 @@ impl SujiuRuntime {
             }
             AgentStop::MaxRounds(rounds) => {
                 sink.turn_failed(&format!("max_tool_rounds_exceeded: {rounds}"));
+                Ok(())
+            }
+            // The rounds that did finish stay in the transcript, so the next
+            // turn continues from them. The reason is reported separately so
+            // the UI can show what went wrong.
+            AgentStop::Failed(error) => {
+                sink.turn_failed(&error);
                 Ok(())
             }
         }
@@ -857,16 +869,20 @@ impl SujiuRuntime {
             &request.user_text,
         );
 
-        // Only replay provider state that belongs to this provider and model.
-        // After a switch this is `None`, and the adapter rebuilds the request
-        // from the normalized transcript instead.
-        let continuation = session
-            .transcript
-            .continuation_for(config.kind, &config.model)
-            .cloned();
+        // Only replay provider state that belongs to this exact endpoint and
+        // model. After a switch this is `None`, and the adapter rebuilds the
+        // request from the normalized transcript instead.
+        let identity = ProviderIdentity {
+            kind: config.kind,
+            provider_id: config.id.clone(),
+            base_url: config.base_url.clone(),
+            model: config.model.clone(),
+        };
+        let continuation = session.transcript.continuation_for(&identity).cloned();
 
         let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
             base_url: config.base_url.clone(),
+            identity,
             api_key,
             model: config.model.clone(),
             // Sampling defaults are provider semantics, so they live here and not
@@ -965,11 +981,15 @@ impl TurnProvider {
 }
 
 /// A turn id that cannot collide with one already in the transcript.
+///
+/// Archived turns count. After a compaction the live list is shorter than it
+/// was, so numbering from `len()` alone would hand out an id that a compacted
+/// turn already owns, and turn ids are what the UI uses to key its bubbles.
 fn next_turn_id(transcript: &Transcript) -> String {
     let mut number = transcript.len() + 1;
     loop {
         let id = format!("turn-{number}");
-        if !transcript.turns.iter().any(|turn| turn.id == id) {
+        if !transcript.turn_ids().any(|existing| existing == id) {
             return id;
         }
         number += 1;
