@@ -85,13 +85,15 @@ impl ToolRegistry {
                 let mut score = if definition.always_available { 10_000 } else { 0 };
 
                 for term in &terms {
-                    if name.contains(term) {
+                    if name.contains(*term) {
                         score += 20;
                     }
-                    if description.contains(term) {
+                    if description.contains(*term) {
                         score += 5;
                     }
-                    if keywords.iter().any(|keyword| keyword.contains(term) || term.contains(keyword))
+                    if keywords
+                        .iter()
+                        .any(|keyword| keyword.contains(*term) || term.contains(keyword.as_str()))
                     {
                         score += 30;
                     }
