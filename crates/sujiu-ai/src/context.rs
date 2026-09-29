@@ -14,7 +14,7 @@ use crate::{
     types::{ToolAnnotations, ToolContent, ToolDefinition, ToolDiscovery, ToolOutput},
 };
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ContextSearchQuery {
     pub query: String,
     #[serde(default)]
@@ -27,6 +27,19 @@ pub struct ContextSearchQuery {
     pub after_ms: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_ms: Option<i64>,
+}
+
+impl Default for ContextSearchQuery {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            kinds: Vec::new(),
+            source_ids: Vec::new(),
+            limit: default_search_limit(),
+            after_ms: None,
+            before_ms: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
