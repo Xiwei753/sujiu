@@ -72,4 +72,11 @@ if [ "$profile" = "release" ]; then
   fi
 fi
 
+# Record which sources produced this library, so a Rust change that was never
+# rebuilt is caught by scripts/check-harmony-runtime.sh instead of reaching a
+# device as an old runtime behind a new bridge.
+record="$(dirname "$staged")/libsujiu_napi.sources.sha256"
+"$repo_root/scripts/harmony-runtime-fingerprint.sh" > "$record"
+
 echo "Staged $staged ($(du -h "$staged" | cut -f1))"
+echo "Recorded source fingerprint $(cut -d' ' -f1 < "$record")"

@@ -5,11 +5,19 @@ on:
     paths:
       - "Cargo.toml"
       - "crates/**"
+      - "scripts/build-harmony-runtime.sh"
+      - "scripts/check-harmony-runtime.sh"
+      - "scripts/harmony-runtime-fingerprint.sh"
+      - "apps/harmony/entry/libs/**"
       - ".github/workflows/core-ci.yml"
   pull_request:
     paths:
       - "Cargo.toml"
       - "crates/**"
+      - "scripts/build-harmony-runtime.sh"
+      - "scripts/check-harmony-runtime.sh"
+      - "scripts/harmony-runtime-fingerprint.sh"
+      - "apps/harmony/entry/libs/**"
       - ".github/workflows/core-ci.yml"
 
 jobs:
@@ -24,3 +32,16 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test
         run: cargo test --workspace
+
+  # The HarmonyOS runtime library is a committed build output, because ArkTS
+  # imports it by name and has to find it before the entry module compiles.
+  # This job catches the failure mode that comes with that: a Rust change that
+  # was never rebuilt, which would ship an old runtime behind a new bridge. It
+  # compares recorded and current source fingerprints, so it needs no HarmonyOS
+  # NDK on the runner.
+  harmony-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the staged runtime library against its sources
+        run: scripts/check-harmony-runtime.sh
