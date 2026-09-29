@@ -5,11 +5,15 @@ import {
   MessageSummary,
   ModelSummary,
   SessionSummary,
+  ProviderDraft,
   SujiuBridge,
   TurnEvent,
   TurnEventKind
 } from '../bridge/SujiuBridge';
-import { AppearanceMode, PlatformServices } from '../platform/PlatformServices';
+import { AppearanceMode, CredentialService, PlatformServices } from '../platform/PlatformServices';
+
+/** Where the api key is filed in the platform credential store. */
+const CREDENTIAL_NAME: string = 'provider_api_key';
 
 /**
  * Turn lifecycle a chat surface renders. Sujiu states, not provider states.
@@ -126,6 +130,17 @@ export class ChatController {
   appearanceMode: AppearanceMode = AppearanceMode.System;
 
   /**
+   * Provider setup. The description is state; the credential is not. The
+   * controller asks the platform credential service for the key right before a
+   * turn, so a secret never becomes presentation state and never reaches a view.
+   */
+  providerKinds: string[] = [];
+  providerDraft: ProviderDraft | null = null;
+  hasCredential: boolean = false;
+  savingProvider: boolean = false;
+  providerNoticeCode: string = '';
+
+  /**
    * Raised when the appearance mode changes. Presentation does not decide what
    * that means for colors; the UI layer listens and re-themes itself.
    */
@@ -135,9 +150,60 @@ export class ChatController {
   private assistantOpen: boolean = false;
   private messageCounter: number = 0;
 
-  constructor(bridge: SujiuBridge, platform: PlatformServices) {
+  private readonly credentials: CredentialService;
+
+  constructor(bridge: SujiuBridge, platform: PlatformServices, credentials: CredentialService) {
     this.bridge = bridge;
     this.platform = platform;
+    this.credentials = credentials;
+  }
+
+  get hasProvider(): boolean {
+    return this.providerDraft !== null;
+  }
+
+  /** Loads the provider the user saved, so the model list matches reality. */
+  async loadProvider(): Promise<void> {
+    try {
+      this.providerKinds = await this.bridge.supportedProviderKinds();
+    } catch (error) {
+      this.providerKinds = [];
+    }
+    this.hasCredential = this.credentials.hasSecret(CREDENTIAL_NAME);
+  }
+
+  /**
+   * Saves a provider description and, when given, the api key. The description
+   * goes to the runtime; the key goes to the credential service. An unsupported
+   * kind fails here instead of at the first turn.
+   */
+  async saveProvider(draft: ProviderDraft, secret: string): Promise<void> {
+    if (this.savingProvider) {
+      return;
+    }
+    this.savingProvider = true;
+    this.providerNoticeCode = '';
+    try {
+      if (secret.length > 0) {
+        this.credentials.saveSecret(CREDENTIAL_NAME, secret);
+        this.hasCredential = true;
+      }
+      await this.bridge.configureProvider(draft);
+      this.providerDraft = draft;
+      this.models = await this.bridge.listModels();
+    } catch (error) {
+      this.fail('provider_not_saved', (error as Error).message);
+    } finally {
+      this.savingProvider = false;
+    }
+  }
+
+  /** Forgets the provider and the stored key. */
+  clearProvider(): void {
+    this.credentials.deleteSecret(CREDENTIAL_NAME);
+    this.hasCredential = false;
+    this.providerDraft = null;
+    this.models = [];
   }
 
   get busy(): boolean {
@@ -234,6 +300,9 @@ export class ChatController {
     if (text.length === 0 || this.busy || this.currentSessionId.length === 0) {
       return;
     }
+    // The key is fetched here so a view never holds it and the runtime gets it
+    // per call.
+    this.bridge.setCredential(this.credentials.loadSecret(CREDENTIAL_NAME));
     this.assistantOpen = false;
     this.draft = '';
     this.clearError();

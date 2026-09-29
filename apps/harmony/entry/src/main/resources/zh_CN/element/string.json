@@ -235,6 +235,42 @@
     {
       "name": "error_turn_busy",
       "value": "已经有一条回复正在生成。"
+    },
+    {
+      "name": "settings_section_provider",
+      "value": "服务商"
+    },
+    {
+      "name": "provider_hint",
+      "value": "Sujiu 连接 OpenAI 兼容接口。api key 只保存在本机。"
+    },
+    {
+      "name": "provider_base_url",
+      "value": "接口地址"
+    },
+    {
+      "name": "provider_model",
+      "value": "模型"
+    },
+    {
+      "name": "provider_api_key",
+      "value": "API 密钥"
+    },
+    {
+      "name": "provider_save",
+      "value": "保存服务商"
+    },
+    {
+      "name": "provider_clear",
+      "value": "移除"
+    },
+    {
+      "name": "provider_key_stored",
+      "value": "本机已保存 api key。"
+    },
+    {
+      "name": "error_provider_not_saved",
+      "value": "服务商保存失败。"
     }
   ]
 }

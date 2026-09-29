@@ -235,6 +235,42 @@
     {
       "name": "error_turn_busy",
       "value": "A reply is already in progress."
+    },
+    {
+      "name": "settings_section_provider",
+      "value": "PROVIDER"
+    },
+    {
+      "name": "provider_hint",
+      "value": "Sujiu talks to an OpenAI-compatible endpoint. The api key is stored on this device only."
+    },
+    {
+      "name": "provider_base_url",
+      "value": "Base URL"
+    },
+    {
+      "name": "provider_model",
+      "value": "Model"
+    },
+    {
+      "name": "provider_api_key",
+      "value": "API key"
+    },
+    {
+      "name": "provider_save",
+      "value": "Save provider"
+    },
+    {
+      "name": "provider_clear",
+      "value": "Remove"
+    },
+    {
+      "name": "provider_key_stored",
+      "value": "An api key is stored on this device."
+    },
+    {
+      "name": "error_provider_not_saved",
+      "value": "The provider could not be saved."
     }
   ]
 }

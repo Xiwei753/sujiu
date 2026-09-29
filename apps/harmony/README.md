@@ -19,7 +19,7 @@ pages/        ArkUI pages; pages/Index hosts the chat shell and ArkUI Navigation
 components/   reusable views: conversation, composer, history drawer, selector sheets
 presentation/ ChatController: page state, turn state, no I/O and no routing
 bridge/       SujiuBridge contract + the sujiu-ffi backed implementation
-platform/     clipboard, system appearance, platform info capabilities
+platform/     credentials, clipboard, system appearance, platform info capabilities
 app/          composition root; the only place that picks implementations
 ui/           AppTheme color tokens and Copy, the only place that produces text
 ```
@@ -88,6 +88,27 @@ therefore committed; rerun the script whenever the Rust side changes.
 shape of that module. API 26 does not type check napi imports yet and reports
 "Currently module for 'libsujiu_napi.so' is not verified", so keep the file in
 step with `crates/sujiu-napi/src/bridge.rs` by hand.
+
+## Provider and credentials
+
+Settings has a Provider section: base URL, model, api key, Save and Remove.
+`ChatController.saveProvider` stores the key through `CredentialService` and
+configures the provider through the bridge, and `listModels()` only returns
+models once a provider is configured. The api key is read back immediately
+before a turn and passed to the bridge per turn, so it is never view or
+presentation state.
+
+Two honest caveats:
+
+- `HarmonyCredentialService` stores secrets in the app's own preferences. That
+  is private to the app sandbox, but it is **not encrypted at rest**. The
+  service is a seam, so a HUKS- or `cryptoFramework`-backed implementation can
+  replace the storage without any caller changing. `huks` in this SDK only
+  offers key-item generation and signing sessions, not symmetric encryption, so
+  preferences is what this implementation uses today.
+- The kinds offered in the UI are whatever the runtime advertises through
+  `providerKinds()`. Today that is `openai_compatible` only, because that is the
+  only adapter the runtime can drive.
 
 ## Copy and language
 

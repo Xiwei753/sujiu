@@ -83,6 +83,22 @@ export interface TurnEvent {
 
 export type TurnEventListener = (event: TurnEvent) => void;
 
+/**
+ * Provider settings the user configured.
+ *
+ * This is a description, never a credential: the api key travels separately,
+ * per turn, and the runtime does not keep it.
+ */
+export interface ProviderDraft {
+  id: string;
+  name: string;
+  kind: string;
+  baseUrl: string;
+  model: string;
+  maxTokens: number;
+  temperature: number;
+}
+
 export interface SujiuBridge {
   listSessions(): Promise<SessionSummary[]>;
   listCharacters(query?: string): Promise<CharacterSummary[]>;
@@ -91,6 +107,12 @@ export interface SujiuBridge {
   conversationState(sessionId: string): Promise<ConversationSnapshot>;
   /** Creates an empty session so a brand new chat can send its first message. */
   createSession(characterId: string): Promise<SessionSummary>;
+  /** Provider kinds this runtime can actually drive, from the runtime itself. */
+  supportedProviderKinds(): Promise<string[]>;
+  /** Hands a provider description to the runtime. Rejects an unsupported kind. */
+  configureProvider(draft: ProviderDraft): Promise<void>;
+  /** The api key for the next turn. The runtime never stores it. */
+  setCredential(secret: string): void;
   sendTurn(sessionId: string, userText: string, onEvent: TurnEventListener): void;
   cancelTurn(sessionId: string): void;
   runtimeSummary(): string;

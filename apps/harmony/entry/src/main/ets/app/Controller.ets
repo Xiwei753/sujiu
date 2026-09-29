@@ -4,6 +4,7 @@ import { SujiuBridge } from '../bridge/SujiuBridge';
 import {
   AppearanceMode,
   HarmonyClipboardService,
+  HarmonyCredentialService,
   HarmonyPlatformInfoService,
   HarmonySystemAppearanceService,
   PlatformServices
@@ -24,6 +25,7 @@ import { AppTheme } from '../ui/theme/Theme';
 export class AppGraph {
   readonly bridge: SujiuBridge;
   readonly platform: PlatformServices;
+  readonly credentials: HarmonyCredentialService = new HarmonyCredentialService();
   readonly controller: ChatController;
   /** UI-layer tokens, kept in sync with the resolved appearance mode. */
   readonly theme: AppTheme = new AppTheme(false);
@@ -34,20 +36,25 @@ export class AppGraph {
     this.platform = new PlatformServices(
       new HarmonyClipboardService(),
       new HarmonySystemAppearanceService(),
-      new HarmonyPlatformInfoService()
+      new HarmonyPlatformInfoService(),
+      this.credentials
     );
-    this.controller = new ChatController(this.bridge, this.platform);
+    this.controller = new ChatController(this.bridge, this.platform, this.credentials);
     this.controller.onAppearanceChanged = () => this.syncTheme();
   }
 
   /** Bound once the UI is alive; the host context is only reachable there. */
   bind(context: common.Context): void {
     this.context = context;
+    // Preferences need the application context, so the credential service is
+    // bound before anything can ask it for a secret.
+    this.credentials.bind(context);
   }
 
   start(): void {
     this.syncTheme();
     this.controller.refresh();
+    this.controller.loadProvider();
   }
 
   isDarkMode(): boolean {

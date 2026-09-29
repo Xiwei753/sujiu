@@ -33,6 +33,7 @@ export class AppTheme {
   danger: string = '';
   /** Translucent danger fill for inline error blocks. */
   dangerSurface: string = '';
+  dangerAccent: string = '';
 
   constructor(dark: boolean) {
     this.apply(dark);
@@ -53,6 +54,7 @@ export class AppTheme {
       this.userBubble = '#2A3A6B';
       this.danger = '#FF6B6B';
       this.dangerSurface = '#33B3261E';
+      this.dangerAccent = '#B3261E';
     } else {
       this.pageBackground = '#F7F7FA';
       this.surface = '#FFFFFF';
@@ -65,6 +67,7 @@ export class AppTheme {
       this.userBubble = '#DCE4FF';
       this.danger = '#B3261E';
       this.dangerSurface = '#14B3261E';
+      this.dangerAccent = '#FF8A80';
     }
   }
 }

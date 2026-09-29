@@ -258,6 +258,31 @@ The test for a new capability: **rewriting a page layout must not require
 touching credentials, files, permissions, sharing, notifications or lifecycle
 code.**
 
+#### Provider configuration and credentials
+
+A provider entry is application data, so it crosses the bridge:
+
+```text
+UI settings form
+  -> presentation.saveProvider(draft, secret)
+      -> bridge.configureProvider(draft)      // runtime validates the kind
+      -> CredentialService.saveSecret(secret) // platform storage
+      -> bridge.listModels()                  // now non-empty
+```
+
+A credential is not page state, not presentation state and not a field on a
+provider entry. It is a secret that:
+
+- is written through `CredentialService` and nowhere else;
+- is read immediately before a turn and handed to the bridge per turn, so the
+  bridge holds it for the duration of one request and does not persist it;
+- never appears in a `ProviderDraft`, a UI state object, a log line, or a
+  bridge event.
+
+The runtime advertises the provider kinds it can actually drive, and the
+configuration UI offers only those. A kind the runtime cannot drive is rejected
+at configuration time rather than at the first turn.
+
 ### 2.5 Dependency direction
 
 ```text

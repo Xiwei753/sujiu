@@ -12,7 +12,7 @@
 import sujiu from 'libsujiu_napi.so';
 import { SujiuBridge, SessionSummary, CharacterSummary, ModelSummary, ContextSourceSummary,
   ConversationSnapshot, MessageSummary, MessageRole, TurnEvent, TurnEventKind,
-  TurnEventListener } from './SujiuBridge';
+  TurnEventListener, ProviderDraft } from './SujiuBridge';
 
 interface NativeSession {
   id: string;
@@ -104,6 +104,8 @@ interface NativeRuntime {
   conversationState(sessionId: string): NativeSnapshot | null;
   createSession(characterId: string): string;
   cancelTurn(): void;
+  /** Applies a provider description. Rejects when the kind is not supported. */
+  configureProvider(draft: NativeProviderConfig): Promise<void>;
   /**
    * Runs a turn and reports each event as JSON.
    *
@@ -119,17 +121,6 @@ interface NativeRuntime {
 
 interface SujiuNativeModule {
   create(): NativeRuntime;
-}
-
-/** Provider settings the user configured. Never carries a credential. */
-export interface ProviderDraft {
-  id: string;
-  name: string;
-  kind: string;
-  baseUrl: string;
-  model: string;
-  maxTokens: number;
-  temperature: number;
 }
 
 function toKind(value: string): TurnEventKind {
@@ -428,9 +419,29 @@ export class SujiuNativeBridge implements SujiuBridge {
     }
   }
 
-  /** Stores the provider the user configured. Never carries a credential. */
-  setProvider(draft: ProviderDraft): void {
-    this.draft = draft;
+  /** Provider kinds come from the runtime, not from a hardcoded list here. */
+  supportedProviderKinds(): Promise<string[]> {
+    return Promise.resolve(this.runtime.providerKinds());
+  }
+
+  /**
+   * Hands the provider description to the runtime, so the model list reflects
+   * the real configuration. A rejected kind surfaces as a rejected promise.
+   */
+  configureProvider(draft: ProviderDraft): Promise<void> {
+    return this.runtime
+      .configureProvider({
+        id: draft.id,
+        name: draft.name,
+        kind: draft.kind,
+        baseUrl: draft.baseUrl,
+        model: draft.model,
+        maxTokens: draft.maxTokens,
+        temperature: draft.temperature
+      } as NativeProviderConfig)
+      .then(() => {
+        this.draft = draft;
+      });
   }
 
   providerDraft(): ProviderDraft | null {
@@ -438,10 +449,10 @@ export class SujiuNativeBridge implements SujiuBridge {
   }
 
   /**
-   * Called by the platform credential service once a secret is available. The
-   * key is handed straight to the runtime and is never persisted here.
+   * The api key for the next turn. It is passed to the runtime per call and
+   * never stored here; the platform credential service keeps the copy.
    */
-  setApiKey(apiKey: string): void {
-    this.apiKey = apiKey;
+  setCredential(secret: string): void {
+    this.apiKey = secret;
   }
 }

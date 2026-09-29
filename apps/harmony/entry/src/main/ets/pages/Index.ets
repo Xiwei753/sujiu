@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { KeyboardAvoidMode } from '@kit.ArkUI';
-import { CharacterSummary } from '../bridge/SujiuBridge';
+import { CharacterSummary, ProviderDraft } from '../bridge/SujiuBridge';
 import { AppGraph } from '../app/Controller';
 import { Composer } from '../components/Composer';
 import { ConversationView } from '../components/ConversationView';
@@ -56,6 +56,10 @@ struct Index {
   @State private showSheet: boolean = false;
   @State private sheet: SheetKind = SheetKind.None;
   @State private drawerOpen: boolean = false;
+  // Provider form: unsaved input is view state, the saved config is not.
+  @State private providerBaseUrl: string = '';
+  @State private providerModel: string = '';
+  @State private providerKey: string = '';
   private pathStack: NavPathStack = new NavPathStack();
 
   aboutToAppear(): void {
@@ -317,6 +321,67 @@ struct Index {
   }
 
   @Builder
+  private providerField(field: string, label: ResourceStr, value: string, isSecret: boolean) {
+    Column({ space: 2 }) {
+      Text(label)
+        .fontSize(12)
+        .fontColor(this.theme.textSecondary)
+        .width('100%');
+      TextInput({ text: value, placeholder: '' })
+        .type(isSecret ? InputType.Password : InputType.Normal)
+        .fontSize(14)
+        .backgroundColor(this.theme.surfaceMuted)
+        .fontColor(this.theme.textPrimary)
+        .onChange((next: string): void => {
+          if (field === 'baseUrl') {
+            this.providerBaseUrl = next;
+          } else if (field === 'model') {
+            this.providerModel = next;
+          } else {
+            this.providerKey = next;
+          }
+        })
+        .width('100%');
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%');
+  }
+
+  /**
+   * Builds the description from the form, keeps the only supported kind, and
+   * hands the key to the presentation layer rather than storing it here.
+   */
+  private saveProvider(): void {
+    const kind: string =
+      this.controller.providerKinds.length > 0 ? this.controller.providerKinds[0] : '';
+    const baseUrl: string = this.providerBaseUrl.trim();
+    const model: string = this.providerModel.trim();
+    if (kind.length === 0 || baseUrl.length === 0 || model.length === 0) {
+      return;
+    }
+    this.controller.saveProvider(
+      {
+        id: 'provider-default',
+        name: model,
+        kind: kind,
+        baseUrl: baseUrl,
+        model: model,
+        maxTokens: 1024,
+        temperature: 0.8
+      } as ProviderDraft,
+      this.providerKey.trim()
+    );
+    this.providerKey = '';
+  }
+
+  private clearProvider(): void {
+    this.controller.clearProvider();
+    this.providerBaseUrl = '';
+    this.providerModel = '';
+    this.providerKey = '';
+  }
+
+  @Builder
   private pageHeader(title: ResourceStr) {
     Row({ space: 8 }) {
       Text('←')
@@ -413,6 +478,52 @@ struct Index {
       this.pageHeader($r('app.string.settings_title'));
 
       List({ space: 8 }) {
+        ListItem() {
+          Text($r('app.string.settings_section_provider'))
+            .fontSize(11)
+            .fontColor(this.theme.textSecondary)
+            .width('100%');
+        }
+        ListItem() {
+          Column({ space: 8 }) {
+            Text($r('app.string.provider_hint'))
+              .fontSize(12)
+              .fontColor(this.theme.textSecondary)
+              .width('100%');
+            this.providerField('baseUrl', $r('app.string.provider_base_url'), this.providerBaseUrl, false);
+            this.providerField('model', $r('app.string.provider_model'), this.providerModel, false);
+            this.providerField('apiKey', $r('app.string.provider_api_key'), this.providerKey, true);
+            if (this.controller.hasCredential) {
+              Text($r('app.string.provider_key_stored'))
+                .fontSize(12)
+                .fontColor(this.theme.textSecondary)
+                .width('100%');
+            }
+            Row({ space: 8 }) {
+              Button($r('app.string.provider_save'))
+                .fontSize(13)
+                .backgroundColor(this.theme.accent)
+                .fontColor(this.theme.textOnAccent)
+                .enabled(!this.controller.savingProvider)
+                .onClick(() => this.saveProvider());
+              if (this.controller.hasProvider) {
+                Button($r('app.string.provider_clear'))
+                  .fontSize(13)
+                  .backgroundColor(this.theme.surfaceMuted)
+                  .fontColor(this.theme.textPrimary)
+                  .onClick(() => this.clearProvider());
+              }
+            }
+            if (this.controller.errorCode === 'provider_not_saved') {
+              Text(Copy.errorText(this.controller.errorCode, this.controller.errorDetail))
+                .fontSize(12)
+                .fontColor(this.theme.dangerAccent)
+                .width('100%');
+            }
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%');
+        }
         ListItem() {
           Text($r('app.string.settings_section_appearance'))
             .fontSize(11)
