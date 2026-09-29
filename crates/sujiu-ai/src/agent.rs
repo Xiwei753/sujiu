@@ -197,7 +197,14 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
             };
         }
 
-        let matches = self.tools.search(query, requested_limit);
+        let matches = self
+            .tools
+            .search(query, self.tools.len())
+            .into_iter()
+            .filter(|definition| !active.contains(&definition.name))
+            .take(requested_limit)
+            .collect::<Vec<_>>();
+
         for definition in &matches {
             active.insert(definition.name.clone());
         }
