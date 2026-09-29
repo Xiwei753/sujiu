@@ -1,0 +1,26 @@
+name: Core CI
+
+on:
+  push:
+    paths:
+      - "Cargo.toml"
+      - "crates/**"
+      - ".github/workflows/core-ci.yml"
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "crates/**"
+      - ".github/workflows/core-ci.yml"
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Test
+        run: cargo test --workspace
