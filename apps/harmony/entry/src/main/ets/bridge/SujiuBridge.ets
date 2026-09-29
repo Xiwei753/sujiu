@@ -18,7 +18,7 @@ export interface SessionSummary {
 export interface CharacterSummary {
   id: string;
   name: string;
-  tagline: string;
+  description: string;
   tags: string[];
 }
 

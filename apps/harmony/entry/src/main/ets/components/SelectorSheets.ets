@@ -75,7 +75,7 @@ export struct CharacterSelectorSheet {
             .fontSize(this.controller.currentCharacter?.id === character.id ? 15 : 16)
             .fontColor(this.theme.textPrimary)
             .width('100%');
-          Text(character.tagline)
+          Text(character.description)
             .fontSize(12)
             .fontColor(this.theme.textSecondary)
             .maxLines(2)

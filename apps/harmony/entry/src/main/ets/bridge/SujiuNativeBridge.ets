@@ -27,7 +27,7 @@ interface NativeSession {
 interface NativeCharacter {
   id: string;
   name: string;
-  tagline: string;
+  description: string;
 }
 
 interface NativeModel {
@@ -183,7 +183,7 @@ function toSession(value: NativeSession): SessionSummary {
 }
 
 function toCharacter(value: NativeCharacter): CharacterSummary {
-  return { id: value.id, name: value.name, tagline: value.tagline, tags: [] } as CharacterSummary;
+  return { id: value.id, name: value.name, description: value.description, tags: [] } as CharacterSummary;
 }
 
 function toModel(value: NativeModel): ModelSummary {

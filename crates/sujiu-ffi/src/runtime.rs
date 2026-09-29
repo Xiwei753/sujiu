@@ -57,7 +57,13 @@ pub struct SessionSummary {
 pub struct CharacterSummary {
     pub id: String,
     pub name: String,
-    pub tagline: String,
+    /// The character's own description, passed through as authored.
+    ///
+    /// The runtime does not shorten it into a teaser. Choosing a sentence, a
+    /// length or an ellipsis is a presentation decision, and a truncation rule
+    /// in the runtime would also be the wrong place to encode what counts as a
+    /// sentence in a given language.
+    pub description: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -402,10 +408,14 @@ impl SujiuRuntime {
                 });
 
                 SessionSummary {
+                    // A projection of the last message, not a display string. The
+                    // bound exists so a session list does not carry whole
+                    // messages across the boundary; how a platform renders or
+                    // further clips it is that platform's business.
                     preview: session
                         .messages
                         .last()
-                        .map(|message| preview_of(&message.content))
+                        .map(|message| projected_preview(&message.content))
                         .unwrap_or_default(),
                     character_name: character
                         .map(|character| character.name.clone())
@@ -450,7 +460,7 @@ impl SujiuRuntime {
             .map(|character| CharacterSummary {
                 id: character.id.clone(),
                 name: character.name.clone(),
-                tagline: first_sentence(&character.description),
+                description: character.description.clone(),
             })
             .collect()
     }
@@ -519,7 +529,7 @@ impl SujiuRuntime {
             .map(|character| CharacterSummary {
                 id: character.id.clone(),
                 name: character.name.clone(),
-                tagline: first_sentence(&character.description),
+                description: character.description.clone(),
             });
 
         let messages = session
@@ -819,8 +829,13 @@ fn provider_kind_label(kind: sujiu_core::ProviderKind) -> String {
     }
 }
 
-/// One short line for a list row, without dragging the whole message along.
-fn preview_of(content: &str) -> String {
+/// A bounded projection of stored text, for list rows.
+///
+/// Unlike a teaser this invents nothing: it collapses existing whitespace and
+/// stops at a length, so a platform can show it as is or clip it further. It
+/// stays here because the length bound is about what crosses the FFI boundary,
+/// not about how the row looks.
+fn projected_preview(content: &str) -> String {
     const PREVIEW_CHARS: usize = 90;
 
     let single_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -830,14 +845,6 @@ fn preview_of(content: &str) -> String {
 
     let truncated: String = single_line.chars().take(PREVIEW_CHARS).collect();
     format!("{truncated}…")
-}
-
-fn first_sentence(text: &str) -> String {
-    let trimmed = text.trim();
-    let end = trimmed
-        .find(['\n', '.', '!', '?', '\u{3002}', '\u{ff01}', '\u{ff1f}'])
-        .unwrap_or(trimmed.len());
-    trimmed[..end].trim().to_string()
 }
 
 /// Reporter that collects events into memory, used by the synchronous

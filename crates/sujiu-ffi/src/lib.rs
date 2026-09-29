@@ -502,6 +502,17 @@ mod tests {
     }
 
     #[test]
+    fn a_character_description_is_passed_through_unshortened() {
+        let runtime = runtime();
+        let character = runtime.characters("lin").remove(0);
+
+        // The runtime is not allowed to invent a teaser: picking a sentence, a
+        // length or an ellipsis for a character row is a presentation choice.
+        let authored = runtime.character(&character.id).expect("character");
+        assert_eq!(character.description, authored.description);
+    }
+
+    #[test]
     fn conversation_state_includes_recorded_tool_calls() {
         let runtime = runtime();
         let snapshot = runtime

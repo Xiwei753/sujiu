@@ -405,7 +405,7 @@ struct Index {
                   .fontSize(15)
                   .fontColor(this.theme.textPrimary)
                   .width('100%');
-                Text(character.tagline)
+                Text(character.description)
                   .fontSize(12)
                   .fontColor(this.theme.textSecondary)
                   .maxLines(2)
@@ -439,7 +439,7 @@ struct Index {
         this.controller.characterById(characterId)?.name ?? $r('app.string.title_default_character')
       );
 
-      Text(this.controller.characterById(characterId)?.tagline ?? '')
+      Text(this.controller.characterById(characterId)?.description ?? '')
         .fontSize(15)
         .fontColor(this.theme.textPrimary)
         .width('100%');

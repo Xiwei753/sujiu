@@ -334,6 +334,17 @@ the runtime as defaults that a platform may override through `extra` but never
 has to restate. Otherwise two platforms can configure the same endpoint into two
 different conversations.
 
+Passing content through unshortened is the same discipline. The runtime hands a
+character's description as its author wrote it and does not cut it into a
+one-line teaser, because picking the sentence, the length and the ellipsis is a
+presentation choice, and a truncation rule in the runtime is also the wrong place
+to decide what counts as a sentence in a given language.
+
+The one thing the runtime may do is bound a projection. A session row needs a
+line of its last message without the whole message crossing the FFI boundary,
+so `SessionSummary.preview` is collapsed and length-bounded on purpose. It
+invents nothing, and a platform is free to render or further clip it.
+
 The consequence for translators: they edit one JSON file per locale and never
 read ArkTS. The consequence for reviewers: grepping the Rust or presentation
 sources for a user-visible sentence is a bug, and so is grepping a view for a
@@ -397,8 +408,8 @@ The frontends need a coarse, provider-neutral conversation API. The current
 Required data (provider-neutral, stable IDs, no provider wire format):
 
 ```text
-SessionSummary   id, title, updated_at_ms, message_count
-CharacterSummary id, name, avatar_uri, greeting_preview, updated_at_ms
+SessionSummary   id, title, character_id, character_name, preview, updated_at_ms, message_count
+CharacterSummary id, name, description
 ModelSummary     id, name, provider_label, capabilities, available
 ContextSourceSummary id, kind, label, record_count, last_used_at_ms
 ConversationSnapshot  messages + per-turn tool/context records

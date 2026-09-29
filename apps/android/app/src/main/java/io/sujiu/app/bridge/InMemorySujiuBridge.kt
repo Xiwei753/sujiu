@@ -27,25 +27,25 @@ class InMemorySujiuBridge(
         CharacterSummary(
             id = "char-lin",
             name = "Lin",
-            tagline = "Night-shift radio host who never says what she means",
+            description = "Night-shift radio host who never says what she means",
             tags = listOf("Modern", "Slow burn", "Radio"),
         ),
         CharacterSummary(
             id = "char-qi",
             name = "Qi",
-            tagline = "Archivist of a city that rewrote its own name",
+            description = "Archivist of a city that rewrote its own name",
             tags = listOf("Fantasy", "Mystery"),
         ),
         CharacterSummary(
             id = "char-ayan",
             name = "Ayan",
-            tagline = "Courier with a debt and a bicycle",
+            description = "Courier with a debt and a bicycle",
             tags = listOf("Modern", "Adventure"),
         ),
         CharacterSummary(
             id = "char-mira",
             name = "Mira",
-            tagline = "Cartographer mapping places that are not there yet",
+            description = "Cartographer mapping places that are not there yet",
             tags = listOf("Fantasy", "Travel"),
         ),
     )
@@ -126,7 +126,7 @@ class InMemorySujiuBridge(
         if (trimmed.isEmpty()) return characters
         return characters.filter {
             it.name.contains(trimmed, ignoreCase = true) ||
-                it.tagline.contains(trimmed, ignoreCase = true) ||
+                it.description.contains(trimmed, ignoreCase = true) ||
                 it.tags.any { tag -> tag.contains(trimmed, ignoreCase = true) }
         }
     }

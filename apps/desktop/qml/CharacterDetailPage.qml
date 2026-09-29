@@ -56,7 +56,7 @@ Page {
             rightPadding: 20
 
             Label {
-                text: page.character ? page.character.tagline : ""
+                text: page.character ? page.character.description : ""
                 opacity: 0.7
                 visible: text.length > 0
             }

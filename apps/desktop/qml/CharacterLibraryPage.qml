@@ -77,7 +77,7 @@ Page {
                         font.bold: true
                     }
                     Label {
-                        text: modelData.tagline
+                        text: modelData.description
                         font.pixelSize: 11
                         opacity: 0.7
                         elide: Text.ElideRight

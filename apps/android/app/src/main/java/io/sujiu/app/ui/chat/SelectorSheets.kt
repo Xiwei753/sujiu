@@ -99,7 +99,7 @@ fun CharacterSelectorSheet(
                 items(items = state.characters, key = { it.id }) { character ->
                     CharacterRow(
                         name = character.name,
-                        tagline = character.tagline,
+                        description = character.description,
                         tags = character.tags,
                         selected = character.id == state.currentCharacter?.id,
                         onClick = {
@@ -128,7 +128,7 @@ fun CharacterSelectorSheet(
 @Composable
 fun CharacterRow(
     name: String,
-    tagline: String,
+    description: String,
     tags: List<String>,
     selected: Boolean,
     onClick: () -> Unit,
@@ -144,7 +144,7 @@ fun CharacterRow(
             style = if (selected) MaterialTheme.typography.titleSmall else MaterialTheme.typography.bodyLarge,
         )
         Text(
-            text = tagline,
+            text = description,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 2,

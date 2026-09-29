@@ -44,7 +44,7 @@ pub struct SessionSummaryDto {
 pub struct CharacterSummaryDto {
     pub id: String,
     pub name: String,
-    pub tagline: String,
+    pub description: String,
 }
 
 #[napi(object)]
@@ -137,7 +137,7 @@ impl From<CharacterSummary> for CharacterSummaryDto {
         Self {
             id: value.id,
             name: value.name,
-            tagline: value.tagline,
+            description: value.description,
         }
     }
 }

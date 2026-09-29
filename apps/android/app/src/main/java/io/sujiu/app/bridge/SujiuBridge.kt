@@ -22,7 +22,7 @@ data class SessionSummary(
 data class CharacterSummary(
     val id: String,
     val name: String,
-    val tagline: String,
+    val description: String,
     val tags: List<String>,
 )
 

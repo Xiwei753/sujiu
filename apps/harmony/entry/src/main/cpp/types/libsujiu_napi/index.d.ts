@@ -30,7 +30,11 @@ export interface SessionSummary {
 export interface CharacterSummary {
   id: string;
   name: string;
-  tagline: string;
+  /**
+   * The character's description as authored, passed through unshortened.
+   * Deciding how much of it a row shows is a presentation choice.
+   */
+  description: string;
 }
 
 export interface ModelSummary {

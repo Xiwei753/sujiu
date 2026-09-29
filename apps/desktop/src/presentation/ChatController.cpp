@@ -108,7 +108,7 @@ QString ChatController::currentCharacterTagline() const
     for (const QVariant &entry : m_bridge->characters(QString())) {
         const QVariantMap character = entry.toMap();
         if (character.value(QStringLiteral("id")).toString() == m_currentCharacterId) {
-            return character.value(QStringLiteral("tagline")).toString();
+            return character.value(QStringLiteral("description")).toString();
         }
     }
     return QString();

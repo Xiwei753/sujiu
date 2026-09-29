@@ -20,14 +20,14 @@ QVariantMap makeSession(const QString &id, const QString &title, int messageCoun
 
 QVariantMap makeCharacter(const QString &id,
                           const QString &name,
-                          const QString &tagline,
+                          const QString &description,
                           const QString &greeting,
                           int recentOrder)
 {
     QVariantMap character;
     character.insert(QStringLiteral("id"), id);
     character.insert(QStringLiteral("name"), name);
-    character.insert(QStringLiteral("tagline"), tagline);
+    character.insert(QStringLiteral("description"), description);
     character.insert(QStringLiteral("greeting"), greeting);
     character.insert(QStringLiteral("recentOrder"), recentOrder);
     return character;
@@ -135,7 +135,7 @@ QVariantList InMemorySujiuBridge::characters(const QString &query) const
     for (const QVariant &entry : all) {
         const QVariantMap character = entry.toMap();
         if (character.value(QStringLiteral("name")).toString().contains(query, Qt::CaseInsensitive)
-            || character.value(QStringLiteral("tagline")).toString().contains(query, Qt::CaseInsensitive)) {
+            || character.value(QStringLiteral("description")).toString().contains(query, Qt::CaseInsensitive)) {
             filtered.append(entry);
         }
     }

@@ -65,7 +65,7 @@ fun CharacterLibraryScreen(controller: ChatController) {
                         Column(modifier = Modifier.padding(start = 12.dp)) {
                             Text(character.name, style = MaterialTheme.typography.titleSmall)
                             Text(
-                                text = character.tagline,
+                                text = character.description,
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -97,7 +97,7 @@ fun CharacterDetailScreen(controller: ChatController, characterId: String) {
             modifier = Modifier.padding(padding).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(character?.tagline.orEmpty(), style = MaterialTheme.typography.bodyLarge)
+            Text(character?.description.orEmpty(), style = MaterialTheme.typography.bodyLarge)
             if (!character?.tags.isNullOrEmpty()) {
                 Text(
                     text = character!!.tags.joinToString(" · "),

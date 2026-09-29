@@ -58,7 +58,7 @@ Popup {
                                 text: modelData.name
                             }
                             Label {
-                                text: modelData.tagline
+                                text: modelData.description
                                 font.pixelSize: 11
                                 opacity: 0.6
                             }
