@@ -30,5 +30,53 @@ ArkUI views never call a provider, a tool or a platform API directly. They read
 because `sujiu-ffi` does not expose the conversation surface yet; switching to
 the real bridge is a one-line change in `app/Controller.ets`.
 
-DevEco/Hvigor-generated project metadata and signing configuration are
-intentionally not committed here; signing keys/config remain local.
+Signing material is machine local and secret and is never committed. Generate
+it once per machine (see below).
+
+## Toolchain
+
+HarmonyOS is built with the official DevEco CLI plus the HarmonyOS Command
+Line Tools, both of which live outside this repository:
+
+```bash
+export PATH="$HOME/.local/npm-global/bin:$PATH"
+export DEVECO_CLI_CLT_PATH="$HOME/.harmony-cli"
+devecocli --version
+```
+
+`DEVECO_CLI_CLT_PATH` must point at a Command Line Tools installation;
+otherwise `devecocli` reports that DevEco Studio is unavailable on Linux.
+
+## Lint, build, run
+
+All commands run from `apps/harmony`:
+
+```bash
+devecocli check lint entry/src/main/ets
+devecocli build --modules entry --build-mode debug
+devecocli device list
+devecocli run --module entry
+```
+
+`devecocli check lint` without a path argument reports `Files checked: 0`;
+pass the source directory so codelinter actually processes the ArkTS files.
+
+The debug build produces
+`entry/build/default/outputs/default/entry-default-signed.hap`.
+
+## Debug signing
+
+`build-profile.json5` is committed without signing material: `signingConfigs`
+is empty on purpose, so no key path, alias or password ever reaches Git.
+Generate the local debug signature once per machine:
+
+```bash
+cd apps/harmony
+devecocli signature generate --product default
+```
+
+This writes `.p12` / `.csr` / `.cer` / `.p7b` material under `~/.ohos/config/`
+and fills `app.signingConfigs` plus the product's `signingConfig` reference
+locally. Those local edits stay uncommitted; keep `signingConfigs: []` in the
+committed file. Add `--force` only to rebuild an already-existing Sujiu
+signature.

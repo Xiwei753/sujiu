@@ -1,4 +1,5 @@
-import { ConfigurationConstant, common } from '@kit.AbilityKit';
+import { common } from '@kit.AbilityKit';
+import { resourceManager } from '@kit.LocalizationKit';
 import { deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 
 /**
@@ -28,18 +29,13 @@ export class HarmonyClipboardService implements ClipboardService {
 }
 
 export interface SystemAppearanceService {
-  systemPrefersDark(context?: common.Context): boolean;
+  systemPrefersDark(context: common.Context): boolean;
 }
 
 export class HarmonySystemAppearanceService implements SystemAppearanceService {
-  systemPrefersDark(context?: common.Context): boolean {
-    const applicationContext: common.Context | undefined = context ??
-      (getContext(this) as common.Context | undefined);
-    if (!applicationContext) {
-      return false;
-    }
-    return applicationContext.resourceManager.getConfigurationContext()
-      .colorMode === ConfigurationConstant.ColorMode.COLOR_MODE_DARK;
+  systemPrefersDark(context: common.Context): boolean {
+    return context.resourceManager.getConfigurationSync()
+      .colorMode === resourceManager.ColorMode.DARK;
   }
 }
 

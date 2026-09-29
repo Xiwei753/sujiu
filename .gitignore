@@ -17,3 +17,9 @@ cmake-build-*/
 # HarmonyOS
 .ohpm/
 .hvigor/
+
+# HarmonyOS build outputs and local toolchain state
+apps/harmony/**/build/
+apps/harmony/oh_modules/
+apps/harmony/oh-package-lock.json5
+apps/harmony/local.properties

@@ -1,0 +1,52 @@
+{
+  app: {
+    // Signing material is machine local and secret: never commit it.
+    // Run `devecocli signature generate --product default` once per machine to
+    // populate this locally. See apps/harmony/README.md.
+    signingConfigs: [],
+    products: [
+      {
+        name: 'default',
+        bundleName: 'com.xiwei.sujiu',
+        compileSdkVersion: '26.0.0',
+        compatibleSdkVersion: '26.0.0',
+        targetSdkVersion: '26.0.0',
+        runtimeOS: 'HarmonyOS',
+        arkTSVersion: '1.1',
+        bundleType: 'app',
+        label: '$string:app_name',
+        icon: '$media:app_icon',
+        versionCode: 1000000,
+        versionName: '0.1.0',
+        vendor: 'xiwei',
+        resource: {
+          directories: [
+            './AppScope/resources',
+          ],
+        },
+      },
+    ],
+    buildModeSet: [
+      {
+        name: 'debug',
+      },
+      {
+        name: 'release',
+      },
+    ],
+  },
+  modules: [
+    {
+      name: 'entry',
+      srcPath: './entry',
+      targets: [
+        {
+          name: 'default',
+          applyToProducts: [
+            'default',
+          ],
+        },
+      ],
+    },
+  ],
+}

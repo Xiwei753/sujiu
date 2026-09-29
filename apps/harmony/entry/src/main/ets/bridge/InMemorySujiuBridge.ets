@@ -153,11 +153,12 @@ export class InMemorySujiuBridge implements SujiuBridge {
 
   conversationState(sessionId: string): Promise<ConversationSnapshot> {
     const found: SessionSummary | undefined = this.sessions.find((item: SessionSummary) => item.id === sessionId);
-    return Promise.resolve({
+    const snapshot: ConversationSnapshot = {
       session: found ?? this.sessions[0],
       messages: this.messages,
       contextSources: this.contextSources
-    });
+    };
+    return Promise.resolve(snapshot);
   }
 
   sendTurn(sessionId: string, userText: string, onEvent: TurnEventListener): void {

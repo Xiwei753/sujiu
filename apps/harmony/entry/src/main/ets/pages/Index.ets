@@ -33,12 +33,13 @@ const APPEARANCE_MODES: AppearanceMode[] = [
 @Entry
 @Component
 struct Index {
-  @State private graph: AppGraph = new AppGraph(getContext(this) as common.Context);
+  @State private graph: AppGraph = new AppGraph();
   @State private wideLayout: boolean = false;
   @State private showSheet: boolean = false;
   @State private sheet: SheetKind = SheetKind.None;
 
   aboutToAppear(): void {
+    this.graph.bind(this.getUIContext().getHostContext() as common.Context);
     this.graph.start();
   }
 
@@ -53,7 +54,7 @@ struct Index {
   }
 
   @Builder
-  private chatCanvas() {
+  private chatCanvas(weight: number = 0) {
     Column() {
       Row({ space: 4 }) {
         if (!this.wideLayout) {
@@ -94,7 +95,8 @@ struct Index {
       Composer({ controller: this.graph.controller });
     }
     .width('100%')
-    .height('100%');
+    .height('100%')
+    .layoutWeight(weight);
   }
 
   @Builder
@@ -147,13 +149,12 @@ struct Index {
             .width(300)
             .height('100%');
 
-          this.chatCanvas()
-            .layoutWeight(1);
+          this.chatCanvas(1);
         }
         .width('100%')
         .height('100%');
       } else {
-        this.chatCanvas()
+        this.chatCanvas();
       }
     }
     .width('100%')

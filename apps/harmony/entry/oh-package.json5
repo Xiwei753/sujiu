@@ -1,0 +1,9 @@
+{
+  "name": "entry",
+  "version": "0.1.0",
+  "description": "Sujiu HarmonyOS entry module (chat UI shell)",
+  "main": "",
+  "author": "xiwei",
+  "license": "AGPL-3.0",
+  "dependencies": {}
+}

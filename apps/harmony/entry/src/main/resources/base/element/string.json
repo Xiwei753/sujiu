@@ -7,6 +7,10 @@
     {
       "name": "entry_ability_desc",
       "value": "Sujiu"
+    },
+    {
+      "name": "app_name",
+      "value": "Sujiu"
     }
   ]
 }

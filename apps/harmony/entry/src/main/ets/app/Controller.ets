@@ -23,10 +23,9 @@ export class AppGraph {
   readonly platform: PlatformServices;
   readonly controller: ChatController;
   readonly navigator: Navigator;
-  private readonly context: common.Context;
+  private context: common.Context | null = null;
 
-  constructor(context: common.Context) {
-    this.context = context;
+  constructor() {
     this.bridge = new InMemorySujiuBridge();
     this.platform = new PlatformServices(
       new HarmonyClipboardService(),
@@ -35,6 +34,11 @@ export class AppGraph {
     );
     this.controller = new ChatController(this.bridge, this.platform);
     this.navigator = new Navigator();
+  }
+
+  /** Bound once the UI is alive; the host context is only reachable there. */
+  bind(context: common.Context): void {
+    this.context = context;
   }
 
   start(): void {
@@ -48,7 +52,7 @@ export class AppGraph {
       case AppearanceMode.Light:
         return false;
       default:
-        return this.platform.appearance.systemPrefersDark(this.context);
+        return this.context !== null && this.platform.appearance.systemPrefersDark(this.context);
     }
   }
 }
