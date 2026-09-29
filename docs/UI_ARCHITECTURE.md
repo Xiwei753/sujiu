@@ -188,6 +188,23 @@ UI **must not**:
 - execute tools;
 - touch raw FFI pointers/ABI.
 
+#### Reactive binding
+
+The UI layer binds presentation state to the platform's own reactive system and
+owns that choice. It is a UI concern, not a presentation one: presentation must
+not know about `@State`, `@ObjectLink`, `StateFlow`, `mutableStateOf`,
+`Q_PROPERTY` or any other framework binding primitive.
+
+Two rules follow, and both are easy to get wrong:
+
+- Bind the observed object the page actually renders from, not the container
+  that happens to hold it. ArkUI observes the first level of a `@State` value,
+  so a page that reaches through a composition root to `graph.controller.x`
+  renders once and then goes stale. Bind `controller` itself, or pass it into a
+  child component as `@ObjectLink`.
+- Ephemeral visual state stays in the view. Sheet and drawer *visibility* is
+  local view state; the *data* they show is presentation state.
+
 ### 2.2 Presentation / ViewModel / Controller
 
 Turns UI intents into application behaviour and owns **page state**:

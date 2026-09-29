@@ -1,4 +1,5 @@
 import { common } from '@kit.AbilityKit';
+import { KeyboardAvoidMode } from '@kit.ArkUI';
 import { CharacterSummary } from '../bridge/SujiuBridge';
 import { AppGraph } from '../app/Controller';
 import { Composer } from '../components/Composer';
@@ -6,6 +7,8 @@ import { ConversationView } from '../components/ConversationView';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { CharacterSelectorSheet, ContextSheet, ModelSelectorSheet } from '../components/SelectorSheets';
 import { AppearanceMode } from '../platform/PlatformServices';
+import { ChatController } from '../presentation/ChatController';
+import { AppTheme } from '../ui/theme/Theme';
 
 enum SheetKind {
   None = 'none',
@@ -42,7 +45,12 @@ const APPEARANCE_MODES: AppearanceMode[] = [
 @Entry
 @Component
 struct Index {
-  @State private graph: AppGraph = new AppGraph();
+  // Composition root. It stays a plain field: only the two observed objects the
+  // page renders from are state, so ArkUI observes their properties directly
+  // instead of the page reaching two levels deep through the graph.
+  private graph: AppGraph = new AppGraph();
+  @State private controller: ChatController = this.graph.controller;
+  @State private theme: AppTheme = this.graph.theme;
   @State private wideLayout: boolean = false;
   @State private showSheet: boolean = false;
   @State private sheet: SheetKind = SheetKind.None;
@@ -51,7 +59,33 @@ struct Index {
 
   aboutToAppear(): void {
     this.graph.bind(this.getUIContext().getHostContext() as common.Context);
+    // RESIZE, not the default OFFSET: with OFFSET the IME pushes the whole
+    // page up, so the top bar slides under the status bar and the conversation
+    // overlaps the system area. Resizing keeps the chat chrome in place.
+    this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
     this.graph.start();
+  }
+
+  /**
+   * Back is resolved in the order a chat user expects: an open sheet closes
+   * first, then the history drawer, then the pushed destination. Returning
+   * false only at the root hands the gesture back to the system, which ends
+   * the ability.
+   */
+  onBackPress(): boolean {
+    if (this.showSheet) {
+      this.closeSheet();
+      return true;
+    }
+    if (!this.wideLayout && this.drawerOpen) {
+      this.drawerOpen = false;
+      return true;
+    }
+    if (this.pathStack.size() > 0) {
+      this.pathStack.pop();
+      return true;
+    }
+    return false;
   }
 
   private openSheet(kind: SheetKind): void {
@@ -70,7 +104,7 @@ struct Index {
       if (!this.wideLayout) {
         Text('☰')
           .fontSize(20)
-          .fontColor(this.graph.theme.textPrimary)
+          .fontColor(this.theme.textPrimary)
           .width(40)
           .height(40)
           .textAlign(TextAlign.Center)
@@ -80,25 +114,25 @@ struct Index {
           });
       }
 
-      Text(this.graph.controller.currentCharacter?.name ?? 'New chat')
+      Text(this.controller.currentCharacter?.name ?? 'New chat')
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.graph.theme.textPrimary)
+        .fontColor(this.theme.textPrimary)
         .layoutWeight(1)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .onClick(() => this.openSheet(SheetKind.Characters));
 
-      Text(this.graph.controller.currentModel?.name ?? 'Select model')
+      Text(this.controller.currentModel?.name ?? 'Select model')
         .fontSize(12)
-        .fontColor(this.graph.theme.textSecondary)
+        .fontColor(this.theme.textSecondary)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .onClick(() => this.openSheet(SheetKind.Models));
 
       Text('⋯')
         .fontSize(20)
-        .fontColor(this.graph.theme.textPrimary)
+        .fontColor(this.theme.textPrimary)
         .width(40)
         .height(40)
         .textAlign(TextAlign.Center)
@@ -107,20 +141,20 @@ struct Index {
     }
     .width('100%')
     .padding({ left: 8, right: 8, top: 6, bottom: 6 })
-    .backgroundColor(this.graph.theme.pageBackground);
+    .backgroundColor(this.theme.pageBackground);
   }
 
   @Builder
   private conversationColumn(weight: number = 0) {
     Column() {
       this.topBar();
-      ConversationView({ controller: this.graph.controller, theme: this.graph.theme });
-      Composer({ controller: this.graph.controller, theme: this.graph.theme });
+      ConversationView({ controller: this.controller, theme: this.theme });
+      Composer({ controller: this.controller, theme: this.theme });
     }
     .width('100%')
     .height('100%')
     .layoutWeight(weight)
-    .backgroundColor(this.graph.theme.pageBackground);
+    .backgroundColor(this.theme.pageBackground);
   }
 
   /**
@@ -130,8 +164,8 @@ struct Index {
   @Builder
   private historyDrawer() {
     HistoryPanel({
-      controller: this.graph.controller,
-      theme: this.graph.theme,
+      controller: this.controller,
+      theme: this.theme,
       onPick: () => {
         if (!this.wideLayout) {
           this.drawerOpen = false;
@@ -144,19 +178,19 @@ struct Index {
   private sheetContent() {
     if (this.sheet === SheetKind.Models) {
       ModelSelectorSheet({
-        controller: this.graph.controller,
-        theme: this.graph.theme,
+        controller: this.controller,
+        theme: this.theme,
         onPick: (modelId: string) => {
-          this.graph.controller.selectModel(modelId);
+          this.controller.selectModel(modelId);
           this.closeSheet();
         }
       });
     } else if (this.sheet === SheetKind.Characters) {
       CharacterSelectorSheet({
-        controller: this.graph.controller,
-        theme: this.graph.theme,
+        controller: this.controller,
+        theme: this.theme,
         onPick: (characterId: string) => {
-          this.graph.controller.selectCharacter(characterId);
+          this.controller.selectCharacter(characterId);
           this.closeSheet();
         },
         onOpenLibrary: () => {
@@ -165,7 +199,7 @@ struct Index {
         }
       });
     } else if (this.sheet === SheetKind.Context) {
-      ContextSheet({ controller: this.graph.controller, theme: this.graph.theme });
+      ContextSheet({ controller: this.controller, theme: this.theme });
     } else {
       this.moreSheet();
     }
@@ -178,30 +212,30 @@ struct Index {
       Text('More')
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.graph.theme.textPrimary)
+        .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, top: 16, bottom: 8 });
 
       Text('Context in this chat')
         .fontSize(16)
-        .fontColor(this.graph.theme.textPrimary)
+        .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, right: 24, top: 10, bottom: 10 })
         .onClick(() => this.openSheet(SheetKind.Context));
 
       Text('New chat')
         .fontSize(16)
-        .fontColor(this.graph.theme.textPrimary)
+        .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, right: 24, top: 10, bottom: 10 })
         .onClick(() => {
           this.closeSheet();
-          this.graph.controller.newSession();
+          this.controller.newSession();
         });
 
       Text('Settings')
         .fontSize(16)
-        .fontColor(this.graph.theme.textPrimary)
+        .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, right: 24, top: 10, bottom: 16 })
         .onClick(() => {
@@ -223,6 +257,11 @@ struct Index {
       .height('100%')
       .sideBarWidth(300)
       .showSideBar(this.drawerOpen)
+      // The platform control button floats over the content area, which
+      // would sit below the top bar. The top bar owns the toggle instead;
+      // edge-swipe and the overlay scrim stay platform provided.
+      .showControlButton(false)
+      .showSideBarWithGesture(true)
       .autoHide(!this.wideLayout)
       .onChange((visible: boolean) => {
         this.drawerOpen = visible;
@@ -241,24 +280,32 @@ struct Index {
     .mode(NavigationMode.Stack)
     .width('100%')
     .height('100%')
-    .backgroundColor(this.graph.theme.pageBackground)
+    .backgroundColor(this.theme.pageBackground)
     .bindSheet($$this.showSheet, this.sheetContent(), {
       height: SheetSize.MEDIUM,
       showClose: true,
       dragBar: true,
-      backgroundColor: this.graph.theme.surface
+      backgroundColor: this.theme.surface
     });
   }
 
   @Builder
   private destination(name: string, param: Object) {
-    if (name === RouteName.Library) {
-      this.libraryView()
-    } else if (name === RouteName.CharacterDetail) {
-      this.characterDetailView(param as string)
-    } else {
-      this.settingsView()
+    // The builder must emit a NavDestination: Navigation registers it as a
+    // real destination, renders its content and consumes the back gesture.
+    // Emitting bare content here leaves a blank page and lets back exit the
+    // whole app.
+    NavDestination() {
+      if (name === RouteName.Library) {
+        this.libraryView()
+      } else if (name === RouteName.CharacterDetail) {
+        this.characterDetailView(param as string)
+      } else {
+        this.settingsView()
+      }
     }
+    .hideTitleBar(true)
+    .backgroundColor(this.theme.pageBackground);
   }
 
   @Builder
@@ -266,7 +313,7 @@ struct Index {
     Row({ space: 8 }) {
       Text('←')
         .fontSize(20)
-        .fontColor(this.graph.theme.textPrimary)
+        .fontColor(this.theme.textPrimary)
         .width(40)
         .height(40)
         .textAlign(TextAlign.Center)
@@ -275,11 +322,11 @@ struct Index {
       Text(title)
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
-        .fontColor(this.graph.theme.textPrimary);
+        .fontColor(this.theme.textPrimary);
     }
     .width('100%')
     .padding(12)
-    .backgroundColor(this.graph.theme.pageBackground);
+    .backgroundColor(this.theme.pageBackground);
   }
 
   @Builder
@@ -288,18 +335,18 @@ struct Index {
       this.pageHeader('Characters');
 
       List({ space: 12 }) {
-        ForEach(this.graph.controller.characters, (character: CharacterSummary) => {
+        ForEach(this.controller.characters, (character: CharacterSummary) => {
           ListItem() {
             Row({ space: 12 }) {
               Text('👤').fontSize(20);
               Column({ space: 2 }) {
                 Text(character.name)
                   .fontSize(15)
-                  .fontColor(this.graph.theme.textPrimary)
+                  .fontColor(this.theme.textPrimary)
                   .width('100%');
                 Text(character.tagline)
                   .fontSize(12)
-                  .fontColor(this.graph.theme.textSecondary)
+                  .fontColor(this.theme.textSecondary)
                   .maxLines(2)
                   .textOverflow({ overflow: TextOverflow.Ellipsis })
                   .width('100%');
@@ -310,7 +357,7 @@ struct Index {
             .width('100%')
             .padding(16)
             .borderRadius(14)
-            .backgroundColor(this.graph.theme.surface)
+            .backgroundColor(this.theme.surface)
             .onClick(() => this.pathStack.pushPath({ name: RouteName.CharacterDetail, param: character.id }));
           }
         }, (character: CharacterSummary) => character.id);
@@ -318,7 +365,7 @@ struct Index {
       .width('100%')
       .layoutWeight(1)
       .padding(16)
-      .backgroundColor(this.graph.theme.pageBackground);
+      .backgroundColor(this.theme.pageBackground);
     }
     .width('100%')
     .height('100%');
@@ -327,19 +374,19 @@ struct Index {
   @Builder
   private characterDetailView(characterId: string) {
     Column({ space: 12 }) {
-      this.pageHeader(this.graph.controller.characterById(characterId)?.name ?? 'Character');
+      this.pageHeader(this.controller.characterById(characterId)?.name ?? 'Character');
 
-      Text(this.graph.controller.characterById(characterId)?.tagline ?? '')
+      Text(this.controller.characterById(characterId)?.tagline ?? '')
         .fontSize(15)
-        .fontColor(this.graph.theme.textPrimary)
+        .fontColor(this.theme.textPrimary)
         .width('100%');
 
       Button('Chat with this character')
         .width('100%')
-        .backgroundColor(this.graph.theme.accent)
-        .fontColor(this.graph.theme.textOnAccent)
+        .backgroundColor(this.theme.accent)
+        .fontColor(this.theme.textOnAccent)
         .onClick(() => {
-          this.graph.controller.selectCharacter(characterId);
+          this.controller.selectCharacter(characterId);
           this.pathStack.clear();
         });
     }
@@ -347,7 +394,7 @@ struct Index {
     .width('100%')
     .height('100%')
     .padding(16)
-    .backgroundColor(this.graph.theme.pageBackground);
+    .backgroundColor(this.theme.pageBackground);
   }
 
   @Builder
@@ -359,7 +406,7 @@ struct Index {
         ListItem() {
           Text('APPEARANCE')
             .fontSize(11)
-            .fontColor(this.graph.theme.textSecondary)
+            .fontColor(this.theme.textSecondary)
             .width('100%');
         }
         ListItem() {
@@ -370,16 +417,16 @@ struct Index {
                 .padding({ left: 14, right: 14, top: 8, bottom: 8 })
                 .borderRadius(16)
                 .backgroundColor(
-                  this.graph.controller.appearanceMode === mode
-                    ? this.graph.theme.accent
-                    : this.graph.theme.surfaceMuted
+                  this.controller.appearanceMode === mode
+                    ? this.theme.accent
+                    : this.theme.surfaceMuted
                 )
                 .fontColor(
-                  this.graph.controller.appearanceMode === mode
-                    ? this.graph.theme.textOnAccent
-                    : this.graph.theme.textPrimary
+                  this.controller.appearanceMode === mode
+                    ? this.theme.textOnAccent
+                    : this.theme.textPrimary
                 )
-                .onClick(() => this.graph.controller.setAppearance(mode));
+                .onClick(() => this.controller.setAppearance(mode));
             }, (mode: AppearanceMode) => mode);
           }
           .width('100%');
@@ -387,18 +434,18 @@ struct Index {
         ListItem() {
           Text('ABOUT')
             .fontSize(11)
-            .fontColor(this.graph.theme.textSecondary)
+            .fontColor(this.theme.textSecondary)
             .width('100%');
         }
         ListItem() {
           Column({ space: 2 }) {
             Text('Platform')
               .fontSize(15)
-              .fontColor(this.graph.theme.textPrimary)
+              .fontColor(this.theme.textPrimary)
               .width('100%');
-            Text(this.graph.controller.platformSummary())
+            Text(this.controller.platformSummary())
               .fontSize(12)
-              .fontColor(this.graph.theme.textSecondary)
+              .fontColor(this.theme.textSecondary)
               .width('100%');
           }
           .alignItems(HorizontalAlign.Start)
@@ -408,11 +455,11 @@ struct Index {
           Column({ space: 2 }) {
             Text('Runtime')
               .fontSize(15)
-              .fontColor(this.graph.theme.textPrimary)
+              .fontColor(this.theme.textPrimary)
               .width('100%');
-            Text(this.graph.controller.runtimeSummary())
+            Text(this.controller.runtimeSummary())
               .fontSize(12)
-              .fontColor(this.graph.theme.textSecondary)
+              .fontColor(this.theme.textSecondary)
               .width('100%');
           }
           .alignItems(HorizontalAlign.Start)
@@ -422,7 +469,7 @@ struct Index {
       .width('100%')
       .layoutWeight(1)
       .padding(16)
-      .backgroundColor(this.graph.theme.pageBackground);
+      .backgroundColor(this.theme.pageBackground);
     }
     .width('100%')
     .height('100%');

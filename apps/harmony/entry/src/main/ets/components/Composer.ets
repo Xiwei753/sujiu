@@ -12,12 +12,18 @@ export struct Composer {
 
   build() {
     Row({ space: 8 }) {
-      Button('+')
+      // Fixed-size buttons drop the default label padding, otherwise the
+      // label is squeezed out of the button and renders as a blank circle.
+      Button() {
+        Text('+')
+          .fontSize(20)
+          .fontColor(this.theme.textSecondary);
+      }
         .width(40)
         .height(40)
+        .padding(0)
         .borderRadius(20)
         .backgroundColor(this.theme.surfaceMuted)
-        .fontColor(this.theme.textPrimary)
         .enabled(false)
         .accessibilityText('Add attachment');
 
@@ -33,20 +39,28 @@ export struct Composer {
         });
 
       if (this.controller.busy) {
-        Button('■')
+        Button() {
+          Text('■')
+            .fontSize(16)
+            .fontColor(this.theme.danger);
+        }
           .width(40)
           .height(40)
+          .padding(0)
           .borderRadius(20)
           .backgroundColor(this.theme.dangerSurface)
-          .fontColor(this.theme.danger)
           .onClick(() => this.controller.stop());
       } else {
-        Button('↑')
+        Button() {
+          Text('↑')
+            .fontSize(20)
+            .fontColor(this.theme.textOnAccent);
+        }
           .width(40)
           .height(40)
+          .padding(0)
           .borderRadius(20)
           .backgroundColor(this.theme.accent)
-          .fontColor(this.theme.textOnAccent)
           .enabled(this.controller.canSend)
           .onClick(() => this.controller.send());
       }

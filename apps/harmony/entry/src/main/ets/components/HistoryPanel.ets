@@ -66,12 +66,19 @@ export struct HistoryPanel {
           .fontWeight(FontWeight.Medium)
           .fontColor(this.theme.textPrimary)
           .layoutWeight(1);
-        Button('+')
+        // Custom content plus zero padding: a fixed-size Button keeps the
+        // default label padding, which leaves no room for the label and
+        // silently renders an empty circle.
+        Button() {
+          Text('+')
+            .fontSize(18)
+            .fontColor(this.theme.textPrimary);
+        }
           .width(32)
           .height(32)
+          .padding(0)
           .borderRadius(16)
           .backgroundColor(this.theme.surfaceMuted)
-          .fontColor(this.theme.textPrimary)
           .accessibilityText('New chat')
           .onClick(() => {
             this.controller.newSession();
