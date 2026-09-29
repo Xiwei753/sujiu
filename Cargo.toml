@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/sujiu-core",
+    "crates/sujiu-codec",
     "crates/sujiu-ffi",
 ]
 resolver = "2"
