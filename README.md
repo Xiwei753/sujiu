@@ -25,6 +25,8 @@ crates/
   sujiu-ffi/     Stable cross-language boundary
 docs/
   ARCHITECTURE.md
+  TOOLS.md
+  UI_ARCHITECTURE.md
 ```
 
 ## Rust AI runtime
@@ -44,6 +46,24 @@ The provider-neutral loop is intentionally separate from provider wire formats s
 
 See [docs/TOOLS.md](docs/TOOLS.md) for the stable tool/context protocol.
 
+## Platform frontends
+
+Sujiu is a modern AI chat client first: the conversation canvas is the home
+surface, history lives in a drawer/sidebar, model and character selection are
+lightweight sheets, tool/thinking activity is collapsed by default, and wide
+screens promote the same layout into columns. Every frontend follows the same
+four layers — `UI → Presentation → Application Bridge + Platform Services → OS`
+— so page layout and platform capabilities stay independent:
+
+```text
+apps/desktop/   qml/ + src/{bridge,presentation,platform}
+apps/android/   ui/ + {bridge,presentation,platform}
+apps/harmony/   pages/ + components/ + {bridge,presentation,platform}
+```
+
+See [docs/UI_ARCHITECTURE.md](docs/UI_ARCHITECTURE.md) for the interaction spec,
+the layer rules, the turn state machine and the `sujiu-ffi` gap analysis.
+
 ## Core checks
 
 ```bash
@@ -51,7 +71,9 @@ cargo fmt --all -- --check
 cargo test --workspace
 ```
 
-The platform projects are intentionally thin at this stage. Their build-system glue and generated SDK files will be added per-platform after the Rust conversation boundary is stable.
+All three frontends currently drive a preview application bridge because
+`sujiu-ffi` does not yet expose the conversation surface; each frontend needs
+one wiring change in its composition root when it does.
 
 ## License
 

@@ -15,6 +15,8 @@ Sujiu follows two hard rules:
 
 Frontends own navigation, input methods, rendering, animations, window state and platform secure-storage integration. They do not rebuild the AI/tool loop independently.
 
+Each frontend is internally split into four layers — view, presentation, application bridge and platform services — so that page layout and OS capabilities stay independent. The interaction spec, the layer rules, the turn state machine and the `sujiu-ffi` gap analysis live in [UI_ARCHITECTURE.md](UI_ARCHITECTURE.md).
+
 ### 2. sujiu-core
 
 Pure Rust domain data with no HTTP or platform SDK dependency.
