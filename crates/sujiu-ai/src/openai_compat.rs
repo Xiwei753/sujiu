@@ -206,12 +206,13 @@ impl AiProvider for OpenAiCompatProvider {
             .unwrap_or_default()
             .into_iter()
             .map(|call| {
-                let arguments = serde_json::from_str(&call.function.arguments).map_err(|error| {
-                    ProviderError::InvalidResponse(format!(
-                        "tool {} returned invalid JSON arguments: {error}",
-                        call.function.name
-                    ))
-                })?;
+                let arguments =
+                    serde_json::from_str(&call.function.arguments).map_err(|error| {
+                        ProviderError::InvalidResponse(format!(
+                            "tool {} returned invalid JSON arguments: {error}",
+                            call.function.name
+                        ))
+                    })?;
 
                 Ok(ToolCall {
                     id: call.id,
