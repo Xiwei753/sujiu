@@ -1,5 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { CredentialService, HarmonyCredentialService } from './CredentialService';
+import { FileService, HarmonyFileService } from './FileService';
 import { resourceManager } from '@kit.LocalizationKit';
 import { deviceInfo, pasteboard } from '@kit.BasicServicesKit';
 
@@ -58,18 +59,22 @@ export class PlatformServices {
   readonly appearance: SystemAppearanceService;
   readonly info: PlatformInfoService;
   readonly credentials: CredentialService;
+  readonly files: FileService;
 
   constructor(
     clipboard: ClipboardService,
     appearance: SystemAppearanceService,
     info: PlatformInfoService,
-    credentials: CredentialService
+    credentials: CredentialService,
+    files: FileService
   ) {
     this.clipboard = clipboard;
     this.appearance = appearance;
     this.info = info;
     this.credentials = credentials;
+    this.files = files;
   }
 }
 
 export { CredentialService, HarmonyCredentialService };
+export { FileService, HarmonyFileService };

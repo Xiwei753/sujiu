@@ -113,6 +113,14 @@ export interface SujiuBridge {
   configureProvider(draft: ProviderDraft): Promise<void>;
   /** The api key for the next turn. The runtime never stores it. */
   setCredential(secret: string): void;
+  /**
+   * Attaches a directory the runtime may persist to.
+   *
+   * Optional: a bridge that keeps everything in memory reports false here and
+   * the frontend carries on. Attaching a directory that already holds a
+   * document restores it.
+   */
+  useDataDirectory(directory: string): Promise<boolean>;
   sendTurn(sessionId: string, userText: string, onEvent: TurnEventListener): void;
   cancelTurn(sessionId: string): void;
   runtimeSummary(): string;

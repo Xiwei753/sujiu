@@ -89,6 +89,22 @@ impl InMemoryContextStore {
         Self::default()
     }
 
+    /// Drop every source and record, so a restored document replaces the
+    /// content a runtime started with instead of being added to it.
+    pub fn clear(&self) {
+        self.sources.write().unwrap().clear();
+        self.records.write().unwrap().clear();
+    }
+
+    /// Every source and record currently held, so a caller can persist the
+    /// store and restore it on the next launch.
+    pub fn snapshot(&self) -> (Vec<ContextSource>, Vec<ContextRecord>) {
+        (
+            self.sources.read().unwrap().values().cloned().collect(),
+            self.records.read().unwrap().values().cloned().collect(),
+        )
+    }
+
     pub fn add_source(&self, source: ContextSource) {
         self.sources
             .write()

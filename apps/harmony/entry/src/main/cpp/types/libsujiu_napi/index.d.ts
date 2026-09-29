@@ -127,4 +127,6 @@ export class SujiuRuntimeBridge {
     onEvent: (unused: Object | null, payload: string) => void
   ): Promise<string>;
   cancelTurn(): void;
+  useDataDirectory(directory: string): Promise<void>;
+  dataDirectory(): string | null;
 }

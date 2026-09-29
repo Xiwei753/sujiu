@@ -314,6 +314,24 @@ pub fn create() -> Result<SujiuRuntimeBridge> {
 
 #[napi]
 impl SujiuRuntimeBridge {
+    /// Attaches a directory the runtime may persist to.
+    ///
+    /// The platform chooses the location; the runtime decides what goes in it.
+    /// Attaching after startup restores a document that is already there, so a
+    /// frontend can hand the directory over whenever it learns it.
+    #[napi]
+    pub fn use_data_directory(&self, directory: String) -> Result<()> {
+        self.runtime
+            .use_directory(&directory)
+            .map_err(napi::Error::from_reason)
+    }
+
+    /// The directory currently attached, or null when the runtime is in memory.
+    #[napi]
+    pub fn data_directory(&self) -> Option<String> {
+        self.runtime.directory()
+    }
+
     /// The shared runtime version, so a platform can report what it is bound to.
     #[napi]
     pub fn core_version(&self) -> String {

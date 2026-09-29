@@ -5,6 +5,7 @@ import {
   AppearanceMode,
   HarmonyClipboardService,
   HarmonyCredentialService,
+  HarmonyFileService,
   HarmonyPlatformInfoService,
   HarmonySystemAppearanceService,
   PlatformServices
@@ -26,6 +27,7 @@ export class AppGraph {
   readonly bridge: SujiuBridge;
   readonly platform: PlatformServices;
   readonly credentials: HarmonyCredentialService = new HarmonyCredentialService();
+  readonly files: HarmonyFileService = new HarmonyFileService();
   readonly controller: ChatController;
   /** UI-layer tokens, kept in sync with the resolved appearance mode. */
   readonly theme: AppTheme = new AppTheme(false);
@@ -37,7 +39,8 @@ export class AppGraph {
       new HarmonyClipboardService(),
       new HarmonySystemAppearanceService(),
       new HarmonyPlatformInfoService(),
-      this.credentials
+      this.credentials,
+      this.files
     );
     this.controller = new ChatController(this.bridge, this.platform, this.credentials);
     this.controller.onAppearanceChanged = () => this.syncTheme();
@@ -49,6 +52,11 @@ export class AppGraph {
     // Preferences need the application context, so the credential service is
     // bound before anything can ask it for a secret.
     this.credentials.bind(context);
+    // The platform supplies the location, the runtime owns the document.
+    const directory: string | null = this.files.dataDirectory(context);
+    if (directory !== null) {
+      this.bridge.useDataDirectory(directory);
+    }
   }
 
   start(): void {

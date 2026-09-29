@@ -283,6 +283,21 @@ The runtime advertises the provider kinds it can actually drive, and the
 configuration UI offers only those. A kind the runtime cannot drive is rejected
 at configuration time rather than at the first turn.
 
+#### Persistence
+
+Session, history and catalog semantics belong to the runtime, so the persisted
+document belongs to the runtime. A platform supplies only a **location**:
+
+```text
+FileService.dataDirectory(context)   // platform capability, reads no app data
+  -> bridge.useDataDirectory(path)   // optional; false when there is none
+      -> runtime persists its own document there
+```
+
+The runtime decides the format and when to write, writes atomically, and never
+picks a path itself. A bridge without storage is not a broken bridge, so the
+contract method is optional and reports whether a directory was attached.
+
 ### 2.5 Dependency direction
 
 ```text

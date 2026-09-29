@@ -19,7 +19,7 @@ pages/        ArkUI pages; pages/Index hosts the chat shell and ArkUI Navigation
 components/   reusable views: conversation, composer, history drawer, selector sheets
 presentation/ ChatController: page state, turn state, no I/O and no routing
 bridge/       SujiuBridge contract + the sujiu-ffi backed implementation
-platform/     credentials, clipboard, system appearance, platform info capabilities
+platform/     credentials, files, clipboard, system appearance, platform info capabilities
 app/          composition root; the only place that picks implementations
 ui/           AppTheme color tokens and Copy, the only place that produces text
 ```
@@ -88,6 +88,16 @@ therefore committed; rerun the script whenever the Rust side changes.
 shape of that module. API 26 does not type check napi imports yet and reports
 "Currently module for 'libsujiu_napi.so' is not verified", so keep the file in
 step with `crates/sujiu-napi/src/bridge.rs` by hand.
+
+## Persistence
+
+`FileService.dataDirectory(context)` reports `context.filesDir` and nothing
+more. `AppGraph.bind` hands that directory to the bridge, which attaches it to
+the runtime; the runtime then keeps its own document (`sujiu-runtime.json`)
+there. Attaching a directory that already holds a document restores it, so the
+catalog, the conversation history, the context sources and the provider
+configuration survive a restart. The split is deliberate: the platform chooses
+the location, the runtime owns the content and its format.
 
 ## Provider and credentials
 

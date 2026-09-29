@@ -104,6 +104,8 @@ interface NativeRuntime {
   conversationState(sessionId: string): NativeSnapshot | null;
   createSession(characterId: string): string;
   cancelTurn(): void;
+  useDataDirectory(directory: string): Promise<void>;
+  dataDirectory(): string | null;
   /** Applies a provider description. Rejects when the kind is not supported. */
   configureProvider(draft: NativeProviderConfig): Promise<void>;
   /**
@@ -408,6 +410,11 @@ export class SujiuNativeBridge implements SujiuBridge {
     }).finally((): void => {
       this.running = false;
     });
+  }
+
+  async useDataDirectory(directory: string): Promise<boolean> {
+    await this.runtime.useDataDirectory(directory);
+    return true;
   }
 
   cancelTurn(_sessionId: string): void {

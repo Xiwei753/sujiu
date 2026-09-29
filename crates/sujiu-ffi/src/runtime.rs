@@ -21,6 +21,7 @@ use sujiu_core::{
 };
 
 use crate::events::{TurnEventKind, TurnEventReporter, TurnEventSink};
+use crate::storage::{AppStorage, FileStorage, MemoryStorage};
 
 /// Upper bound on the transcript a single conversation state call returns.
 const MAX_TRANSCRIPT_MESSAGES: usize = 200;
@@ -75,7 +76,7 @@ pub struct ContextSourceSummary {
     pub record_count: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallSummary {
     pub id: String,
@@ -161,9 +162,9 @@ struct Inner {
 
 /// Seed data for a fresh runtime.
 ///
-/// Sujiu has no persistence layer yet, so the runtime starts from a small
+/// Used when no document has been persisted yet, so a first launch has a small
 /// deterministic catalog of real domain values instead of inventing data per
-/// call.
+/// call. Once a document exists the seed is ignored.
 #[derive(Default)]
 pub struct Seed {
     pub characters: Vec<Character>,
@@ -172,22 +173,82 @@ pub struct Seed {
     pub records: Vec<ContextRecord>,
 }
 
+/// Everything a launch needs, as one document.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Snapshot {
+    /// Bumped when the document shape changes incompatibly.
+    version: u32,
+    characters: Vec<Character>,
+    sessions: Vec<Session>,
+    sources: Vec<ContextSource>,
+    records: Vec<ContextRecord>,
+    tool_calls: Vec<(String, Vec<ToolCallSummary>)>,
+    provider_config: Option<ProviderConfig>,
+}
+
+/// A new session id that cannot collide with one already in the catalog.
+fn next_session_id(sessions: &[Session]) -> String {
+    let mut number = sessions.len() + 1;
+    loop {
+        let id = format!("session-{number}");
+        if !sessions.iter().any(|session| session.id == id) {
+            return id;
+        }
+        number += 1;
+    }
+}
+
+/// Document name the runtime keeps its state in.
+const SNAPSHOT_FILE: &str = "sujiu-runtime.json";
+const SNAPSHOT_VERSION: u32 = 1;
+
 /// The stateful runtime exported across the FFI boundary.
 pub struct SujiuRuntime {
     inner: Mutex<Inner>,
     cancel: Mutex<Option<CancelToken>>,
+    /// Where the snapshot lives. A platform attaches a directory; a runtime
+    /// without one forgets everything when it exits.
+    storage: Mutex<Arc<dyn AppStorage>>,
     pub tokio: tokio::runtime::Runtime,
 }
 
 impl SujiuRuntime {
+    /// A runtime that lives only as long as the process. Used by tests and by
+    /// any host with no platform storage.
     pub fn new(seed: Seed) -> std::io::Result<Self> {
-        let store = Arc::new(InMemoryContextStore::new());
+        Self::assemble(seed, Arc::new(MemoryStorage::new()), false)
+    }
 
-        for source in &seed.sources {
+    /// A runtime that keeps its state in `storage`, restoring a previous launch
+    /// when one is there and writing the seed when it is not.
+    pub fn new_persistent(seed: Seed, storage: Arc<dyn AppStorage>) -> std::io::Result<Self> {
+        Self::assemble(seed, storage, true)
+    }
+
+    fn assemble(seed: Seed, storage: Arc<dyn AppStorage>, restore: bool) -> std::io::Result<Self> {
+        let snapshot = if restore {
+            storage
+                .load(SNAPSHOT_FILE)
+                .and_then(|document| serde_json::from_str::<Snapshot>(&document).ok())
+        } else {
+            None
+        };
+
+        let sources = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.sources.clone())
+            .unwrap_or(seed.sources);
+        let records = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.records.clone())
+            .unwrap_or(seed.records);
+
+        let store = Arc::new(InMemoryContextStore::new());
+        for source in &sources {
             store.add_source(source.clone());
         }
-
-        for record in &seed.records {
+        for record in &records {
             store.add_record(record.clone());
         }
 
@@ -199,20 +260,95 @@ impl SujiuRuntime {
             .enable_all()
             .build()?;
 
-        Ok(Self {
+        let catalog = match &snapshot {
+            Some(snapshot) => Catalog {
+                characters: snapshot.characters.clone(),
+                sessions: snapshot.sessions.clone(),
+                tool_calls: snapshot.tool_calls.clone(),
+            },
+            None => Catalog {
+                characters: seed.characters,
+                sessions: seed.sessions,
+                tool_calls: Vec::new(),
+            },
+        };
+
+        let provider_config = snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.provider_config.clone());
+
+        let runtime = Self {
             inner: Mutex::new(Inner {
-                catalog: Catalog {
-                    characters: seed.characters,
-                    sessions: seed.sessions,
-                    tool_calls: Vec::new(),
-                },
+                catalog,
                 store,
                 tools: Arc::new(tools),
-                provider_config: None,
+                provider_config,
             }),
             cancel: Mutex::new(None),
+            storage: Mutex::new(storage),
             tokio,
-        })
+        };
+
+        if restore {
+            // A first launch writes its seed, so the next launch is a restore
+            // and not a reset.
+            runtime.persist();
+        }
+
+        Ok(runtime)
+    }
+
+    /// Point the runtime at a directory a platform chose, restoring a document
+    /// there if one exists. The directory is created if it is missing.
+    pub fn use_directory(&self, path: &str) -> Result<(), String> {
+        let storage = FileStorage::new(path).map_err(|error| error.to_string())?;
+        if let Some(document) = storage.load(SNAPSHOT_FILE) {
+            if let Ok(snapshot) = serde_json::from_str::<Snapshot>(&document) {
+                let mut inner = self.inner.lock().unwrap();
+                inner.catalog = Catalog {
+                    characters: snapshot.characters,
+                    sessions: snapshot.sessions,
+                    tool_calls: snapshot.tool_calls,
+                };
+                inner.provider_config = snapshot.provider_config;
+                inner.store.clear();
+                for source in snapshot.sources {
+                    inner.store.add_source(source);
+                }
+                for record in snapshot.records {
+                    inner.store.add_record(record);
+                }
+            }
+        }
+        *self.storage.lock().unwrap() = Arc::new(storage);
+        self.persist();
+        Ok(())
+    }
+
+    /// The directory the runtime persists into, or `None` while it is not
+    /// attached to one.
+    pub fn directory(&self) -> Option<String> {
+        self.storage.lock().unwrap().location()
+    }
+
+    fn persist(&self) {
+        let snapshot = {
+            let inner = self.inner.lock().unwrap();
+            let (sources, records) = inner.store.snapshot();
+            Snapshot {
+                version: SNAPSHOT_VERSION,
+                characters: inner.catalog.characters.clone(),
+                sessions: inner.catalog.sessions.clone(),
+                sources,
+                records,
+                tool_calls: inner.catalog.tool_calls.clone(),
+                provider_config: inner.provider_config.clone(),
+            }
+        };
+
+        if let Ok(document) = serde_json::to_string(&snapshot) {
+            self.storage.lock().unwrap().save(SNAPSHOT_FILE, &document);
+        }
     }
 
     pub fn provider_config(&self) -> Option<ProviderConfig> {
@@ -240,6 +376,7 @@ impl SujiuRuntime {
             }
         }
         self.inner.lock().unwrap().provider_config = config;
+        self.persist();
         Ok(())
     }
 
@@ -412,19 +549,24 @@ impl SujiuRuntime {
 
     /// Create a session and return its id.
     pub fn create_session(&self, character_id: Option<&str>) -> String {
-        let mut inner = self.inner.lock().unwrap();
-        let id = format!("session-{}", inner.catalog.sessions.len() + 1);
+        let id = {
+            let mut inner = self.inner.lock().unwrap();
+            let id = next_session_id(&inner.catalog.sessions);
 
-        inner.catalog.sessions.insert(
-            0,
-            Session {
-                id: id.clone(),
-                character_id: character_id.map(str::to_owned),
-                messages: Vec::new(),
-                metadata: serde_json::Map::new(),
-            },
-        );
+            inner.catalog.sessions.insert(
+                0,
+                Session {
+                    id: id.clone(),
+                    character_id: character_id.map(str::to_owned),
+                    messages: Vec::new(),
+                    metadata: serde_json::Map::new(),
+                },
+            );
 
+            id
+        };
+
+        self.persist();
         id
     }
 
@@ -607,6 +749,9 @@ impl SujiuRuntime {
             .tool_calls
             .retain(|(id, _)| id != &assistant_id);
         inner.catalog.tool_calls.push((assistant_id, calls));
+        drop(inner);
+
+        self.persist();
     }
 }
 

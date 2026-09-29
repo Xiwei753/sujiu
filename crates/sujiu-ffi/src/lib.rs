@@ -17,13 +17,16 @@ use std::ffi::{c_char, c_void, CStr, CString};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sujiu_core::{Character, ChatMessage, PromptCompiler, PromptPlan, ProviderConfig};
+use sujiu_core::{
+    Character, ChatMessage, PromptCompiler, PromptPlan, ProviderConfig, ProviderKind,
+};
 
 pub use sujiu_core::CORE_VERSION;
 
 pub mod events;
 pub mod runtime;
 pub mod seed;
+pub mod storage;
 
 use runtime::{CollectingReporter, SendTurnRequest, SujiuRuntime};
 
@@ -296,6 +299,42 @@ pub unsafe extern "C" fn sujiu_cancel_turn(runtime: *mut SujiuRuntime) {
     if let Some(runtime) = unsafe { runtime.as_ref() } {
         runtime.cancel();
     }
+}
+
+/// Point the runtime at a directory the platform chose, restoring a document
+/// there if one exists. The platform owns the choice of location; the runtime
+/// only reads and writes inside it.
+#[no_mangle]
+pub unsafe extern "C" fn sujiu_runtime_use_directory_json(
+    runtime: *mut SujiuRuntime,
+    directory: *const c_char,
+) -> *mut c_char {
+    let Some(runtime) = (unsafe { runtime.as_ref() }) else {
+        return null_envelope("runtime is null");
+    };
+    let Some(directory) = (unsafe { optional_str(directory) }).filter(|value| !value.is_empty())
+    else {
+        return null_envelope("directory is required");
+    };
+
+    match runtime.use_directory(&directory) {
+        Ok(()) => into_c_string(ok_json(&directory)),
+        Err(message) => null_envelope(&message),
+    }
+}
+
+/// The directory the runtime persists into, or null while it has none.
+#[no_mangle]
+pub unsafe extern "C" fn sujiu_runtime_data_dir_json(runtime: *mut SujiuRuntime) -> *mut c_char {
+    let Some(runtime) = (unsafe { runtime.as_ref() }) else {
+        return null_envelope("runtime is null");
+    };
+
+    let location = runtime
+        .directory()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    into_c_string(ok_json(&location))
 }
 
 /// Drop a string returned by any `*_json` call.
@@ -671,5 +710,113 @@ mod tests {
 
         assert!(runtime.conversation_state(&id).is_some());
         assert_eq!(runtime.sessions()[0].id, id);
+    }
+
+    /// A directory that only this test uses, removed when the test ends.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "sujiu-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    fn provider() -> ProviderConfig {
+        ProviderConfig {
+            id: "provider-default".into(),
+            name: "Local".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://example.invalid/v1".into(),
+            model: "test-model".into(),
+            credential_ref: None,
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    #[test]
+    fn a_runtime_reopens_from_a_directory_with_its_catalog_and_provider() {
+        let dir = scratch_dir("reopen");
+
+        {
+            let runtime = SujiuRuntime::new_persistent(
+                crate::seed::seed(),
+                std::sync::Arc::new(crate::storage::FileStorage::new(&dir).expect("storage")),
+            )
+            .expect("runtime");
+            let session = runtime.create_session(Some("character-lin"));
+            runtime
+                .set_provider_config(Some(provider()))
+                .expect("provider");
+            assert!(runtime.directory().is_some());
+            assert_eq!(runtime.sessions().len(), 4, "seeded plus the new session");
+            drop(runtime);
+            let _ = session;
+        }
+
+        let reopened = SujiuRuntime::new_persistent(
+            crate::seed::seed(),
+            std::sync::Arc::new(crate::storage::FileStorage::new(&dir).expect("storage")),
+        )
+        .expect("runtime");
+
+        assert_eq!(reopened.sessions().len(), 4, "the new session survived");
+        assert_eq!(reopened.models().len(), 1, "the provider survived");
+        // A model summary is identified by its model name, not by the provider.
+        assert_eq!(reopened.models()[0].id, "test-model");
+        assert_eq!(reopened.models()[0].provider_id, "provider-default");
+        assert_eq!(reopened.models()[0].provider_name, "Local");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn attaching_a_directory_later_restores_what_was_already_there() {
+        let dir = scratch_dir("attach");
+
+        // A runtime that only ever lived in memory, then handed a directory that
+        // already holds a document from an earlier run.
+        let first = SujiuRuntime::new_persistent(
+            crate::seed::seed(),
+            std::sync::Arc::new(crate::storage::FileStorage::new(&dir).expect("storage")),
+        )
+        .expect("runtime");
+        first.create_session(Some("character-wen"));
+        drop(first);
+
+        let runtime = SujiuRuntime::new(crate::seed::seed()).expect("runtime");
+        assert_eq!(runtime.sessions().len(), 3, "seeded only");
+
+        runtime
+            .use_directory(dir.to_str().expect("utf-8"))
+            .expect("attach");
+
+        assert_eq!(runtime.sessions().len(), 4, "the saved session came back");
+        assert_eq!(
+            runtime.directory(),
+            Some(dir.to_str().expect("utf-8").to_owned())
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_fresh_directory_starts_from_the_seed() {
+        let dir = scratch_dir("fresh");
+        let runtime = SujiuRuntime::new(crate::seed::seed()).expect("runtime");
+
+        runtime
+            .use_directory(dir.to_str().expect("utf-8"))
+            .expect("attach");
+
+        assert_eq!(runtime.sessions().len(), 3);
+        assert_eq!(runtime.characters("").len(), 3);
+        assert!(dir.join("sujiu-runtime.json").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
