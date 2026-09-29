@@ -189,6 +189,24 @@ function toContextSource(value: NativeContextSource): ContextSourceSummary {
   } as ContextSourceSummary;
 }
 
+/**
+ * Maps a runtime failure onto a stable code. Unknown failures keep the code
+ * `turn_failed` and pass the runtime text through as detail, so an unexpected
+ * provider error stays visible instead of being swallowed by a generic string.
+ */
+function toFailureCode(message: string): string {
+  if (message.indexOf('no_provider_configured') === 0) {
+    return 'no_provider_configured';
+  }
+  if (message.indexOf('missing_credential') === 0) {
+    return 'missing_credential';
+  }
+  if (message.indexOf('session_not_found') === 0) {
+    return 'session_not_found';
+  }
+  return 'turn_failed';
+}
+
 function toMessage(value: NativeMessage): MessageSummary {
   const summary: MessageSummary = {
     id: value.id,
@@ -199,7 +217,7 @@ function toMessage(value: NativeMessage): MessageSummary {
     ? [] : value.toolCalls;
   if (calls.length > 0) {
     summary.toolName = calls[0].title;
-    summary.toolStatusLabel = calls[0].isError ? 'failed' : calls[0].status;
+    summary.toolStatus = calls[0].isError || calls[0].status === 'failed' ? 'failed' : 'done';
   }
   return summary;
 }
@@ -296,7 +314,7 @@ export class SujiuNativeBridge implements SujiuBridge {
       if (session === undefined) {
         session = {
           id: snapshot.sessionId,
-          title: 'New chat',
+          title: '',
           characterId: '',
           characterName: '',
           preview: '',
@@ -318,17 +336,13 @@ export class SujiuNativeBridge implements SujiuBridge {
     }
   }
 
-  createSession(characterId: string, modelId: string, title: string): Promise<SessionSummary> {
+  createSession(characterId: string): Promise<SessionSummary> {
     try {
       const id: string = this.runtime.createSession(characterId);
       const rows: NativeSession[] = this.runtime.listSessions();
       for (let i = 0; i < rows.length; i++) {
         if (rows[i].id === id) {
-          const created: SessionSummary = toSession(rows[i]);
-          if (title.length > 0) {
-            created.title = title;
-          }
-          return Promise.resolve(created);
+          return Promise.resolve(toSession(rows[i]));
         }
       }
       return Promise.reject(new Error(`create_session: ${id} missing from the session list`));
@@ -339,7 +353,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   sendTurn(sessionId: string, userText: string, onEvent: TurnEventListener): void {
     if (this.running) {
-      onEvent({ kind: TurnEventKind.Failed, message: 'a turn is already running', isError: true } as TurnEvent);
+      onEvent({ kind: TurnEventKind.Failed, message: 'turn_busy', isError: true } as TurnEvent);
       return;
     }
     this.running = true;
@@ -361,15 +375,33 @@ export class SujiuNativeBridge implements SujiuBridge {
 
     this.runtime.sendTurn(request, (payload: string): void => {
       const parsed: NativeTurnEvent = JSON.parse(payload) as NativeTurnEvent;
+      const kind: TurnEventKind = toKind(parsed.kind);
+      if (kind === TurnEventKind.Failed) {
+        // Rust reports what went wrong; the UI localizes a code and keeps the
+        // runtime text as detail.
+        onEvent({
+          kind: kind,
+          message: toFailureCode(parsed.text ?? ''),
+          text: parsed.text,
+          isError: true
+        } as TurnEvent);
+        return;
+      }
       onEvent({
-        kind: toKind(parsed.kind),
+        kind: kind,
         text: parsed.text,
+        summary: parsed.text,
         callId: parsed.toolCallId,
         toolName: parsed.toolName,
         isError: parsed.isError
       } as TurnEvent);
     }).catch((error: Error): void => {
-      onEvent({ kind: TurnEventKind.Failed, message: error.message, isError: true } as TurnEvent);
+      onEvent({
+        kind: TurnEventKind.Failed,
+        message: toFailureCode(error.message),
+        text: error.message,
+        isError: true
+      } as TurnEvent);
     }).finally((): void => {
       this.running = false;
     });

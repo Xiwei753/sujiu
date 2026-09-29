@@ -1,4 +1,6 @@
+import { common } from '@kit.AbilityKit';
 import { ChatController } from '../presentation/ChatController';
+import { Copy } from '../ui/Copy';
 import { AppTheme } from '../ui/theme/Theme';
 
 /**
@@ -9,6 +11,11 @@ import { AppTheme } from '../ui/theme/Theme';
 export struct Composer {
   @ObjectLink controller: ChatController;
   @ObjectLink theme: AppTheme;
+
+  /** Accessibility labels take plain strings, so resources are resolved. */
+  private a11y(resource: Resource): string {
+    return Copy.resolve(this.getUIContext().getHostContext() as common.Context, resource);
+  }
 
   build() {
     Row({ space: 8 }) {
@@ -25,9 +32,9 @@ export struct Composer {
         .borderRadius(20)
         .backgroundColor(this.theme.surfaceMuted)
         .enabled(false)
-        .accessibilityText('Add attachment');
+        .accessibilityText(this.a11y($r('app.string.a11y_add_attachment')));
 
-      TextArea({ text: this.controller.draft, placeholder: 'Message' })
+      TextArea({ text: this.controller.draft, placeholder: $r('app.string.composer_placeholder') })
         .layoutWeight(1)
         .maxLines(6)
         .borderRadius(18)
@@ -49,6 +56,7 @@ export struct Composer {
           .padding(0)
           .borderRadius(20)
           .backgroundColor(this.theme.dangerSurface)
+          .accessibilityText(this.a11y($r('app.string.a11y_stop')))
           .onClick(() => this.controller.stop());
       } else {
         Button() {
@@ -61,6 +69,7 @@ export struct Composer {
           .padding(0)
           .borderRadius(20)
           .backgroundColor(this.theme.accent)
+          .accessibilityText(this.a11y($r('app.string.a11y_send')))
           .enabled(this.controller.canSend)
           .onClick(() => this.controller.send());
       }

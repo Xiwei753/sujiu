@@ -1,5 +1,6 @@
 import { CharacterSummary, ContextSourceSummary, ModelSummary } from '../bridge/SujiuBridge';
 import { ChatController } from '../presentation/ChatController';
+import { Copy } from '../ui/Copy';
 import { AppTheme } from '../ui/theme/Theme';
 
 /** Lightweight model picker: recents first, no separate management page. */
@@ -12,7 +13,7 @@ export struct ModelSelectorSheet {
 
   build() {
     Column({ space: 4 }) {
-      Text('Model')
+      Text($r('app.string.model_sheet_title'))
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.theme.textPrimary)
@@ -23,7 +24,7 @@ export struct ModelSelectorSheet {
         Row() {
           Column({ space: 2 }) {
             Text(model.name).fontSize(16).fontColor(this.theme.textPrimary).width('100%');
-            Text(`${model.providerLabel} · ${model.contextLabel}`)
+            Text($r('app.string.model_sheet_meta', model.providerLabel, model.contextLabel))
               .fontSize(11)
               .fontColor(this.theme.textSecondary)
               .width('100%');
@@ -32,7 +33,7 @@ export struct ModelSelectorSheet {
           .layoutWeight(1);
 
           if (this.controller.currentModel?.id === model.id) {
-            Text('In use')
+            Text($r('app.string.model_sheet_in_use'))
               .fontSize(11)
               .fontColor(this.theme.accent);
           }
@@ -60,7 +61,7 @@ export struct CharacterSelectorSheet {
   build() {
     Column({ space: 4 }) {
       TextInput({
-        placeholder: 'Search characters',
+        placeholder: $r('app.string.character_sheet_search'),
         text: this.controller.characterQuery
       })
         .fontColor(this.theme.textPrimary)
@@ -93,7 +94,7 @@ export struct CharacterSelectorSheet {
         .onClick(() => this.onPick(character.id));
       }, (character: CharacterSummary) => character.id);
 
-      Button('Open character library')
+      Button($r('app.string.character_sheet_open_library'))
         .width('100%')
         .margin({ top: 8, bottom: 16 })
         .backgroundColor('#00000000')
@@ -118,7 +119,7 @@ export struct ContextSheet {
 
   build() {
     Column({ space: 4 }) {
-      Text('Context')
+      Text($r('app.string.context_sheet_title'))
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.theme.textPrimary)
@@ -126,7 +127,7 @@ export struct ContextSheet {
         .padding({ left: 24, top: 16, bottom: 8 });
 
       if (this.controller.contextSources.length === 0) {
-        Text('No context sources in this session yet.')
+        Text($r('app.string.context_sheet_empty'))
           .fontSize(12)
           .fontColor(this.theme.textSecondary)
           .width('100%')
@@ -136,7 +137,7 @@ export struct ContextSheet {
       ForEach(this.controller.contextSources, (source: ContextSourceSummary) => {
         Column({ space: 2 }) {
           Text(source.name).fontSize(16).fontColor(this.theme.textPrimary).width('100%');
-          Text(`${source.kindLabel} · ${source.recordCount} records`)
+          Text($r('app.string.context_source_meta', source.kindLabel, source.recordCount))
             .fontSize(11)
             .fontColor(this.theme.textSecondary)
             .width('100%');

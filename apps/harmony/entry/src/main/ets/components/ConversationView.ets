@@ -1,4 +1,5 @@
-import { ChatController, ChatMessageItem, isBusy, statusLabel } from '../presentation/ChatController';
+import { ChatController, ChatMessageItem, isBusy } from '../presentation/ChatController';
+import { Copy } from '../ui/Copy';
 import { AppTheme } from '../ui/theme/Theme';
 import { MessageItemView } from './MessageViews';
 
@@ -31,7 +32,7 @@ export struct ConversationView {
         ListItem() {
           Row({ space: 8 }) {
             LoadingProgress().width(16).height(16);
-            Text(statusLabel(this.controller.generationState))
+            Text(Copy.generationState(this.controller.generationState))
               .fontSize(12)
               .fontColor(this.theme.textSecondary);
           }
@@ -40,9 +41,9 @@ export struct ConversationView {
         }
       }
 
-      if (this.controller.errorMessage.length > 0) {
+      if (this.controller.errorCode.length > 0) {
         ListItem() {
-          Text(this.controller.errorMessage)
+          Text(Copy.errorText(this.controller.errorCode, this.controller.errorDetail))
             .fontSize(13)
             .fontColor(this.theme.danger)
             .width('100%')

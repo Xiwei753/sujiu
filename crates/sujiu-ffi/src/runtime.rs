@@ -244,9 +244,11 @@ impl SujiuRuntime {
                         .get("title")
                         .and_then(Value::as_str)
                         .map(str::to_owned)
+                        // An untitled session stays empty: what to call it is
+                        // presentation copy, and the UI localizes the fallback.
                         .unwrap_or_else(|| match character {
                             Some(character) => character.name.clone(),
-                            None => "New chat".into(),
+                            None => String::new(),
                         }),
                     updated_at_ms: session
                         .metadata

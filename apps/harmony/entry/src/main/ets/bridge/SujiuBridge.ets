@@ -47,7 +47,7 @@ export interface MessageSummary {
   role: MessageRole;
   text: string;
   toolName?: string;
-  toolStatusLabel?: string;
+  toolStatus?: string;
 }
 
 export interface ConversationSnapshot {
@@ -90,7 +90,7 @@ export interface SujiuBridge {
   listContextSources(): Promise<ContextSourceSummary[]>;
   conversationState(sessionId: string): Promise<ConversationSnapshot>;
   /** Creates an empty session so a brand new chat can send its first message. */
-  createSession(characterId: string, modelId: string, title: string): Promise<SessionSummary>;
+  createSession(characterId: string): Promise<SessionSummary>;
   sendTurn(sessionId: string, userText: string, onEvent: TurnEventListener): void;
   cancelTurn(sessionId: string): void;
   runtimeSummary(): string;

@@ -1,5 +1,7 @@
+import { common } from '@kit.AbilityKit';
 import { SessionSummary } from '../bridge/SujiuBridge';
 import { ChatController, SessionGroup } from '../presentation/ChatController';
+import { Copy } from '../ui/Copy';
 import { AppTheme } from '../ui/theme/Theme';
 
 /**
@@ -14,10 +16,15 @@ export struct HistoryPanel {
   onPick: () => void = () => {
   };
 
+  /** Accessibility labels take plain strings, so resources are resolved. */
+  private a11y(resource: Resource): string {
+    return Copy.resolve(this.getUIContext().getHostContext() as common.Context, resource);
+  }
+
   @Builder
   private sessionRow(session: SessionSummary) {
     Column({ space: 2 }) {
-      Text(session.title)
+      Text(Copy.sessionTitle(session.title, session.characterName))
         .fontSize(session.id === this.controller.currentSessionId ? 15 : 14)
         .fontWeight(
           session.id === this.controller.currentSessionId ? FontWeight.Medium : FontWeight.Normal
@@ -26,7 +33,9 @@ export struct HistoryPanel {
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .width('100%');
-      Text(session.characterName.length > 0 ? session.characterName : 'No character yet')
+      Text(
+        session.characterName.length > 0 ? session.characterName : $r('app.string.history_no_character')
+      )
         .fontSize(11)
         .fontColor(this.theme.textSecondary)
         .maxLines(1)
@@ -45,7 +54,7 @@ export struct HistoryPanel {
   @Builder
   private groupBlock(group: SessionGroup) {
     Column() {
-      Text(group.title.toUpperCase())
+      Text(Copy.groupTitle(group.key))
         .fontSize(11)
         .fontColor(this.theme.textSecondary)
         .width('100%')
@@ -61,7 +70,7 @@ export struct HistoryPanel {
   build() {
     Column() {
       Row() {
-        Text('Chats')
+        Text($r('app.string.history_title'))
           .fontSize(18)
           .fontWeight(FontWeight.Medium)
           .fontColor(this.theme.textPrimary)
@@ -79,7 +88,7 @@ export struct HistoryPanel {
           .padding(0)
           .borderRadius(16)
           .backgroundColor(this.theme.surfaceMuted)
-          .accessibilityText('New chat')
+          .accessibilityText(this.a11y($r('app.string.a11y_new_chat')))
           .onClick(() => {
             this.controller.newSession();
             this.onPick();
@@ -93,7 +102,7 @@ export struct HistoryPanel {
           ListItem() {
             this.groupBlock(group);
           }
-        }, (group: SessionGroup) => group.title);
+        }, (group: SessionGroup) => group.key);
       }
       .width('100%')
       .layoutWeight(1)

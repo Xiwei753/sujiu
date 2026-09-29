@@ -21,7 +21,7 @@ presentation/ ChatController: page state, turn state, no I/O and no routing
 bridge/       SujiuBridge contract + the sujiu-ffi backed implementation
 platform/     clipboard, system appearance, platform info capabilities
 app/          composition root; the only place that picks implementations
-ui/theme/     AppTheme: the UI-layer color tokens
+ui/           AppTheme color tokens and Copy, the only place that produces text
 ```
 
 ArkUI views never call a provider, a tool or a platform API directly. They read
@@ -83,6 +83,26 @@ rustup target add aarch64-unknown-linux-ohos
 ArkTS imports the library by name, so a staged copy has to exist before the
 entry module compiles. The staged `entry/libs/arm64-v8a/libsujiu_napi.so` is
 therefore committed; rerun the script whenever the Rust side changes.
+
+`entry/src/main/cpp/types/libsujiu_napi/index.d.ts` is the hand-maintained
+shape of that module. API 26 does not type check napi imports yet and reports
+"Currently module for 'libsujiu_napi.so' is not verified", so keep the file in
+step with `crates/sujiu-napi/src/bridge.rs` by hand.
+
+## Copy and language
+
+All user-visible text lives in the UI layer's string tables:
+
+```text
+entry/src/main/resources/base/element/string.json     English
+entry/src/main/resources/zh_CN/element/string.json     Chinese
+AppScope/resources/<locale>/element/string.json        app label
+```
+
+Presentation exposes states and codes, not sentences, so nothing above the UI
+layer needs translating. A tool status is `ToolCallStatus.Running`, a failure is
+`errorCode` plus a detail, and `Copy.ets` maps both onto resources. To add a
+language, add one table per locale; there is no other switch to flip.
 
 ## Lint, build, run
 

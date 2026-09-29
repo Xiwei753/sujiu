@@ -6,7 +6,7 @@
     },
     {
       "name": "module_desc",
-      "value": "Sujiu, a chat-first AI role-play client"
+      "value": "Sujiu，以聊天为先的 AI 角色扮演客户端"
     },
     {
       "name": "entry_ability_desc",
@@ -14,139 +14,139 @@
     },
     {
       "name": "a11y_chat_history",
-      "value": "Chat history"
+      "value": "聊天记录"
     },
     {
       "name": "a11y_more",
-      "value": "More"
+      "value": "更多"
     },
     {
       "name": "a11y_back",
-      "value": "Back"
+      "value": "返回"
     },
     {
       "name": "a11y_new_chat",
-      "value": "New chat"
+      "value": "新对话"
     },
     {
       "name": "a11y_add_attachment",
-      "value": "Add attachment"
+      "value": "添加附件"
     },
     {
       "name": "a11y_send",
-      "value": "Send"
+      "value": "发送"
     },
     {
       "name": "a11y_stop",
-      "value": "Stop generating"
+      "value": "停止生成"
     },
     {
       "name": "sheet_title_more",
-      "value": "More"
+      "value": "更多"
     },
     {
       "name": "sheet_item_context",
-      "value": "Context in this chat"
+      "value": "本轮对话的上下文"
     },
     {
       "name": "sheet_item_new_chat",
-      "value": "New chat"
+      "value": "新对话"
     },
     {
       "name": "sheet_item_settings",
-      "value": "Settings"
+      "value": "设置"
     },
     {
       "name": "composer_placeholder",
-      "value": "Message"
+      "value": "说点什么"
     },
     {
       "name": "title_default_character",
-      "value": "Character"
+      "value": "角色"
     },
     {
       "name": "title_default_model",
-      "value": "Select model"
+      "value": "选择模型"
     },
     {
       "name": "message_copy",
-      "value": "Copy"
+      "value": "复制"
     },
     {
       "name": "message_thinking",
-      "value": "Thinking"
+      "value": "思考过程"
     },
     {
       "name": "message_tools",
-      "value": "Tools (%1$d)"
+      "value": "工具（%1$d）"
     },
     {
       "name": "message_tool_line",
-      "value": "%1$s: %2$s"
+      "value": "%1$s：%2$s"
     },
     {
       "name": "status_submitting",
-      "value": "Sending…"
+      "value": "正在发送…"
     },
     {
       "name": "status_streaming",
-      "value": "Writing…"
+      "value": "正在回复…"
     },
     {
       "name": "status_waiting_tool",
-      "value": "Waiting for tool…"
+      "value": "正在等待工具…"
     },
     {
       "name": "status_executing_tool",
-      "value": "Using a tool…"
+      "value": "正在使用工具…"
     },
     {
       "name": "status_continuing",
-      "value": "Continuing…"
+      "value": "正在继续…"
     },
     {
       "name": "tool_status_queued",
-      "value": "queued"
+      "value": "排队中"
     },
     {
       "name": "tool_status_running",
-      "value": "running"
+      "value": "执行中"
     },
     {
       "name": "tool_status_done",
-      "value": "done"
+      "value": "已完成"
     },
     {
       "name": "tool_status_failed",
-      "value": "failed"
+      "value": "失败"
     },
     {
       "name": "history_title",
-      "value": "Chats"
+      "value": "对话"
     },
     {
       "name": "history_no_character",
-      "value": "No character yet"
+      "value": "尚未选择角色"
     },
     {
       "name": "history_group_today",
-      "value": "Today"
+      "value": "今天"
     },
     {
       "name": "history_group_yesterday",
-      "value": "Yesterday"
+      "value": "昨天"
     },
     {
       "name": "history_group_earlier",
-      "value": "Earlier"
+      "value": "更早"
     },
     {
       "name": "model_sheet_title",
-      "value": "Model"
+      "value": "模型"
     },
     {
       "name": "model_sheet_in_use",
-      "value": "In use"
+      "value": "使用中"
     },
     {
       "name": "model_sheet_meta",
@@ -154,87 +154,87 @@
     },
     {
       "name": "character_sheet_search",
-      "value": "Search characters"
+      "value": "搜索角色"
     },
     {
       "name": "character_sheet_open_library",
-      "value": "Open character library"
+      "value": "打开角色库"
     },
     {
       "name": "context_sheet_title",
-      "value": "Context"
+      "value": "上下文"
     },
     {
       "name": "context_sheet_empty",
-      "value": "No context sources in this session yet."
+      "value": "本次对话还没有上下文来源。"
     },
     {
       "name": "context_source_meta",
-      "value": "%1$s · %2$d records"
+      "value": "%1$s · %2$d 条记录"
     },
     {
       "name": "library_title",
-      "value": "Characters"
+      "value": "角色"
     },
     {
       "name": "character_detail_chat",
-      "value": "Chat with this character"
+      "value": "和这个角色聊聊"
     },
     {
       "name": "settings_title",
-      "value": "Settings"
+      "value": "设置"
     },
     {
       "name": "settings_section_appearance",
-      "value": "Appearance"
+      "value": "外观"
     },
     {
       "name": "settings_section_about",
-      "value": "About"
+      "value": "关于"
     },
     {
       "name": "settings_about_platform",
-      "value": "Platform"
+      "value": "平台"
     },
     {
       "name": "settings_about_runtime",
-      "value": "Runtime"
+      "value": "运行时"
     },
     {
       "name": "appearance_system",
-      "value": "System"
+      "value": "跟随系统"
     },
     {
       "name": "appearance_light",
-      "value": "Light"
+      "value": "浅色"
     },
     {
       "name": "appearance_dark",
-      "value": "Dark"
+      "value": "深色"
     },
     {
       "name": "error_turn_failed",
-      "value": "The reply could not be completed."
+      "value": "这次回复没能完成。"
     },
     {
       "name": "error_new_chat_failed",
-      "value": "A new chat could not be started."
+      "value": "没能开始新的对话。"
     },
     {
       "name": "error_no_provider_configured",
-      "value": "No model service is configured yet."
+      "value": "还没有配置模型服务。"
     },
     {
       "name": "error_missing_credential",
-      "value": "The API key is missing."
+      "value": "缺少 API Key。"
     },
     {
       "name": "error_session_not_found",
-      "value": "That conversation no longer exists."
+      "value": "这段对话已经不存在了。"
     },
     {
       "name": "error_turn_busy",
-      "value": "A reply is already in progress."
+      "value": "已经有一条回复正在生成。"
     }
   ]
 }

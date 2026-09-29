@@ -8,6 +8,7 @@ import { HistoryPanel } from '../components/HistoryPanel';
 import { CharacterSelectorSheet, ContextSheet, ModelSelectorSheet } from '../components/SelectorSheets';
 import { AppearanceMode } from '../platform/PlatformServices';
 import { ChatController } from '../presentation/ChatController';
+import { Copy } from '../ui/Copy';
 import { AppTheme } from '../ui/theme/Theme';
 
 enum SheetKind {
@@ -88,6 +89,11 @@ struct Index {
     return false;
   }
 
+  /** Accessibility labels take plain strings, so resources are resolved. */
+  private a11y(resource: Resource): string {
+    return Copy.resolve(this.getUIContext().getHostContext() as common.Context, resource);
+  }
+
   private openSheet(kind: SheetKind): void {
     this.sheet = kind;
     this.showSheet = true;
@@ -108,13 +114,13 @@ struct Index {
           .width(40)
           .height(40)
           .textAlign(TextAlign.Center)
-          .accessibilityText('Chat history')
+          .accessibilityText(this.a11y($r('app.string.a11y_chat_history')))
           .onClick(() => {
             this.drawerOpen = !this.drawerOpen;
           });
       }
 
-      Text(this.controller.currentCharacter?.name ?? 'New chat')
+      Text(Copy.sessionTitle('', this.controller.currentCharacter?.name ?? ''))
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.theme.textPrimary)
@@ -123,7 +129,9 @@ struct Index {
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .onClick(() => this.openSheet(SheetKind.Characters));
 
-      Text(this.controller.currentModel?.name ?? 'Select model')
+      Text(
+        this.controller.currentModel?.name ?? $r('app.string.title_default_model')
+      )
         .fontSize(12)
         .fontColor(this.theme.textSecondary)
         .maxLines(1)
@@ -136,7 +144,7 @@ struct Index {
         .width(40)
         .height(40)
         .textAlign(TextAlign.Center)
-        .accessibilityText('More')
+        .accessibilityText(this.a11y($r('app.string.a11y_more')))
         .onClick(() => this.openSheet(SheetKind.More));
     }
     .width('100%')
@@ -209,21 +217,21 @@ struct Index {
   @Builder
   private moreSheet() {
     Column({ space: 4 }) {
-      Text('More')
+      Text($r('app.string.sheet_title_more'))
         .fontSize(18)
         .fontWeight(FontWeight.Medium)
         .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, top: 16, bottom: 8 });
 
-      Text('Context in this chat')
+      Text($r('app.string.sheet_item_context'))
         .fontSize(16)
         .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, right: 24, top: 10, bottom: 10 })
         .onClick(() => this.openSheet(SheetKind.Context));
 
-      Text('New chat')
+      Text($r('app.string.sheet_item_new_chat'))
         .fontSize(16)
         .fontColor(this.theme.textPrimary)
         .width('100%')
@@ -233,7 +241,7 @@ struct Index {
           this.controller.newSession();
         });
 
-      Text('Settings')
+      Text($r('app.string.sheet_item_settings'))
         .fontSize(16)
         .fontColor(this.theme.textPrimary)
         .width('100%')
@@ -309,7 +317,7 @@ struct Index {
   }
 
   @Builder
-  private pageHeader(title: string) {
+  private pageHeader(title: ResourceStr) {
     Row({ space: 8 }) {
       Text('←')
         .fontSize(20)
@@ -317,7 +325,7 @@ struct Index {
         .width(40)
         .height(40)
         .textAlign(TextAlign.Center)
-        .accessibilityText('Back')
+        .accessibilityText(this.a11y($r('app.string.a11y_back')))
         .onClick(() => this.pathStack.pop());
       Text(title)
         .fontSize(18)
@@ -332,7 +340,7 @@ struct Index {
   @Builder
   private libraryView() {
     Column() {
-      this.pageHeader('Characters');
+      this.pageHeader($r('app.string.library_title'));
 
       List({ space: 12 }) {
         ForEach(this.controller.characters, (character: CharacterSummary) => {
@@ -374,14 +382,16 @@ struct Index {
   @Builder
   private characterDetailView(characterId: string) {
     Column({ space: 12 }) {
-      this.pageHeader(this.controller.characterById(characterId)?.name ?? 'Character');
+      this.pageHeader(
+        this.controller.characterById(characterId)?.name ?? $r('app.string.title_default_character')
+      );
 
       Text(this.controller.characterById(characterId)?.tagline ?? '')
         .fontSize(15)
         .fontColor(this.theme.textPrimary)
         .width('100%');
 
-      Button('Chat with this character')
+      Button($r('app.string.character_detail_chat'))
         .width('100%')
         .backgroundColor(this.theme.accent)
         .fontColor(this.theme.textOnAccent)
@@ -400,11 +410,11 @@ struct Index {
   @Builder
   private settingsView() {
     Column() {
-      this.pageHeader('Settings');
+      this.pageHeader($r('app.string.settings_title'));
 
       List({ space: 8 }) {
         ListItem() {
-          Text('APPEARANCE')
+          Text($r('app.string.settings_section_appearance'))
             .fontSize(11)
             .fontColor(this.theme.textSecondary)
             .width('100%');
@@ -412,7 +422,7 @@ struct Index {
         ListItem() {
           Row({ space: 8 }) {
             ForEach(APPEARANCE_MODES, (mode: AppearanceMode) => {
-              Text(mode)
+              Text(Copy.appearanceMode(mode))
                 .fontSize(13)
                 .padding({ left: 14, right: 14, top: 8, bottom: 8 })
                 .borderRadius(16)
@@ -432,14 +442,14 @@ struct Index {
           .width('100%');
         }
         ListItem() {
-          Text('ABOUT')
+          Text($r('app.string.settings_section_about'))
             .fontSize(11)
             .fontColor(this.theme.textSecondary)
             .width('100%');
         }
         ListItem() {
           Column({ space: 2 }) {
-            Text('Platform')
+            Text($r('app.string.settings_about_platform'))
               .fontSize(15)
               .fontColor(this.theme.textPrimary)
               .width('100%');
@@ -453,7 +463,7 @@ struct Index {
         }
         ListItem() {
           Column({ space: 2 }) {
-            Text('Runtime')
+            Text($r('app.string.settings_about_runtime'))
               .fontSize(15)
               .fontColor(this.theme.textPrimary)
               .width('100%');

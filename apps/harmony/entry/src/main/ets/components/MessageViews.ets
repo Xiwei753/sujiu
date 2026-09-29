@@ -1,4 +1,6 @@
-import { ChatMessageItem, ToolCallItem } from '../presentation/ChatController';
+import { common } from '@kit.AbilityKit';
+import { ChatMessageItem, ToolCallItem, ToolCallStatus } from '../presentation/ChatController';
+import { Copy } from '../ui/Copy';
 import { AppTheme } from '../ui/theme/Theme';
 
 /**
@@ -9,7 +11,7 @@ import { AppTheme } from '../ui/theme/Theme';
  */
 @Component
 export struct CollapsibleSection {
-  @Prop title: string = '';
+  @Prop title: ResourceStr = '';
   @Prop body: string = '';
   @ObjectLink theme: AppTheme;
   @State expanded: boolean = false;
@@ -49,21 +51,26 @@ export struct MessageItemView {
   onCopy: (message: ChatMessageItem) => void = () => {
   };
 
+  private toolStatus(status: ToolCallStatus): string {
+    return Copy.resolve(getContext(this) as common.Context, Copy.toolStatus(status) as Resource);
+  }
+
   build() {
     Column({ space: 6 }) {
       if (this.message.thinking.length > 0) {
         CollapsibleSection({
-          title: 'Thinking',
+          title: $r('app.string.message_thinking'),
           body: this.message.thinking,
           theme: this.theme
         });
       }
       if (this.message.hasToolCalls) {
         CollapsibleSection({
-          title: `Tools (${this.message.toolCalls.length})`,
+          title: $r('app.string.message_tools', this.message.toolCalls.length),
           body: this.message.toolCalls
             .map((call: ToolCallItem) => {
-              return `${call.toolName}: ${call.statusLabel}${call.summary.length > 0 ? ' — ' + call.summary : ''}`;
+              const status: string = this.toolStatus(call.status);
+              return call.summary.length > 0 ? `${call.toolName} — ${call.summary} (${status})` : `${call.toolName}: ${status}`;
             })
             .join('\n'),
           theme: this.theme
@@ -75,7 +82,7 @@ export struct MessageItemView {
           .width('100%')
           .fontColor(this.theme.textPrimary);
       }
-      Text('Copy')
+      Text($r('app.string.message_copy'))
         .fontSize(11)
         .fontColor(this.theme.textSecondary)
         .onClick(() => this.onCopy(this.message));

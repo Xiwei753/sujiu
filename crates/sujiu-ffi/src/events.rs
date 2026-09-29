@@ -6,7 +6,7 @@
 //! platforms render.
 
 use serde::Serialize;
-use sujiu_ai::{CancelToken, StreamSink, ToolCall, ToolResult};
+use sujiu_ai::{CancelToken, StreamSink, ToolCall, ToolContent, ToolResult};
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -128,7 +128,7 @@ impl StreamSink for TurnEventSink<'_> {
     fn on_tool_call_finished(&mut self, call: &ToolCall, result: &ToolResult) {
         self.reporter.report(TurnEvent {
             kind: TurnEventKind::ToolCallFinished,
-            text: None,
+            text: Some(summary_of(result)),
             tool_name: Some(call.name.clone()),
             tool_call_id: Some(call.id.clone()),
             is_error: Some(result.output.is_error),
@@ -138,4 +138,30 @@ impl StreamSink for TurnEventSink<'_> {
     fn should_continue(&self) -> bool {
         !self.cancel.is_cancelled()
     }
+}
+
+/// A short, single-line result summary for the platform to show under a tool
+/// call. Tool results can be large, so this is a preview and not the payload:
+/// the model already received the full result.
+fn summary_of(result: &ToolResult) -> String {
+    const LIMIT: usize = 120;
+    let mut text = String::new();
+    for block in &result.output.content {
+        let piece = match block {
+            ToolContent::Text { text } => text.clone(),
+            ToolContent::Resource { uri, .. } => uri.clone(),
+            _ => continue,
+        };
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(piece.trim());
+    }
+    let collapsed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= LIMIT {
+        return collapsed;
+    }
+    let mut truncated: String = collapsed.chars().take(LIMIT).collect();
+    truncated.push('…');
+    truncated
 }

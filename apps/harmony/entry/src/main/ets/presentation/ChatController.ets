@@ -34,35 +34,33 @@ export function isBusy(state: GenerationState): boolean {
     state === GenerationState.ContinuingAfterTool;
 }
 
-export function statusLabel(state: GenerationState): string {
-  switch (state) {
-    case GenerationState.Submitting:
-      return 'Sending…';
-    case GenerationState.Streaming:
-      return 'Writing…';
-    case GenerationState.WaitingForTool:
-      return 'Waiting for tool…';
-    case GenerationState.ExecutingTool:
-      return 'Using a tool…';
-    case GenerationState.ContinuingAfterTool:
-      return 'Continuing…';
-    default:
-      return '';
-  }
+/** Lifecycle of one tool call, as a state rather than a sentence. */
+export enum ToolCallStatus {
+  Queued = 'queued',
+  Running = 'running',
+  Done = 'done',
+  Failed = 'failed'
+}
+
+/** History buckets. The UI turns these into localized headings. */
+export enum SessionGroupKey {
+  Today = 'today',
+  Yesterday = 'yesterday',
+  Earlier = 'earlier'
 }
 
 @Observed
 export class ToolCallItem {
   id: string;
   toolName: string;
-  statusLabel: string;
+  status: ToolCallStatus;
   summary: string = '';
   isError: boolean = false;
 
-  constructor(id: string, toolName: string, statusLabel: string) {
+  constructor(id: string, toolName: string, status: ToolCallStatus) {
     this.id = id;
     this.toolName = toolName;
-    this.statusLabel = statusLabel;
+    this.status = status;
   }
 }
 
@@ -91,11 +89,11 @@ export class ChatMessageItem {
 
 @Observed
 export class SessionGroup {
-  title: string;
+  key: SessionGroupKey;
   sessions: SessionSummary[];
 
-  constructor(title: string, sessions: SessionSummary[]) {
-    this.title = title;
+  constructor(key: SessionGroupKey, sessions: SessionSummary[]) {
+    this.key = key;
     this.sessions = sessions;
   }
 }
@@ -123,7 +121,8 @@ export class ChatController {
   currentModel: ModelSummary | undefined = undefined;
   draft: string = '';
   generationState: GenerationState = GenerationState.Idle;
-  errorMessage: string = '';
+  errorCode: string = '';
+  errorDetail: string = '';
   appearanceMode: AppearanceMode = AppearanceMode.System;
 
   /**
@@ -147,10 +146,6 @@ export class ChatController {
 
   get canSend(): boolean {
     return !this.busy && this.draft.trim().length > 0;
-  }
-
-  get statusText(): string {
-    return statusLabel(this.generationState);
   }
 
   platformSummary(): string {
@@ -201,18 +196,27 @@ export class ChatController {
     }
     this.generationState = GenerationState.Submitting;
     const characterId: string = this.currentCharacter?.id ?? '';
-    const modelId: string = this.currentModel?.id ?? '';
-    this.bridge.createSession(characterId, modelId, 'New chat').then((session: SessionSummary) => {
+    this.bridge.createSession(characterId).then((session: SessionSummary) => {
       this.currentSessionId = session.id;
       this.messages = [];
       this.generationState = GenerationState.Idle;
-      this.errorMessage = '';
+      this.clearError();
       this.assistantOpen = false;
       this.refreshSessions();
     }).catch(() => {
       this.generationState = GenerationState.Failed;
-      this.errorMessage = 'Could not start a new chat';
+      this.fail('new_chat_failed');
     });
+  }
+
+  private fail(code: string, detail: string = ''): void {
+    this.errorCode = code;
+    this.errorDetail = detail;
+  }
+
+  private clearError(): void {
+    this.errorCode = '';
+    this.errorDetail = '';
   }
 
   private refreshSessions(): void {
@@ -232,7 +236,7 @@ export class ChatController {
     }
     this.assistantOpen = false;
     this.draft = '';
-    this.errorMessage = '';
+    this.clearError();
     this.generationState = GenerationState.Submitting;
     const userMessage = new ChatMessageItem(this.nextId('user'), MessageRole.User, text);
     this.messages = this.messages.concat([userMessage]);
@@ -286,7 +290,7 @@ export class ChatController {
           mapped.toolCalls = [new ToolCallItem(
             `tool-${item.id}`,
             item.toolName,
-            item.toolStatusLabel ?? 'done'
+            item.toolStatus === 'failed' ? ToolCallStatus.Failed : ToolCallStatus.Done
           )];
         }
         return mapped;
@@ -297,7 +301,7 @@ export class ChatController {
         this.currentModel = this.models[0];
       }
       this.generationState = GenerationState.Idle;
-      this.errorMessage = '';
+      this.clearError();
     });
   }
 
@@ -328,7 +332,11 @@ export class ChatController {
         this.generationState = GenerationState.WaitingForTool;
         this.appendToAssistant((message: ChatMessageItem) => {
           message.toolCalls = message.toolCalls.concat([
-            new ToolCallItem(event.callId ?? 'call', event.toolName ?? 'tool', 'queued')
+            new ToolCallItem(
+              event.callId ?? 'call',
+              event.toolName ?? 'tool',
+              ToolCallStatus.Queued
+            )
           ]);
         });
         break;
@@ -340,7 +348,7 @@ export class ChatController {
             if (call.id !== (event.callId ?? 'call')) {
               return call;
             }
-            return new ToolCallItem(call.id, call.toolName, 'running');
+            return new ToolCallItem(call.id, call.toolName, ToolCallStatus.Running);
           });
         });
         break;
@@ -351,7 +359,11 @@ export class ChatController {
             if (call.id !== (event.callId ?? 'call')) {
               return call;
             }
-            const updated = new ToolCallItem(call.id, call.toolName, event.isError ? 'failed' : 'done');
+            const updated = new ToolCallItem(
+              call.id,
+              call.toolName,
+              event.isError ? ToolCallStatus.Failed : ToolCallStatus.Done
+            );
             updated.summary = event.summary ?? '';
             updated.isError = event.isError ?? false;
             return updated;
@@ -365,7 +377,7 @@ export class ChatController {
       case TurnEventKind.Failed:
         this.assistantOpen = false;
         this.generationState = GenerationState.Failed;
-        this.errorMessage = event.message ?? 'The turn failed';
+        this.fail(event.message ?? '', event.text ?? '');
         break;
       case TurnEventKind.Cancelled:
         this.assistantOpen = false;
@@ -406,9 +418,9 @@ export class ChatController {
     const dayMillis: number = 24 * 60 * 60 * 1000;
     const startOfToday: number = now - (now % dayMillis);
     const groups: SessionGroup[] = [
-      new SessionGroup('Today', []),
-      new SessionGroup('Yesterday', []),
-      new SessionGroup('Earlier', [])
+      new SessionGroup(SessionGroupKey.Today, []),
+      new SessionGroup(SessionGroupKey.Yesterday, []),
+      new SessionGroup(SessionGroupKey.Earlier, [])
     ];
     const sorted: SessionSummary[] = sessions.slice().sort((a: SessionSummary, b: SessionSummary) => b.updatedAt - a.updatedAt);
     sorted.forEach((session: SessionSummary) => {

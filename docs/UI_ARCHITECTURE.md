@@ -268,6 +268,24 @@ platform services must never import ui or presentation
 bridge must never import ui
 ```
 
+### 2.6 User-visible copy
+
+Copy is a **UI-layer** concern, and it is the only layer that produces sentences.
+
+- The UI layer reads copy from platform resources: one string table per locale,
+  English in the base table, one translated table per language.
+- Presentation exposes **states and codes**, never English text. A tool status is
+  `ToolCallStatus.Running`, not "running"; a failure is `errorCode` plus an
+  optional runtime detail, not a sentence.
+- The bridge passes codes and enum values through. It may carry a human-readable
+  detail string for diagnostics, but it must not decide what the user reads.
+- Rust returns keys, codes and enums. It must not format display copy for the
+  UI, and an untitled session stays untitled rather than being given a name.
+
+The consequence for translators: they edit one JSON file per locale and never
+read ArkTS. The consequence for reviewers: grepping the Rust or presentation
+sources for a user-visible sentence is a bug.
+
 ---
 
 ## 3. Streaming presentation states
