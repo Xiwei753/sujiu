@@ -104,7 +104,17 @@ interface NativeRuntime {
   conversationState(sessionId: string): NativeSnapshot | null;
   createSession(characterId: string): string;
   cancelTurn(): void;
-  sendTurn(request: NativeTurnRequest, onEvent: (payload: string) => void): Promise<string>;
+  /**
+   * Runs a turn and reports each event as JSON.
+   *
+   * The native callback is invoked as `(unused, payload)`: the first argument
+   * is the callback return value, which this module never uses and which is
+   * therefore always null.
+   */
+  sendTurn(
+    request: NativeTurnRequest,
+    onEvent: (unused: Object | null, payload: string) => void
+  ): Promise<string>;
 }
 
 interface SujiuNativeModule {
@@ -373,7 +383,10 @@ export class SujiuNativeBridge implements SujiuBridge {
       apiKey: this.apiKey
     };
 
-    this.runtime.sendTurn(request, (payload: string): void => {
+    this.runtime.sendTurn(request, (_unused: Object | null, payload: string): void => {
+      if (payload === undefined || payload === null) {
+        return;
+      }
       const parsed: NativeTurnEvent = JSON.parse(payload) as NativeTurnEvent;
       const kind: TurnEventKind = toKind(parsed.kind);
       if (kind === TurnEventKind.Failed) {

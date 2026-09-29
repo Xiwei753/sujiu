@@ -296,19 +296,26 @@ impl Task for SendTurnTask {
     }
 }
 
+/// Builds a runtime from the seed catalog that ships with the app.
+///
+/// This is a free function rather than an associated one on purpose: a factory
+/// declared inside `impl SujiuRuntimeBridge` is registered as a static method
+/// on the exported class, so ArkTS would have to call
+/// `SujiuRuntimeBridge.create()` instead of `create()`.
+#[napi]
+pub fn create() -> Result<SujiuRuntimeBridge> {
+    // The seeded catalog, not Seed::default(): a fresh launch would otherwise
+    // have no characters, no history and no context sources to show.
+    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed())
+        .map_err(|error| napi::Error::from_reason(format!("runtime init failed: {error}")))?;
+
+    Ok(SujiuRuntimeBridge {
+        runtime: Arc::new(runtime),
+    })
+}
+
 #[napi]
 impl SujiuRuntimeBridge {
-    /// Builds a runtime from the seed catalog that ships with the app.
-    #[napi(factory)]
-    pub fn create() -> Result<Self> {
-        let runtime = SujiuRuntime::new(Default::default())
-            .map_err(|error| napi::Error::from_reason(format!("runtime init failed: {error}")))?;
-
-        Ok(Self {
-            runtime: Arc::new(runtime),
-        })
-    }
-
     /// The shared runtime version, so a platform can report what it is bound to.
     #[napi]
     pub fn core_version(&self) -> String {

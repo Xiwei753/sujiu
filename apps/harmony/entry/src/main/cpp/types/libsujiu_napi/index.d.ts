@@ -110,6 +110,16 @@ export class SujiuRuntimeBridge {
    * when the turn ends; a failed turn still resolves, because the failure is
    * reported as a `turn_failed` event rather than as a rejection.
    */
-  sendTurn(request: TurnRequest, onEvent: (event: string) => void): Promise<string>;
+  /**
+   * Runs a turn and reports every normalized event as JSON.
+   *
+   * The native callback receives two arguments: the callback return value,
+   * which this module never uses and is therefore always null, and the
+   * payload. Only the second argument carries the event.
+   */
+  sendTurn(
+    request: TurnRequest,
+    onEvent: (unused: Object | null, payload: string) => void
+  ): Promise<string>;
   cancelTurn(): void;
 }
