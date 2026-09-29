@@ -17,6 +17,20 @@ When deciding what to implement first, use this order unless an issue explicitly
 
 Do not build UI features around missing or unstable Rust behavior when the capability clearly belongs in the shared runtime.
 
+### Current platform priority: HarmonyOS first
+
+For platform work, **HarmonyOS is currently the primary frontend**.
+
+Unless the task is a shared Rust/FFI contract that necessarily affects every platform:
+
+1. implement and verify the HarmonyOS path first;
+2. use HarmonyOS to prove the platform/presentation/bridge split and the real Rust FFI integration;
+3. only then port the proven behavior to Android and Desktop.
+
+Do not spend time chasing Android/Desktop feature parity while the equivalent HarmonyOS flow is still unbuildable, unverified, or using preview-only data.
+
+Shared abstractions must still stay platform-neutral. "HarmonyOS first" means implementation/verification order, not moving HarmonyOS-specific behavior into Rust.
+
 ## 2. Repository structure
 
 The main architectural boundaries are:
@@ -294,7 +308,200 @@ Do not require every frontend to understand provider-specific tool-call JSON.
 
 Rust should normalize the runtime behavior first.
 
-## 15. Error handling
+## 15. HarmonyOS development on Linux with DevEco CLI
+
+HarmonyOS is the current platform priority, and Linux agents must use the official **DevEco CLI + HarmonyOS Command Line Tools** workflow instead of treating "DevEco Studio is unavailable on Linux" as a reason to skip compilation.
+
+Huawei currently publishes DevEco CLI as the npm package:
+
+```bash
+npm install -g @deveco/deveco-cli@stable
+```
+
+The executable is:
+
+```bash
+devecocli
+```
+
+DevEco CLI is an orchestration layer over the HarmonyOS toolchain. On Linux, install the **HarmonyOS Command Line Tools** bundle as well. The Command Line Tools contain the SDK/build/device tools used by DevEco CLI, including Hvigor, ohpm and hdc.
+
+### 15.1 Linux environment
+
+Keep the Command Line Tools outside the repository, for example:
+
+```text
+~/harmony/command-line-tools/
+```
+
+Set the toolchain root explicitly. Do not assume Linux can auto-discover a DevEco Studio installation.
+
+```bash
+export DEVECO_CLI_CLT_PATH="$HOME/harmony/command-line-tools"
+export PATH="$DEVECO_CLI_CLT_PATH/bin:$PATH"
+```
+
+If the local Command Line Tools layout exposes Node or hdc outside `bin`, add the corresponding installed directories to `PATH` rather than copying binaries into the repository.
+
+Verify the installation before touching project code:
+
+```bash
+devecocli --version
+devecocli --help
+```
+
+If those fail, fix the local toolchain first. Do not edit project source to compensate for a broken CLI installation.
+
+### 15.2 Project root
+
+All HarmonyOS CLI commands for Sujiu run from:
+
+```bash
+cd apps/harmony
+```
+
+A valid HarmonyOS project root must contain the normal non-secret project metadata expected by the toolchain, such as the project/module build profiles, package metadata and Hvigor entry files.
+
+**Do not omit required project metadata merely because DevEco Studio generated it.** Generated build outputs and private signing material stay uncommitted; reproducible project configuration belongs in Git.
+
+If `devecocli build` cannot recognize `apps/harmony` as a project because files such as `build-profile.json5`, `oh-package.json5`, `hvigorfile.ts`, module build profiles, or equivalent current-toolchain metadata are missing, fixing that project skeleton is the first HarmonyOS task.
+
+Signing secrets remain local. Never commit private keys, certificates containing secrets, passwords, or machine-specific signing paths.
+
+### 15.3 Lint before build
+
+For ArkTS/TS changes, run lint first when possible:
+
+```bash
+cd apps/harmony
+devecocli check lint
+```
+
+For a focused check:
+
+```bash
+devecocli check lint entry/src/main/ets
+```
+
+Use `devecocli check lint --help` if the installed CLI version has different options. Do not guess flags from old blog posts.
+
+### 15.4 Build
+
+The normal Sujiu debug-module build is:
+
+```bash
+cd apps/harmony
+devecocli build --modules entry --build-mode debug
+```
+
+A single-entry project may also allow:
+
+```bash
+devecocli build
+```
+
+For release verification:
+
+```bash
+devecocli build --modules entry --build-mode release
+```
+
+Use:
+
+```bash
+devecocli build --help
+```
+
+to confirm the installed version's exact flags.
+
+Do not report HarmonyOS code as verified merely because Rust/Android/Desktop builds pass. A HarmonyOS change is not build-verified until the ArkTS/Hvigor build succeeds.
+
+### 15.5 Device connection and run
+
+List devices first:
+
+```bash
+devecocli device list
+```
+
+For a single connected device, the normal flow is:
+
+```bash
+cd apps/harmony
+devecocli run --module entry
+```
+
+With multiple devices, specify the target returned by `device list`:
+
+```bash
+devecocli run --module entry --device <device-or-serial>
+```
+
+If wireless HDC must be connected manually, use the `hdc` shipped with the HarmonyOS toolchain, for example:
+
+```bash
+hdc tconn <ip>:<port>
+devecocli device list
+```
+
+Do not hard-code a user's device address into scripts or source.
+
+### 15.6 Logs and crash diagnosis
+
+After running the app, inspect runtime logs instead of treating a successful install as sufficient verification.
+
+Useful commands include:
+
+```bash
+devecocli log --level E
+devecocli log --tail 200
+devecocli log --follow --bundle-name <bundle-name>
+devecocli log --crash --bundle-name <bundle-name>
+```
+
+Use `devecocli log --help` for the installed version's supported filters.
+
+For UI work, also use the CLI's device/UI inspection commands when available rather than relying only on static reasoning:
+
+```bash
+devecocli device list
+devecocli ui --help
+```
+
+### 15.7 DevEco CLI agent integration
+
+DevEco CLI can install its HarmonyOS skill/MCP integration into supported coding agents.
+
+For OpenCode, the standard pattern is:
+
+```bash
+devecocli init --agent opencode
+devecocli init --mcp --agent opencode --project "$(pwd)"
+```
+
+Run those from the HarmonyOS project directory when configuring the project-level MCP entry.
+
+Do not run `devecocli create` inside Sujiu: this repository already contains a HarmonyOS project. `create` is only for scaffolding a new project.
+
+### 15.8 HarmonyOS verification order
+
+For HarmonyOS changes, use this order:
+
+```text
+read issue / AGENTS.md
+  -> inspect apps/harmony project metadata
+  -> devecocli check lint
+  -> devecocli build --modules entry --build-mode debug
+  -> devecocli device list
+  -> devecocli run --module entry [--device ...]
+  -> exercise the changed UI/flow
+  -> inspect devecocli log / crash output
+  -> only then report the HarmonyOS path verified
+```
+
+If a physical device is unavailable, still perform lint + build and state clearly that install/runtime behavior was not verified.
+
+## 16. Error handling
 
 Tool execution errors should normally become structured tool results that the model can observe and react to.
 
@@ -316,7 +523,7 @@ Examples that should usually become tool results:
 - missing context record
 - backend-specific lookup failure that the model can recover from
 
-## 16. Tool-loop safety
+## 17. Tool-loop safety
 
 Always keep a finite maximum number of tool rounds.
 
@@ -326,7 +533,7 @@ Multiple tool calls in one assistant turn must be supported where the provider a
 
 Tool results must be returned to the model before the next assistant continuation.
 
-## 17. Testing requirements
+## 18. Testing requirements
 
 For Rust changes, the required baseline is:
 
@@ -348,7 +555,7 @@ When changing:
 
 Prefer tests that validate behavior rather than implementation details.
 
-## 18. CI status matters
+## 19. CI status matters
 
 The repository has Core CI.
 
@@ -361,7 +568,7 @@ If CI fails:
 
 A failed behavior test is evidence to investigate, not an invitation to change the expected result without justification.
 
-## 19. Keep changes focused
+## 20. Keep changes focused
 
 Avoid large unrelated refactors while implementing one feature.
 
@@ -388,7 +595,7 @@ This is especially important for:
 
 Avoid unnecessary Git conflict surfaces.
 
-## 20. Do not over-engineer early
+## 21. Do not over-engineer early
 
 Prefer a small correct abstraction over a large speculative framework.
 
@@ -407,7 +614,7 @@ Avoid:
 - speculative plugin systems before the core behavior exists
 - unnecessary abstraction layers with no current caller
 
-## 21. Backward compatibility and schema evolution
+## 22. Backward compatibility and schema evolution
 
 For internal serialized data:
 
@@ -422,7 +629,7 @@ For model-visible tools:
 - keep stable tool names when semantics remain the same
 - avoid unnecessary schema churn because prompts and provider behavior may depend on it
 
-## 22. Documentation
+## 23. Documentation
 
 Update documentation when changing architectural contracts.
 
@@ -435,7 +642,7 @@ At minimum:
 
 Do not leave the code and documented architecture contradicting each other.
 
-## 23. Completion standard
+## 24. Completion standard
 
 Before declaring a task complete, verify:
 
