@@ -1,0 +1,16 @@
+[workspace]
+members = [
+    "crates/sujiu-core",
+    "crates/sujiu-ffi",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "AGPL-3.0"
+rust-version = "1.82"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
