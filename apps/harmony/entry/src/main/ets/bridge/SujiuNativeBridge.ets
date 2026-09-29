@@ -125,25 +125,38 @@ interface SujiuNativeModule {
   create(): NativeRuntime;
 }
 
+/**
+ * Maps a runtime event kind onto the shared bridge kind.
+ *
+ * The runtime serializes its event kinds in snake_case, exactly as they are
+ * spelled in `TurnEventKind` on the Rust side. That string is the wire contract,
+ * so it must not be re-cased here.
+ */
 function toKind(value: string): TurnEventKind {
   switch (value) {
-    case 'turnStarted':
+    case 'turn_started':
       return TurnEventKind.Started;
-    case 'textDelta':
+    case 'text_delta':
       return TurnEventKind.TextDelta;
-    case 'thinkingDelta':
+    case 'thinking_delta':
       return TurnEventKind.ThinkingDelta;
-    case 'toolCallRequested':
+    case 'tool_call_requested':
       return TurnEventKind.ToolCallRequested;
-    case 'toolCallStarted':
+    case 'tool_call_started':
       return TurnEventKind.ToolCallStarted;
-    case 'toolCallFinished':
+    case 'tool_call_finished':
       return TurnEventKind.ToolCallFinished;
-    case 'turnCompleted':
+    case 'turn_completed':
       return TurnEventKind.Completed;
-    case 'turnCancelled':
+    case 'turn_cancelled':
       return TurnEventKind.Cancelled;
+    case 'turn_failed':
+      return TurnEventKind.Failed;
     default:
+      // An unknown kind is a contract mismatch, not a failed turn. It has to be
+      // visible: a silent fallback here once made every turn look like an
+      // immediate failure with no detail, because the first event was read as
+      // a failure instead of as the start of the turn.
       return TurnEventKind.Failed;
   }
 }
@@ -383,11 +396,16 @@ export class SujiuNativeBridge implements SujiuBridge {
       const kind: TurnEventKind = toKind(parsed.kind);
       if (kind === TurnEventKind.Failed) {
         // Rust reports what went wrong; the UI localizes a code and keeps the
-        // runtime text as detail.
+        // runtime text as detail. An unrecognized kind keeps its raw spelling
+        // as the detail, so a contract mismatch is diagnosable instead of
+        // presenting as an empty failure.
+        const text: string = parsed.kind === 'turn_failed' || parsed.text === undefined
+          ? (parsed.text ?? '')
+          : `unknown event kind: ${parsed.kind}`;
         onEvent({
           kind: kind,
-          message: toFailureCode(parsed.text ?? ''),
-          text: parsed.text,
+          message: toFailureCode(text),
+          text: text,
           isError: true
         } as TurnEvent);
         return;

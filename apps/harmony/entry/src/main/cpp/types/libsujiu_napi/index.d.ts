@@ -83,6 +83,29 @@ export interface ProviderConfig {
   temperature?: number;
 }
 
+/**
+ * One normalized turn event, serialized by the runtime.
+ *
+ * `kind` is a snake_case string and is the wire contract, not an implementation
+ * detail of the field names: `turn_started`, `text_delta`, `thinking_delta`,
+ * `tool_call_requested`, `tool_call_started`, `tool_call_finished`,
+ * `turn_completed`, `turn_failed`, `turn_cancelled`. The other fields are
+ * camelCase and are omitted when the event does not carry them, so read only
+ * what the kind implies:
+ *
+ * - a text event carries `text` as one delta, not the whole answer;
+ * - a tool event carries `toolName` and `toolCallId`, and the finished one also
+ *   carries `text` as a short result summary plus `isError`;
+ * - a failure carries `text` describing what went wrong.
+ */
+export interface TurnEvent {
+  kind: string;
+  text?: string;
+  toolName?: string;
+  toolCallId?: string;
+  isError?: boolean;
+}
+
 export interface TurnRequest {
   sessionId: string;
   userText: string;
@@ -120,7 +143,10 @@ export class SujiuRuntimeBridge {
    *
    * The native callback receives two arguments: the callback return value,
    * which this module never uses and is therefore always null, and the
-   * payload. Only the second argument carries the event.
+   * payload, which is one serialized `TurnEvent`. Only the second argument
+   * carries the event. Every kind from `turn_started` onwards arrives, and a
+   * turn always ends with exactly one of `turn_completed`, `turn_failed` or
+   * `turn_cancelled`.
    */
   sendTurn(
     request: TurnRequest,

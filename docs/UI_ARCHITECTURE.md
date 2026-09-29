@@ -360,6 +360,16 @@ emits coarse application events:
 | `turn_failed` | `Failed` with a user-safe message |
 | `turn_cancelled` | `Cancelled` |
 
+The `kind` strings are the wire contract, spelled exactly as above, and a
+platform switches on them **by value**. Renaming a variant on either side
+silently breaks the other: an unrecognized kind cannot be distinguished from a
+broken one, so a frontend that falls back quietly reports every turn as an
+immediate failure. Two rules follow:
+
+- keep the strings in one place per platform and treat an unknown kind as a
+  visible contract mismatch, never as a silent no-op;
+- pin them in a runtime test, so a rename fails a test instead of a device.
+
 While a tool runs, the UI shows lightweight status and keeps the tool row
 collapsed. It must not pretend the model is stuck, and it must not silently
 swallow the tool round.

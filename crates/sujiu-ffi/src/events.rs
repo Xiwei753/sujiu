@@ -165,3 +165,59 @@ fn summary_of(result: &ToolResult) -> String {
     truncated.push('…');
     truncated
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{TurnEvent, TurnEventKind};
+
+    /// Every kind crosses the FFI boundary as one of these strings, and each
+    /// platform switches on them by value. Renaming a variant or changing the
+    /// rename rule silently breaks every frontend at runtime, because a platform
+    /// that does not recognize a kind cannot tell a new event from a broken
+    /// one. So the wire spelling is pinned here.
+    const WIRE_KINDS: &[(TurnEventKind, &str)] = &[
+        (TurnEventKind::TurnStarted, "turn_started"),
+        (TurnEventKind::TextDelta, "text_delta"),
+        (TurnEventKind::ThinkingDelta, "thinking_delta"),
+        (TurnEventKind::ToolCallRequested, "tool_call_requested"),
+        (TurnEventKind::ToolCallStarted, "tool_call_started"),
+        (TurnEventKind::ToolCallFinished, "tool_call_finished"),
+        (TurnEventKind::TurnCompleted, "turn_completed"),
+        (TurnEventKind::TurnFailed, "turn_failed"),
+        (TurnEventKind::TurnCancelled, "turn_cancelled"),
+    ];
+
+    #[test]
+    fn event_kinds_serialize_to_the_documented_wire_strings() {
+        for (kind, expected) in WIRE_KINDS {
+            let json = serde_json::to_string(&TurnEvent::simple(*kind)).expect("serializable");
+            assert_eq!(
+                json,
+                format!("{{\"kind\":\"{expected}\"}}"),
+                "a platform switches on this exact string"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absent_field_stays_absent_from_the_payload() {
+        // A start event carries no text, so a platform must not have to read an
+        // empty field to know the turn has only begun.
+        let json = serde_json::to_string(&TurnEvent::simple(TurnEventKind::TurnStarted))
+            .expect("serializable");
+        assert!(!json.contains("text"), "{json}");
+    }
+
+    #[test]
+    fn a_failed_event_carries_the_reason_as_text() {
+        let json = serde_json::to_string(&TurnEvent::text(
+            TurnEventKind::TurnFailed,
+            "missing_credential",
+        ))
+        .expect("serializable");
+        assert_eq!(
+            json,
+            "{\"kind\":\"turn_failed\",\"text\":\"missing_credential\"}"
+        );
+    }
+}
