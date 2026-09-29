@@ -6,16 +6,12 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sujiu_core::{
-    ContextKind, ContextRecord, ContextScope, ContextSource, WorldBook,
-};
+use sujiu_core::{ContextKind, ContextRecord, ContextScope, ContextSource, WorldBook};
 use thiserror::Error;
 
 use crate::{
     tool::{Tool, ToolError, ToolRegistry},
-    types::{
-        ToolAnnotations, ToolContent, ToolDefinition, ToolDiscovery, ToolOutput,
-    },
+    types::{ToolAnnotations, ToolContent, ToolDefinition, ToolDiscovery, ToolOutput},
 };
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -298,10 +294,7 @@ impl ContextStore for InMemoryContextStore {
     }
 }
 
-pub fn register_standard_context_tools(
-    registry: &mut ToolRegistry,
-    store: Arc<dyn ContextStore>,
-) {
+pub fn register_standard_context_tools(registry: &mut ToolRegistry, store: Arc<dyn ContextStore>) {
     registry.register(ListContextSourcesTool::new(store.clone()));
     registry.register(SearchContextTool::new(store.clone()));
     registry.register(ReadContextTool::new(store));
