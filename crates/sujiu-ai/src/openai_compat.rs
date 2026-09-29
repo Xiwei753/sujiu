@@ -73,7 +73,7 @@ impl OpenAiCompatProvider {
                     "function": {
                         "name": tool.name,
                         "description": tool.description,
-                        "parameters": tool.parameters,
+                        "parameters": tool.input_schema,
                     }
                 })
             })
@@ -132,13 +132,24 @@ impl OpenAiCompatProvider {
             ModelMessage::ToolResult {
                 call_id,
                 name: _,
-                output,
-                is_error: _,
+                content,
+                structured_content,
+                is_error,
             } => {
+                let content = if content.is_empty() {
+                    structured_content
+                        .map(|value| value.to_string())
+                        .unwrap_or_default()
+                } else if is_error {
+                    json!({"error": content}).to_string()
+                } else {
+                    content
+                };
+
                 json!({
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": output.to_string(),
+                    "content": content,
                 })
             }
         }
