@@ -174,11 +174,7 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
         definitions
     }
 
-    fn execute_tool_search(
-        &self,
-        call: &ToolCall,
-        active: &mut BTreeSet<String>,
-    ) -> ToolResult {
+    fn execute_tool_search(&self, call: &ToolCall, active: &mut BTreeSet<String>) -> ToolResult {
         let query = call
             .arguments
             .get("query")
@@ -341,10 +337,7 @@ mod tests {
 
     #[async_trait]
     impl AiProvider for MockProvider {
-        async fn complete(
-            &self,
-            request: ProviderRequest,
-        ) -> Result<AssistantTurn, ProviderError> {
+        async fn complete(&self, request: ProviderRequest) -> Result<AssistantTurn, ProviderError> {
             self.requests.lock().unwrap().push(request);
             self.turns
                 .lock()
