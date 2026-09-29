@@ -75,12 +75,12 @@ impl<'a, P: AiProvider> AgentRuntime<'a, P> {
                 ModelMessage::Text {
                     role: ModelRole::User,
                     content,
-                } => Some(content.as_str()),
+                } => Some(content.clone()),
                 _ => None,
             })
             .unwrap_or_default();
 
-        self.run(messages, discovery_query).await
+        self.run(messages, &discovery_query).await
     }
 
     pub async fn run(
