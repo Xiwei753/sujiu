@@ -98,6 +98,48 @@ where
     )))
 }
 
+/// Read a reasoning sidecar, including the shape an earlier build wrote.
+///
+/// Reasoning used to be a bare string, because the transcript did not yet
+/// remember which provider produced it. That string is still readable, and it
+/// is read as a sidecar with an empty identity, which makes it
+/// non-replayable: a real identity always has at least a model, so old data
+/// keeps its text for the record and is never sent to a provider as if we knew
+/// where it came from. Losing that is the safe direction to be wrong in.
+///
+/// The alternative — refusing to parse — would make a whole session
+/// unreadable over a field that only ever cost us a replay.
+fn de_reasoning_sidecar<'de, D>(
+    deserializer: D,
+) -> Result<Option<crate::model::ReasoningSidecar>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let stored = Option::<Value>::deserialize(deserializer)?;
+
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+
+    if let Ok(sidecar) = serde_json::from_value::<crate::model::ReasoningSidecar>(stored.clone()) {
+        return Ok(Some(sidecar));
+    }
+
+    // A string is the pre-identity shape.
+    if let Ok(content) = serde_json::from_value::<String>(stored.clone()) {
+        return Ok(Some(crate::model::ReasoningSidecar::new(
+            content,
+            crate::model::ProviderIdentity::default(),
+        )));
+    }
+
+    Err(D::Error::custom(format!(
+        "unrecognised reasoning sidecar: {stored}"
+    )))
+}
+
 /// One tool call and its result.
 ///
 /// The result lives inside the call on purpose: that makes an unpaired call
@@ -176,7 +218,11 @@ pub struct AssistantStep {
     /// Reasoning content, kept apart from visible text because it is not part
     /// of the conversation the user reads. It remembers which provider
     /// produced it, because that decides whether it may be replayed.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "de_reasoning_sidecar"
+    )]
     pub reasoning: Option<crate::model::ReasoningSidecar>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRecord>,
@@ -210,20 +256,28 @@ impl AssistantStep {
 
     /// This step as provider-neutral model messages, in wire order.
     ///
-    /// A step that asked for tools becomes an `AssistantToolCalls` message
-    /// followed by one `ToolResult` per call, in call order. A call that never
-    /// finished still gets a result, because a provider rejects a call with no
-    /// result at all.
+    /// A step that asked for tools becomes an assistant message followed by one
+    /// `ToolResult` per call, in call order. A call that never finished still
+    /// gets a result, because a provider rejects a call with no result at all.
     ///
-    /// The step's reasoning travels with the assistant message, so a
-    /// transport that requires it to be replayed can find it. Which wire field
-    /// it belongs in, and whether it is sent at all, is the adapter's call.
+    /// A step that only answered also becomes an assistant message, and it
+    /// carries its reasoning. The reasoning used to be attached only to the
+    /// tool-calling shape, so a thinking model that reasoned and then answered
+    /// without a tool lost that reasoning on the next turn — the sidecar had
+    /// nowhere to go. What the wire form is, and whether the reasoning is sent
+    /// at all, is the adapter's call.
     pub fn model_messages(&self) -> Vec<ModelMessage> {
         let mut messages = Vec::new();
 
-        if self.has_tool_calls() {
-            messages.push(ModelMessage::AssistantToolCalls {
-                content: self.text.clone(),
+        let content = self.text.clone().filter(|text| !text.trim().is_empty());
+
+        // A step that only asked for tools still needs a message; the call is
+        // the content in that case. A step with neither text nor calls is not
+        // a message at all, and emitting an empty one would put a blank turn
+        // on the wire.
+        if content.is_some() || self.has_tool_calls() {
+            messages.push(ModelMessage::Assistant {
+                content,
                 calls: self
                     .tool_calls
                     .iter()
@@ -243,8 +297,6 @@ impl AssistantStep {
                 structured_content: call.result.structured_content.clone(),
                 is_error: call.result.is_error(),
             }));
-        } else if let Some(text) = self.text.as_ref().filter(|text| !text.trim().is_empty()) {
-            messages.push(ModelMessage::assistant(text.clone()));
         }
 
         messages
@@ -758,6 +810,87 @@ mod tests {
 
         assert!(record.is_error());
         assert!(record.model_text().contains("interrupted"));
+    }
+
+    #[test]
+    fn an_answer_without_a_tool_call_still_carries_its_reasoning() {
+        let origin = identity(
+            ProviderKind::OpenAiCompatible,
+            "p1",
+            "https://a.example/v1",
+            "m",
+        );
+        let mut step = AssistantStep::text_only("The light stopped blinking.");
+        step.reasoning = Some(crate::model::ReasoningSidecar::new(
+            "counting the intervals",
+            origin,
+        ));
+
+        let messages = step.model_messages();
+
+        assert_eq!(messages.len(), 1, "a plain answer is one message");
+        match &messages[0] {
+            ModelMessage::Assistant {
+                content,
+                reasoning,
+                calls,
+            } => {
+                assert_eq!(content.as_deref(), Some("The light stopped blinking."));
+                // The sidecar used to be dropped here, because only the
+                // tool-calling shape had a place for it.
+                assert!(reasoning.is_some());
+                assert!(calls.is_empty());
+            }
+            other => panic!("expected an assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reasoning_written_as_a_plain_string_is_read_but_never_replayed() {
+        // What an earlier build wrote, before the sidecar remembered where the
+        // reasoning came from.
+        let stored = json!({
+            "id": "turn-1",
+            "user": "what do you hear?",
+            "state": "completed",
+            "steps": [
+                { "text": "The sea.", "reasoning": "counting the intervals" }
+            ]
+        });
+
+        let turn: Turn = serde_json::from_value(stored).expect("old reasoning is readable");
+
+        let sidecar = turn.steps[0]
+            .reasoning
+            .as_ref()
+            .expect("kept for the record");
+        assert_eq!(sidecar.content, "counting the intervals");
+        // An empty identity is not any real provider, so it can never be
+        // replayed. Keeping the text is the point; guessing who wrote it is not.
+        assert!(!sidecar.is_replayable_for(&identity(
+            ProviderKind::OpenAiCompatible,
+            "p1",
+            "https://a.example/v1",
+            "m"
+        )));
+    }
+
+    #[test]
+    fn a_step_with_neither_text_nor_calls_is_not_a_message() {
+        assert!(AssistantStep::default().model_messages().is_empty());
+        // A step that only thought is still not a message the model sent.
+        let mut thinking = AssistantStep::default();
+        thinking.reasoning = Some(crate::model::ReasoningSidecar::new(
+            "nothing said",
+            identity(
+                ProviderKind::OpenAiCompatible,
+                "p1",
+                "https://a.example/v1",
+                "m",
+            ),
+        ));
+
+        assert!(thinking.model_messages().is_empty());
     }
 
     fn identity(

@@ -32,6 +32,9 @@ enum Step {
         &'static str,
         &'static [(&'static str, &'static str, &'static str)],
     ),
+    /// The model thinks out loud and then answers in words, with no tool call
+    /// at all. The reasoning still has to come back next request.
+    ReasoningThenText(&'static str, &'static str),
     /// The provider answers with an HTTP error.
     Http(u16),
     /// The provider claims to stream and then sends something that is not a
@@ -42,7 +45,41 @@ enum Step {
 struct ScriptedProvider {
     port: u16,
     requests: mpsc::Receiver<Value>,
+    /// Capability probes, kept off the conversation channel so a test counting
+    /// conversation rounds is not counting negotiation.
+    probes: mpsc::Receiver<Value>,
     server: thread::JoinHandle<()>,
+}
+
+/// Whether a request is the runtime asking what this endpoint can do.
+///
+/// Negotiation is a real request, so a scripted server has to answer it, and it
+/// has to answer it without consuming a scripted step. It is recognised by its
+/// shape rather than by a marker, because the runtime does not announce itself
+/// and a real endpoint cannot be expected to.
+fn is_capability_probe(request: &Value) -> bool {
+    request["max_tokens"] == json!(1)
+        && request["messages"].as_array().is_some_and(|messages| {
+            messages.len() == 1
+                && messages[0]["role"] == "user"
+                && messages[0]["content"] == json!("ping")
+        })
+}
+
+/// Answers a capability probe with the least a completion can be.
+fn write_probe_response(stream: &mut TcpStream) {
+    let body = json!({
+        "id": "probe",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "pong"}, "finish_reason": "stop"}],
+    })
+    .to_string();
+
+    let _ = write!(
+        stream,
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
 }
 
 impl ScriptedProvider {
@@ -53,6 +90,7 @@ impl ScriptedProvider {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let (tx, rx) = mpsc::channel();
+        let (probe_tx, probe_rx) = mpsc::channel();
 
         let server = thread::spawn(move || {
             let mut served = 0usize;
@@ -65,6 +103,13 @@ impl ScriptedProvider {
                 let Ok(value) = serde_json::from_str::<Value>(&body) else {
                     continue;
                 };
+                if is_capability_probe(&value) {
+                    let _ = probe_tx.send(value);
+                    let mut stream = stream;
+                    write_probe_response(&mut stream);
+                    continue;
+                }
+
                 let _ = tx.send(value);
 
                 let step = script
@@ -84,8 +129,16 @@ impl ScriptedProvider {
         Self {
             port,
             requests: rx,
+            probes: probe_rx,
             server,
         }
+    }
+
+    /// The next capability probe, if one arrives.
+    fn next_probe(&self) -> Option<Value> {
+        self.probes
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .ok()
     }
 
     fn base_url(&self) -> String {
@@ -164,6 +217,17 @@ fn write_response(stream: &TcpStream, index: usize, step: &Step) {
                 &json!({"choices": [{"delta": {"reasoning_content": reasoning}}]}),
             ));
             write_tool_calls(&mut frames, calls);
+        }
+        Step::ReasoningThenText(reasoning, text) => {
+            frames.push(frame(
+                &json!({"choices": [{"delta": {"reasoning_content": reasoning}}]}),
+            ));
+            for word in text.split_inclusive(' ') {
+                frames.push(frame(&json!({"choices": [{"delta": {"content": word}}]})));
+            }
+            frames.push(frame(
+                &json!({"choices": [{"delta": {}, "finish_reason": "stop"}]}),
+            ));
         }
         Step::Calls(calls) => write_tool_calls(&mut frames, calls),
     }
@@ -384,11 +448,15 @@ fn result_ids(request: &Value) -> Vec<String> {
         .collect()
 }
 
-/// The `reasoning_content` of every assistant tool call in a request, in order.
+/// The `reasoning_content` of every assistant message in a request, in order.
+///
+/// Not just the tool-calling ones: an answer with no tool call still carries
+/// its reasoning, and a helper that only looked at tool-call messages would
+/// have hidden exactly the case that used to drop it.
 fn reasoning_of(request: &Value) -> Vec<String> {
     messages(request)
         .into_iter()
-        .filter(|message| !tool_call_ids(message).is_empty())
+        .filter(|message| message["reasoning_content"].is_string())
         .map(|message| {
             message["reasoning_content"]
                 .as_str()
@@ -1033,6 +1101,105 @@ fn replayed_reasoning_survives_a_restart() {
         );
     }
 
+    drop(provider.server);
+}
+
+/// A thinking model that answers in words after thinking used to lose its
+/// reasoning, because the sidecar only rode on the tool-calling shape of a
+/// message. The endpoint still demands the reasoning back, so the next request
+/// has to carry it even though no tool call is involved.
+#[test]
+fn an_answer_without_a_tool_call_still_replays_its_reasoning() {
+    const THINKING: Step = Step::ReasoningThenText(
+        "The harbour light answers on eleven minutes, like the compressor.",
+        "The harbour light answers on eleven minutes.",
+    );
+    let provider = ScriptedProvider::start(vec![THINKING, Step::Text("The watch is unattended.")]);
+    let runtime = thinking_runtime_for(&provider.base_url(), "deepseek-chat");
+    let session = runtime.create_session(Some("character-lin"));
+
+    run_turn(&runtime, &session, "When does the harbour light answer?");
+    let _ = provider.next_request();
+
+    run_turn(&runtime, &session, "And who keeps the watch?");
+    let second = provider.next_request();
+
+    assert_eq!(
+        reasoning_of(&second),
+        vec!["The harbour light answers on eleven minutes, like the compressor.".to_string()],
+        "an answer with no tool call must still send its reasoning back: {second:?}"
+    );
+
+    drop(runtime);
+    drop(provider.server);
+}
+
+/// The capability the settings screen saved has to reach the adapter, and the
+/// per-turn request must not quietly drop it.
+///
+/// The runtime merges a per-turn provider over the saved one, so a turn that
+/// resends an incomplete description used to override the saved capability
+/// with a default and stop replaying reasoning on a perfectly good endpoint.
+#[test]
+fn a_saved_capability_reaches_the_adapter_through_an_ordinary_turn() {
+    const THINKING: Step = Step::ReasoningThenCalls(
+        "Eleven minutes, same as the compressor.",
+        &[("call-1", "search_context", r#"{"query":"compressor"}"#)],
+    );
+    let provider = ScriptedProvider::start(vec![
+        THINKING,
+        Step::Text("Eleven minutes, same as the compressor."),
+    ]);
+    let runtime = thinking_runtime_for(&provider.base_url(), "deepseek-chat");
+    let session = runtime.create_session(Some("character-lin"));
+
+    // A per-turn provider that repeats only the fields a caller naturally has.
+    let mut recorder = Recorder::default();
+    runtime.tokio.block_on(runtime.send_turn(
+        SendTurnRequest {
+            session_id: session.clone(),
+            user_text: "How long between compressor cycles?".to_string(),
+            provider: Some(ProviderConfig {
+                id: "mock".to_string(),
+                name: "Mock".to_string(),
+                kind: ProviderKind::OpenAiCompatible,
+                base_url: provider.base_url(),
+                model: "deepseek-chat".to_string(),
+                credential_ref: None,
+                extra: Default::default(),
+            }),
+            api_key: Some("test-key".to_string()),
+        },
+        &mut recorder,
+    ));
+    // The assertion has to be made on a request encoded under the PER-TURN
+    // config, which is the second round of this turn: it is the only one whose
+    // adapter was built from the merged provider. A later user turn goes back
+    // to the stored config, so asserting there would pass even when the merge
+    // threw the capability away.
+    let _ = provider.next_request();
+    let second_round = provider.next_request();
+    assert_eq!(
+        reasoning_of(&second_round),
+        vec!["Eleven minutes, same as the compressor.".to_string()],
+        "a turn that did not restate the capability must not lose it: {second_round:?}"
+    );
+
+    // Negotiation asked the endpoint what it speaks before that first round,
+    // and that request is a minimal probe rather than a conversation turn.
+    let probe = provider
+        .next_probe()
+        .expect("the first turn negotiates the protocol first");
+    assert!(
+        is_capability_probe(&probe),
+        "the probe is a minimal request, not a conversation round: {probe:?}"
+    );
+
+    // And the capability is still there for the turns after it.
+    run_turn(&runtime, &session, "Was it always eleven minutes?");
+    let _ = provider.next_request();
+
+    drop(runtime);
     drop(provider.server);
 }
 

@@ -16,8 +16,8 @@ use napi_derive::napi;
 use sujiu_core::ProviderConfig;
 use sujiu_ffi::events::{TurnEvent, TurnEventReporter};
 use sujiu_ffi::runtime::{
-    CharacterSummary, ContextSourceSummary, ConversationSnapshot, ModelSummary, SendTurnRequest,
-    SessionSummary, SujiuRuntime, ToolCallSummary,
+    CharacterSummary, ContextSourceSummary, ConversationSnapshot, ModelDiscovery, ModelSummary,
+    SendTurnRequest, SessionSummary, SujiuRuntime, ToolCallSummary,
 };
 
 /// A live Rust runtime handed to the platform bridge.
@@ -55,6 +55,31 @@ pub struct ModelSummaryDto {
     pub provider_name: String,
     pub kind: String,
     pub configured: bool,
+}
+
+/// What model discovery found, and what the user may still do about it.
+#[napi(object)]
+pub struct ModelDiscoveryDto {
+    pub listing: String,
+    pub note: String,
+    /// Always true, so a settings screen can keep the manual field enabled.
+    pub manual_entry_allowed: bool,
+    pub models: Vec<ModelSummaryDto>,
+}
+
+impl From<ModelDiscovery> for ModelDiscoveryDto {
+    fn from(discovery: ModelDiscovery) -> Self {
+        Self {
+            listing: discovery.listing,
+            note: discovery.note,
+            manual_entry_allowed: discovery.manual_entry_allowed,
+            models: discovery
+                .models
+                .into_iter()
+                .map(ModelSummaryDto::from)
+                .collect(),
+        }
+    }
 }
 
 #[napi(object)]
@@ -379,6 +404,21 @@ impl SujiuRuntimeBridge {
             .collect()
     }
 
+    /// Ask the endpoint which models it serves.
+    ///
+    /// A convenience for the settings screen. It never decides how a turn
+    /// runs, and `manualEntryAllowed` is always true: a gateway with no model
+    /// list still chats, so a listing failure must not take the manual choice
+    /// away.
+    #[napi]
+    pub fn discover_models(&self, api_key: Option<String>) -> Result<ModelDiscoveryDto> {
+        let discovery = self
+            .runtime
+            .tokio
+            .block_on(self.runtime.discover_models(api_key.as_deref()));
+        Ok(ModelDiscoveryDto::from(discovery))
+    }
+
     #[napi]
     pub fn list_context_sources(&self) -> Result<Vec<ContextSourceDto>> {
         let sources = self
@@ -444,18 +484,10 @@ impl SujiuRuntimeBridge {
 #[cfg(test)]
 mod tests {
     use super::ProviderConfigDto;
+    use sujiu_core::{apply_reasoning_override, EndpointCapabilities, Protocol};
 
-    /// The replay of assistant reasoning is a property of the endpoint, so it
-    /// has to be answerable from the endpoint and model a settings form
-    /// collects. A user pointing Sujiu at a thinking-mode service cannot type a
-    /// hidden `extra` key, so a capability only reachable that way is a feature
-    /// no real user can turn on.
-    ///
-    /// This drives the real path: the fields the bridge sends, the conversion
-    /// the bridge performs, and the runtime's answer.
-    #[test]
-    fn a_thinking_endpoint_is_recognised_from_the_fields_the_settings_form_sends() {
-        let from_the_form = ProviderConfigDto {
+    fn form_fields(replays_assistant_reasoning: Option<bool>) -> ProviderConfigDto {
+        ProviderConfigDto {
             id: "provider-1".into(),
             name: "DeepSeek".into(),
             kind: "openai_compatible".into(),
@@ -463,80 +495,72 @@ mod tests {
             model: "deepseek-reasoner".into(),
             max_tokens: Some(2048),
             temperature: Some(0.7),
-            replays_assistant_reasoning: None,
-        };
-
-        let config = from_the_form.to_domain();
-
-        assert!(config.capabilities().replays_assistant_reasoning);
+            replays_assistant_reasoning,
+        }
     }
 
-    /// An ordinary chat endpoint has no such requirement and must not be handed
-    /// a reasoning block it does not understand.
+    /// A platform only describes the provider: an id, a URL, a model and a
+    /// key. It does not declare which wire protocol the endpoint speaks, and it
+    /// must not have to, because that answer goes stale and a form cannot know
+    /// it. So the settings form's fields convert to a config that asks the
+    /// endpoint rather than asserting anything about it.
     #[test]
-    fn an_ordinary_chat_endpoint_is_left_alone() {
-        let chat = ProviderConfigDto {
-            id: "provider-1".into(),
-            name: "DeepSeek".into(),
-            kind: "openai_compatible".into(),
-            base_url: "https://api.deepseek.com/v1".into(),
-            model: "deepseek-chat".into(),
-            max_tokens: None,
-            temperature: None,
-            replays_assistant_reasoning: None,
-        };
+    fn a_settings_form_does_not_have_to_declare_any_protocol_capability() {
+        let config = form_fields(None).to_domain();
 
-        assert!(!chat.to_domain().capabilities().replays_assistant_reasoning);
-    }
-
-    /// Another vendor's gateway serving a model of the same name is a different
-    /// endpoint and must not inherit its protocol requirements.
-    #[test]
-    fn another_gateways_reasoning_endpoint_is_not_given_the_requirement() {
-        let elsewhere = ProviderConfigDto {
-            id: "provider-1".into(),
-            name: "Gateway".into(),
-            kind: "openai_compatible".into(),
-            base_url: "https://gateway.example.com/v1".into(),
-            model: "deepseek-reasoner".into(),
-            max_tokens: None,
-            temperature: None,
-            replays_assistant_reasoning: None,
-        };
-
-        assert!(
-            !elsewhere
-                .to_domain()
-                .capabilities()
-                .replays_assistant_reasoning
+        assert_eq!(config.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(config.model, "deepseek-reasoner");
+        assert_eq!(
+            config.forced_reasoning_replay(),
+            None,
+            "the form stated nothing, so nothing may be inferred from a vendor or model name"
         );
     }
 
-    /// A platform that does know the requirement can still say so, and an
-    /// override has to be able to switch the answer in both directions.
+    /// The same fields, whatever model name they carry, lead to the same
+    /// question. This is the behaviour the old vendor-name lookup had and the
+    /// negotiation replaced: a gateway serving any number of models is still
+    /// one endpoint, and a model name is a request parameter.
     #[test]
-    fn a_stated_capability_overrides_what_the_runtime_inferred() {
-        let base = ProviderConfigDto {
-            id: "provider-1".into(),
-            name: "Gateway".into(),
-            kind: "openai_compatible".into(),
-            base_url: "https://gateway.example.com/v1".into(),
-            model: "reasoner-x".into(),
-            max_tokens: None,
-            temperature: None,
-            replays_assistant_reasoning: None,
-        };
+    fn no_model_name_decides_what_the_endpoint_speaks() {
+        for model in ["deepseek-reasoner", "r1", "thinking-v2", "gpt-4o-mini"] {
+            let dto = ProviderConfigDto {
+                model: model.into(),
+                ..form_fields(None)
+            };
+            let config = dto.to_domain();
 
-        let on = ProviderConfigDto {
-            replays_assistant_reasoning: Some(true),
-            ..base
-        };
-        assert!(on.to_domain().capabilities().replays_assistant_reasoning);
+            assert_eq!(config.forced_reasoning_replay(), None, "{model}");
+            assert_eq!(
+                config.capability_key(),
+                "provider-1|https://api.deepseek.com/v1",
+                "{model} is a parameter, not an endpoint"
+            );
+        }
+    }
 
-        let off = ProviderConfigDto {
-            replays_assistant_reasoning: Some(false),
-            ..on
-        };
-        assert!(!off.to_domain().capabilities().replays_assistant_reasoning);
+    /// A platform that does know something the negotiation cannot see may still
+    /// say so, and saying it has to survive the conversion in both directions.
+    #[test]
+    fn a_stated_capability_survives_the_bridge_in_both_directions() {
+        let on = form_fields(Some(true)).to_domain();
+        assert_eq!(on.forced_reasoning_replay(), Some(true));
+
+        let off = form_fields(Some(false)).to_domain();
+        assert_eq!(off.forced_reasoning_replay(), Some(false));
+    }
+
+    /// A stated capability is applied on top of what the endpoint was found to
+    /// do, and it only ever changes the reasoning answer.
+    #[test]
+    fn a_stated_capability_is_applied_on_top_of_a_negotiated_one() {
+        let negotiated = EndpointCapabilities::negotiate(&[Protocol::OpenAiChatCompletions])
+            .expect("chat completions is implemented");
+
+        let forced = apply_reasoning_override(negotiated.clone(), Some(true));
+
+        assert!(forced.replays_assistant_reasoning);
+        assert_eq!(forced.protocol, negotiated.protocol);
+        assert_eq!(forced.supported, negotiated.supported);
     }
 }

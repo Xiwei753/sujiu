@@ -25,7 +25,41 @@ type Received = Value;
 struct MockProvider {
     port: u16,
     requests: mpsc::Receiver<Received>,
+    /// Capability probes, kept off the conversation channel so a test counting
+    /// conversation rounds is not counting negotiation.
+    probes: mpsc::Receiver<Received>,
     server: thread::JoinHandle<()>,
+}
+/// Whether a request is the runtime asking what this endpoint can do.
+///
+/// Negotiation is a real request, so a scripted server has to answer it. It is
+/// recognised by its shape rather than by a marker the runtime sends, because
+/// the runtime does not announce itself and a real endpoint cannot be expected
+/// to. A probe is a one-token completion with a fixed greeting, which is the
+/// smallest thing that still proves the route works.
+fn is_capability_probe(request: &Value) -> bool {
+    request["max_tokens"] == json!(1)
+        && request["messages"].as_array().is_some_and(|messages| {
+            messages.len() == 1
+                && messages[0]["role"] == "user"
+                && messages[0]["content"] == json!("ping")
+        })
+}
+
+/// Answers a capability probe with the least a completion can be.
+fn write_probe_response(stream: &mut TcpStream) {
+    let body = json!({
+        "id": "probe",
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "pong"}, "finish_reason": "stop"}],
+    })
+    .to_string();
+
+    let _ = write!(
+        stream,
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
 }
 
 impl MockProvider {
@@ -33,6 +67,7 @@ impl MockProvider {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
         let port = listener.local_addr().expect("addr").port();
         let (tx, rx) = mpsc::channel();
+        let (probe_tx, probe_rx) = mpsc::channel();
 
         let server = thread::spawn(move || {
             for stream in listener.incoming() {
@@ -44,6 +79,13 @@ impl MockProvider {
                 let Ok(value) = serde_json::from_str::<Value>(&body) else {
                     continue;
                 };
+                if is_capability_probe(&value) {
+                    let _ = probe_tx.send(value);
+                    let mut stream = stream;
+                    write_probe_response(&mut stream);
+                    continue;
+                }
+
                 let _ = tx.send(value.clone());
                 write_response(&stream, &value);
             }
@@ -52,8 +94,16 @@ impl MockProvider {
         Self {
             port,
             requests: rx,
+            probes: probe_rx,
             server,
         }
+    }
+
+    /// The next capability probe, if one arrives.
+    fn next_probe(&self) -> Option<Received> {
+        self.probes
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .ok()
     }
 
     fn base_url(&self) -> String {
@@ -328,6 +378,58 @@ impl TurnEventReporter for CancellingReporter<'_> {
         }
         self.events.push(event);
     }
+}
+
+/// The protocol is negotiated against the endpoint before a streamed turn
+/// starts, and that request must not be mistaken for a conversation round.
+///
+/// Before negotiation existed the runtime picked its transport from the
+/// provider kind alone, so a streamed turn began with its first real message.
+/// Now the first thing an endpoint sees is a minimal probe, and a client that
+/// cannot tell the two apart either counts the probe as a turn or answers the
+/// conversation with the probe's reply.
+#[test]
+fn a_streamed_turn_negotiates_before_it_streams() {
+    let provider = MockProvider::start();
+    let runtime = runtime_for(&provider.base_url());
+
+    let mut sink = Recorder { events: Vec::new() };
+    run_turn(
+        &runtime,
+        SendTurnRequest {
+            session_id: "session-1".to_string(),
+            user_text: "Say something.".to_string(),
+            provider: None,
+            api_key: Some("test-key".to_string()),
+        },
+        &mut sink,
+    );
+
+    let probe = provider
+        .next_probe()
+        .expect("the turn should have negotiated the protocol first");
+    assert!(
+        is_capability_probe(&probe),
+        "a capability probe is a minimal request, not a conversation round: {probe:?}"
+    );
+    assert_eq!(
+        probe["messages"].as_array().map(Vec::len),
+        Some(1),
+        "a probe does not replay the session: {probe:?}"
+    );
+
+    // The conversation is a separate request that arrives after the probe.
+    let turn = provider.next_request();
+    assert!(
+        !is_capability_probe(&turn),
+        "the conversation must not be a probe: {turn:?}"
+    );
+    assert_eq!(turn["stream"], serde_json::json!(true));
+    let kinds: Vec<TurnEventKind> = sink.events.iter().map(|event| event.kind).collect();
+    assert!(
+        kinds.contains(&TurnEventKind::TurnCompleted),
+        "the turn still streams and completes: {kinds:?}"
+    );
 }
 
 #[test]

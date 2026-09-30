@@ -4,6 +4,8 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use sujiu_core::{EndpointCapabilities, Protocol};
+
 use crate::{
     provider::{AiProvider, ProviderError, StreamSink},
     types::{
@@ -32,20 +34,14 @@ pub struct OpenAiCompatConfig {
     /// the newer developer role. Map it to system unless explicitly enabled.
     pub supports_developer_role: bool,
 
-    /// Whether this transport rejects an assistant tool call that comes back
-    /// without the reasoning that produced it.
+    /// What negotiation decided this endpoint can do.
     ///
-    /// DeepSeek's thinking mode is the documented case: a multi-round tool
-    /// loop has to replay every previous assistant `reasoning_content`, and the
-    /// API answers 400 when one is missing. Other OpenAI-compatible services
-    /// have no such field, so the reasoning is left out of the wire entirely
-    /// rather than sent under a name that service may not understand.
-    ///
-    /// This is also what keeps one provider's reasoning wire metadata from
-    /// reaching another: the sidecar is stored provider-neutral in the
-    /// transcript, and only a transport that declared the requirement is told
-    /// the field name.
-    pub requires_reasoning_content_for_tool_calls: bool,
+    /// The reasoning flag used to live here as a bare boolean that someone had
+    /// to know to set, which meant the feature was reachable from a test and
+    /// from nowhere else. It is now one field of a negotiated capability set,
+    /// so the same value also says which protocol was chosen, what the model
+    /// listing route reported, and what was never determined at all.
+    pub capabilities: EndpointCapabilities,
 }
 
 impl OpenAiCompatConfig {
@@ -70,7 +66,8 @@ impl OpenAiCompatConfig {
             max_tokens: None,
             temperature: None,
             supports_developer_role: false,
-            requires_reasoning_content_for_tool_calls: false,
+            capabilities: EndpointCapabilities::negotiate(&[Protocol::OpenAiChatCompletions])
+                .expect("the chat completions adapter only speaks chat completions"),
         }
     }
 }
@@ -154,7 +151,7 @@ impl OpenAiCompatProvider {
                     "content": content,
                 })
             }
-            ModelMessage::AssistantToolCalls {
+            ModelMessage::Assistant {
                 content,
                 calls,
                 reasoning,
@@ -189,7 +186,7 @@ impl OpenAiCompatProvider {
                 // name would put a foreign protocol's text where the endpoint
                 // expects its own. The visible text of that same step still
                 // travels, because visible text is portable.
-                if self.config.requires_reasoning_content_for_tool_calls {
+                if self.config.capabilities.replays_assistant_reasoning {
                     if let Some(reasoning) = reasoning
                         .as_ref()
                         .filter(|sidecar| sidecar.is_replayable_for(&self.config.identity))
@@ -626,6 +623,17 @@ struct ChatFunctionCall {
 mod tests {
     use super::*;
 
+    /// What negotiation hands the adapter when the endpoint wants assistant
+    /// reasoning replayed, which is the one capability the chat completions
+    /// wire form depends on.
+    fn reasoning_capabilities() -> EndpointCapabilities {
+        sujiu_core::apply_reasoning_override(
+            EndpointCapabilities::negotiate(&[Protocol::OpenAiChatCompletions])
+                .expect("chat completions is implemented"),
+            Some(true),
+        )
+    }
+
     #[derive(Default)]
     struct RecordingSink {
         deltas: Vec<String>,
@@ -856,10 +864,10 @@ mod tests {
     #[test]
     fn assistant_reasoning_is_replayed_only_where_the_endpoint_requires_it() {
         let demanding_config = OpenAiCompatConfig {
-            requires_reasoning_content_for_tool_calls: true,
+            capabilities: reasoning_capabilities(),
             ..OpenAiCompatConfig::new("https://example.invalid/v1", "secret", "deepseek-chat")
         };
-        let assistant = ModelMessage::AssistantToolCalls {
+        let assistant = ModelMessage::Assistant {
             content: Some("looking it up".into()),
             calls: vec![ToolCall {
                 id: "call-1".into(),
@@ -914,16 +922,16 @@ mod tests {
     #[test]
     fn one_providers_reasoning_is_never_encoded_into_anothers_request() {
         let provider_a = OpenAiCompatConfig {
-            requires_reasoning_content_for_tool_calls: true,
+            capabilities: reasoning_capabilities(),
             ..OpenAiCompatConfig::new("https://a.example/v1", "secret", "reasoner-a")
         };
         let provider_b = OpenAiCompatConfig {
-            requires_reasoning_content_for_tool_calls: true,
+            capabilities: reasoning_capabilities(),
             ..OpenAiCompatConfig::new("https://b.example/v1", "secret", "reasoner-b")
         };
 
         let request = ProviderRequest {
-            messages: vec![ModelMessage::AssistantToolCalls {
+            messages: vec![ModelMessage::Assistant {
                 content: Some("looking it up".into()),
                 calls: vec![ToolCall {
                     id: "call-1".into(),
@@ -966,13 +974,13 @@ mod tests {
     #[test]
     fn a_blank_reasoning_sidecar_is_not_sent() {
         let config = OpenAiCompatConfig {
-            requires_reasoning_content_for_tool_calls: true,
+            capabilities: reasoning_capabilities(),
             ..OpenAiCompatConfig::new("https://example.invalid/v1", "secret", "deepseek-chat")
         };
         let provider = OpenAiCompatProvider::new(config.clone());
 
         let request = ProviderRequest {
-            messages: vec![ModelMessage::AssistantToolCalls {
+            messages: vec![ModelMessage::Assistant {
                 content: None,
                 calls: vec![ToolCall {
                     id: "call-1".into(),

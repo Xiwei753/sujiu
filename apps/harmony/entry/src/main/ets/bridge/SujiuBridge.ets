@@ -126,6 +126,16 @@ export interface SujiuBridge {
   supportedProviderKinds(): Promise<string[]>;
   /** Hands a provider description to the runtime. Rejects an unsupported kind. */
   configureProvider(draft: ProviderDraft): Promise<void>;
+  /**
+   * Runs the next turn against `draft` instead of the saved provider, without
+   * saving it.
+   *
+   * Only for a genuine one-turn override. An ordinary turn sends no provider
+   * at all and lets the runtime use what was already saved, because a resent
+   * description is a restatement: a field the caller left out is not left
+   * unchanged, it is the saved value being overridden with a default.
+   */
+  withProviderForNextTurn(draft: ProviderDraft): void;
   /** The api key for the next turn. The runtime never stores it. */
   setCredential(secret: string): void;
   /**

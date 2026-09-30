@@ -211,7 +211,7 @@ fn history_segments(history: &[ModelMessage]) -> Vec<PromptSegment> {
             // The reasoning sidecar is deliberately left out: this is the flat
             // text view the world book is scanned against, and private
             // reasoning is not something a keyword should match on.
-            ModelMessage::AssistantToolCalls { content, calls, .. } => {
+            ModelMessage::Assistant { content, calls, .. } => {
                 if let Some(content) = content.as_ref().filter(|c| !c.trim().is_empty()) {
                     segments.push(PromptSegment {
                         role: ChatRole::Assistant,
@@ -585,25 +585,31 @@ mod tests {
         // The intermediate call and its result are in the next request, not
         // just the final answer.
         assert!(messages.iter().any(
-            |message| matches!(message, ModelMessage::AssistantToolCalls { calls, .. }
+            |message| matches!(message, ModelMessage::Assistant { calls, .. }
                 if calls[0].id == "call-1")
         ));
         assert!(messages.iter().any(
             |message| matches!(message, ModelMessage::ToolResult { call_id, .. } if call_id == "call-1")
         ));
         assert!(messages.iter().any(
-            |message| matches!(message, ModelMessage::Text { content, .. } if content == "A caller held the line open.")
+            |message| matches!(message, ModelMessage::Assistant { content: Some(content), calls, .. }
+                if content == "A caller held the line open." && calls.is_empty())
         ));
         // Ordering is the protocol ordering.
         let call_at = messages
             .iter()
-            .position(|m| matches!(m, ModelMessage::AssistantToolCalls { .. }))
+            .position(|m| matches!(m, ModelMessage::Assistant { calls, .. } if !calls.is_empty()))
+            .unwrap();
+        let answer_at = messages
+            .iter()
+            .position(|m| matches!(m, ModelMessage::Assistant { calls, .. } if calls.is_empty()))
             .unwrap();
         let result_at = messages
             .iter()
             .position(|m| matches!(m, ModelMessage::ToolResult { .. }))
             .unwrap();
         assert!(call_at < result_at);
+        assert!(result_at < answer_at);
     }
 
     /// A character with a keyed world-book entry, a constant near-history entry
@@ -954,7 +960,7 @@ mod tests {
             compacted: None,
         });
 
-        let Some(ModelMessage::AssistantToolCalls { calls, .. }) = messages.get(1) else {
+        let Some(ModelMessage::Assistant { calls, .. }) = messages.get(1) else {
             panic!("the assistant step must stay a tool call");
         };
         assert_eq!(calls[0].id, "call-1");

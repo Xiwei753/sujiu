@@ -49,23 +49,31 @@ pub enum ModelMessage {
         role: ModelRole,
         content: String,
     },
-    AssistantToolCalls {
+    /// One assistant message: what the user can read, whatever the provider
+    /// sent alongside it, and whatever it asked for.
+    ///
+    /// All three live together because they are properties of the same
+    /// message, and splitting them is what let a plain answer lose its
+    /// reasoning: a step with no tool call used to become a bare `Text`, and
+    /// the sidecar had nowhere to go. An adapter decides the wire form, so a
+    /// protocol that has no field for the sidecar simply omits it.
+    Assistant {
+        /// Visible text. Absent when the assistant only asked for tools.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<String>,
-        calls: Vec<ToolCall>,
-        /// The reasoning the model produced alongside those calls, with the
+        /// The reasoning the model produced alongside this message, with the
         /// provider that produced it.
         ///
         /// Several thinking-mode transports reject a request whose previous
-        /// assistant tool call arrives without the reasoning that produced it,
-        /// so the reasoning has to travel back with the call. It is stored
-        /// here rather than inside the tool call because it belongs to the
-        /// assistant message, and it is emitted as a wire field only by an
-        /// adapter that has been told the transport requires it. An adapter
-        /// that does not know the field leaves it behind instead of guessing
-        /// a name for it.
+        /// assistant message arrives without the reasoning that produced it,
+        /// so the reasoning has to travel back. It belongs to the assistant
+        /// message rather than to a tool call, and it becomes a wire field
+        /// only by an adapter that has been told the transport requires it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning: Option<ReasoningSidecar>,
+        /// Empty when this is a final answer rather than a request for tools.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        calls: Vec<ToolCall>,
     },
     ToolResult {
         call_id: String,
@@ -92,11 +100,18 @@ impl ModelMessage {
         }
     }
 
+    /// A final assistant answer.
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self::Text {
-            role: ModelRole::Assistant,
-            content: content.into(),
+        Self::Assistant {
+            content: Some(content.into()),
+            reasoning: None,
+            calls: Vec::new(),
         }
+    }
+
+    /// Whether this message asks for tools.
+    pub fn has_tool_calls(&self) -> bool {
+        matches!(self, Self::Assistant { calls, .. } if !calls.is_empty())
     }
 }
 

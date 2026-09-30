@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod builtin;
 pub mod context;
+pub mod negotiate;
 pub mod openai_compat;
 pub mod provider;
 pub mod tool;
@@ -12,6 +13,9 @@ pub use context::{
     ContextStoreError, InMemoryContextStore, ListContextSourcesTool, ReadContextTool,
     SearchContextTool,
 };
+pub use negotiate::{
+    list_models, negotiate as negotiate_protocol, CapabilityCache, Negotiation, ProtocolAttempt,
+};
 pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 pub use provider::{AiProvider, NullStreamSink, ProviderError, StreamSink};
 pub use tool::{Tool, ToolError, ToolRegistry};
@@ -19,4 +23,10 @@ pub use types::{
     messages_from_prompt_plan, AssistantTurn, ModelMessage, ModelRole, ProviderContinuation,
     ProviderRequest, TokenUsage, ToolAnnotations, ToolCall, ToolCallState, ToolContent,
     ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
+};
+
+/// Provider data the runtime needs from the core.
+pub use sujiu_core::{
+    apply_reasoning_override, EndpointCapabilities, ModelListing, ProbeFailure, ProbeVerdict,
+    Protocol, ProviderConfig, ProviderKind,
 };

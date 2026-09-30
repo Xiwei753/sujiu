@@ -27,6 +27,7 @@ It owns:
 - world-book data and deterministic keyword matching
 - the conversation transcript (see [Conversation transcript](#conversation-transcript))
 - sessions, which store a transcript rather than a derived text history
+- the protocol vocabulary: which wire formats exist, in what order they are preferred, and what a failed probe does and does not prove
 - provider-neutral prompt plans
 - prompt compilation
 - provider configuration data
@@ -43,7 +44,9 @@ It owns:
 - tool definitions, calls and results
 - the multi-round agent loop
 - deferred tool discovery
+- protocol negotiation against the endpoint
 - provider HTTP adapters
+- model discovery for the settings screen
 - built-in retrieval tools such as world-book search
 
 The runtime accepts zero, one or multiple tool calls from a model turn, executes client-owned tools in Rust, appends tool results to the transcript and asks the provider to continue until a final assistant response is produced or the configured round limit is reached.
@@ -128,13 +131,21 @@ A second compaction must **not** silently overwrite the first summary. The summa
 
 Compaction also has to leave **what the model can see** and **what the world book can trigger on** in agreement. The summary is put into the model's history, so if `Transcript::scan_text()` ignored it, a long conversation would silently change its lore semantics the moment it was compacted: the model would read "Black Tower" in the summary while no world-book entry could match it. `scan_text` therefore includes the compacted summary. The archived raw turns are still not scanned, because they genuinely left the prompt and are reached through the context protocol instead.
 
+### One assistant message, whatever it carries
+
+A step's visible text, its provider sidecar and its tool calls are three properties of **one** assistant message, so the model layer has one shape for it: `ModelMessage::Assistant { content, reasoning, calls }`.
+
+They used to be split, with the sidecar hanging off a tool-calling variant. That is what let a thinking model that reasoned and then answered a question — no tool call at all — lose its reasoning on the next turn, because the variant that carried reasoning was never emitted. Content, sidecar and calls are independent here; the adapter decides which of them the negotiated protocol can actually express.
+
+A step with neither text nor calls is not a message. Emitting an empty assistant turn would put a blank reply on the wire, which is worse than saying nothing.
+
 ### Reasoning is replayed when the endpoint needs it
 
-An assistant step keeps the reasoning it was produced with. Thinking-mode transports such as DeepSeek reject a request whose earlier assistant tool call comes back without the reasoning that produced it, so a step's reasoning has to travel with the assistant message on the next request.
+Thinking-mode transports reject a request whose earlier assistant message returns without the reasoning that produced it, so a step's reasoning has to travel with that message on the next request.
 
-`ModelMessage::AssistantToolCalls` therefore carries an optional provider-neutral `reasoning` sidecar, and `AssistantStep::model_messages()` fills it from the step. The **wire field name** is the adapter's business, decided by a capability flag rather than guessed: `OpenAiCompatConfig::requires_reasoning_content_for_tool_calls` emits `reasoning_content` only where the endpoint asked for it. That flag is set from `ProviderConfig::capabilities()`, which answers the question from the endpoint and model the user configured rather than from a field only a test can fill; see [Assistant reasoning carries its provider](#assistant-reasoning-carries-its-provider).
+The **wire field name** is the adapter's business, taken from the negotiated `EndpointCapabilities` rather than guessed. A blank sidecar is dropped rather than sent as an empty string, and the reasoning is deliberately left out of the flat text view in `PromptPlan::segments()`, because that text is what the world book is scanned against and private reasoning should not match keywords.
 
-The flag alone does not stop one provider's reasoning from reaching another — that is the sidecar's identity, covered in the next section. A blank sidecar is dropped rather than sent as an empty string. The reasoning is deliberately left out of the flat text view in `PromptPlan::segments()`, because that text is what the world book is scanned against and private reasoning should not match keywords.
+An older snapshot may hold the reasoning as a bare string, written before the sidecar carried an identity. That is read and kept, with an unknown identity, which makes it non-replayable on its own: a real identity always names at least a model, so an empty one can never match. Old data therefore loses a capability it cannot honestly claim and keeps the conversation readable, which is the only acceptable order.
 
 ### Provider continuation state
 
@@ -155,17 +166,31 @@ Continuation is also **chained within a turn**. Round 2 continues from round 1's
 
 The event is also **persisted** on the step. Chaining correctly inside one turn is not enough: if only `Replace` is written down, a later `Clear` degrades to "nothing" and the next user turn's `find_map` walks past it and resurrects the dead handle. So a step stores the whole `ContinuationUpdate`, and `Transcript::continuation_for` stops at the first event a provider ever gave, whatever that event was — a replaced handle is superseded and a cleared one is dead.
 
-A stored event that cannot be read is an **error**, not an empty handle. Every field of `ProviderContinuation` is optional, so reading an unrecognised shape with it would silently produce a blank handle — a different answer to "what should happen to the handle" than the one the provider gave. Documents written before continuation events were named are still read, but only when the value is recognisably a bare handle. For the same reason, `use_directory` never writes back a document it could not parse: a directory with content this build cannot read is not an empty directory, and replacing it with the seed would destroy the only copy.
+A stored event that cannot be read is an **error**, not an empty handle. Every field of `ProviderContinuation` is optional, so reading an unrecognised shape with it would silently produce a blank handle — a different answer to "what should happen to the handle" than the one the provider gave. Documents written before continuation events were named are still read, but only when the value is recognisably a bare handle.
 
-Chat Completions has no continuation concept, so the adapter records the completion id for reference but marks the state `ContinuationSupport::Unsupported`, which makes it permanently ineligible for replay. The field exists so adapters such as OpenAI Responses, which do have a `previous_response_id`, can use it.
+### A document the runtime cannot read is protected, not overwritten
+
+The same rule governs the snapshot as a whole. A directory holding a document this build cannot parse enters a **protected** state: `persist()` becomes a no-op, `storage_protection()` reports why, and nothing the runtime does — configuring a provider, creating a session, sending a turn, compacting — writes over it. The user leaves that state deliberately, by discarding the document, or a future migration resolves it.
+
+Skipping the one write that discovered the problem is not enough. The next save destroys it just as thoroughly, one step later, which is the same data loss with a delay.
+
+A directory with no document is not protected: a fresh install still seeds itself, and a readable older document still migrates.
 
 ### Assistant reasoning carries its provider
 
-A thinking-mode endpoint may reject a request whose previous assistant tool call returns without the reasoning that produced it, so the reasoning is stored on the step and replayed. It is a `ReasoningSidecar { content, identity }`, not a bare string.
+A thinking-mode endpoint may reject a request whose previous assistant message returns without the reasoning that produced it, so the reasoning is stored on the step and replayed. It is a `ReasoningSidecar { content, identity }`, not a bare string.
 
 The identity matters: visible assistant text is portable across providers, provider reasoning is not. Handing one provider's reasoning to another under our own field name would put a foreign protocol's text where the endpoint expects its own. The wire field is only restored when the sidecar's identity matches the endpoint being called, and otherwise the reasoning stays in the transcript for diagnostics while the request replays the normalized transcript alone.
 
-Whether to replay at all is a **provider capability**, not a protocol detail the settings form should know. `ProviderConfig::capabilities()` answers it from the endpoint and model the user configured, so a DeepSeek thinking endpoint works without anyone filling in a hidden field. A platform only describes the provider, so an advanced override is allowed as an optional `replaysAssistantReasoning` that the bridge passes through — but the profile is what makes the feature reachable.
+A legacy document that stored the reasoning as a bare string is read and kept, with an unknown identity — which makes it non-replayable on its own, because a real identity always names at least a model, so an empty one can never match. Losing the text entirely would be the worse failure: the session would not even open.
+
+Chat Completions has no continuation concept, so its adapter records the completion id for reference but marks the state `ContinuationSupport::Unsupported`, which makes it permanently ineligible for replay. That is what stops a plain completion label from being mistaken for a chainable handle. The field exists so an adapter that does have one, such as OpenAI Responses with its `previous_response_id`, can use it.
+
+### A per-turn provider is a change, not a restatement
+
+A caller that describes the provider again is making a claim about it. A field the description leaves out is not "unchanged", it is that field reset to a default — so a turn that repeated the saved provider minus one capability silently revoked it.
+
+A per-turn provider is therefore **merged** over the saved one: blank strings inherit, stated fields win, and `extra` merges key by key. The bridge follows the same rule by not describing the provider at all on an ordinary turn — it is already configured in the runtime — and by sending one only for a deliberate single-turn override, in which case it is sent whole.
 
 ### 4. sujiu-ffi
 
@@ -269,6 +294,55 @@ Planned adapters reuse the same runtime:
 - OpenAI Responses
 - Anthropic Messages
 - Gemini GenerateContent / function calling
+
+## Protocol negotiation
+
+What an endpoint can do is the endpoint's business, so the runtime asks instead of guessing. Guessing by vendor or model name does not survive contact with the world: a gateway serves any model under any name, a service renames its models, and a name like `reasoner` or `r1` means nothing to the next one. So no capability is read out of a hostname or a model string anywhere in the runtime.
+
+`ProviderConfig` carries only what a user can honestly supply: a provider id, a base URL, a credential reference and a model. The provider layer then works out the rest.
+
+### Priority
+
+```text
+OpenAI Responses
+  -> not there
+OpenAI Chat Completions
+  -> not there
+Anthropic Messages
+```
+
+Responses comes first because it carries continuation, reasoning and tool state natively, so degrading to Chat Completions and bolting a sidecar on is a downgrade in both fidelity and cache behaviour. Chat Completions is the common denominator: a great many gateways speak it and little else. Anthropic Messages is last because very few services offer it without also offering an OpenAI-compatible interface.
+
+The selected protocol decides the adapter. The adapter decides the wire form. Nothing above the provider layer names a field.
+
+### A failed probe is not a missing protocol
+
+The single most important rule: **only evidence that a path does not exist may move negotiation to the next protocol.** Every other failure is the service declining to answer right now, and recording that as "this endpoint cannot speak" is how a gateway ends up permanently misclassified after one bad minute.
+
+| Response | Verdict | Why |
+| --- | --- | --- |
+| 2xx | supported | the only positive evidence |
+| 404, 405, 501 | unsupported | the path is not there |
+| 400/422 naming an unknown endpoint, path or route | unsupported | the service says the route is unknown |
+| 400/422 saying anything else | inconclusive | usually a bad request, or a typo'd model |
+| 401, 403 | inconclusive, credentials | a key problem, never a protocol fact |
+| 429 | inconclusive, rate limited | must never downgrade a protocol |
+| 5xx, timeout, connect failure | inconclusive, unavailable | transient by nature |
+| unparseable body | inconclusive, malformed | a proxy may have answered instead |
+
+Negotiation also stops on an inconclusive verdict rather than walking on: asking the next protocol after a rate limit is asking a throttled service more questions.
+
+A "not found" phrase only counts when it names an endpoint, a path or a route. A bare "not found" is deliberately excluded, because `model not found` is the most common 400 a perfectly usable endpoint returns, and reading it as a missing route would downgrade a working provider on the first typo.
+
+### The cache is an optimisation, not a fact
+
+Results are cached by provider id plus a normalized base URL (scheme and host lowercased, one trailing slash removed, the path left alone because `/v1` and `/v2` are different APIs). A cached answer is reused, a transient or inconclusive answer is never cached, and reconfiguring a provider forgets the whole cache: a provider id may have been re-pointed at a different endpoint under the same name, and a stale answer about an endpoint we no longer talk to is worse than no answer.
+
+A manual override still exists for a gateway the probe cannot reason about, but it is an advanced compatibility fallback, not the normal path. A platform describes the provider; it does not know that one protocol requires an extension field on tool calls.
+
+### Model discovery is separate
+
+Listing models is a settings-screen convenience and never a step in a conversation. It tries the OpenAI-compatible listing first, then falls back, and every outcome — no listing endpoint, a key without permission, a rate limit, an unreachable host — still leaves manual model entry available. Not having a listing endpoint says nothing about whether the endpoint can chat, and the discovered list never influences which protocol the transcript uses.
 
 ## Dependency direction
 

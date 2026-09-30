@@ -172,6 +172,27 @@ function toRole(value: string): MessageRole {
   return MessageRole.Assistant;
 }
 
+/**
+ * The one place a provider description becomes a native config.
+ *
+ * Both call sites use it because a hand-written copy is how a field goes
+ * missing: the runtime merges a per-turn provider over the saved one, so a
+ * field this function forgets to copy is not merely absent from the request,
+ * it is the saved value being overridden with a default.
+ */
+function toNativeProvider(draft: ProviderDraft): NativeProviderConfig {
+  return {
+    id: draft.id,
+    name: draft.name,
+    kind: draft.kind,
+    baseUrl: draft.baseUrl,
+    model: draft.model,
+    maxTokens: draft.maxTokens,
+    temperature: draft.temperature,
+    replaysAssistantReasoning: draft.replaysAssistantReasoning
+  } as NativeProviderConfig;
+}
+
 function toSession(value: NativeSession): SessionSummary {
   return {
     id: value.id,
@@ -244,6 +265,17 @@ export class SujiuNativeBridge implements SujiuBridge {
   private draft: ProviderDraft | null = null;
   private apiKey: string = '';
   private running: boolean = false;
+  /**
+   * A provider description for exactly the next turn, or null.
+   *
+   * The saved provider is already in the runtime, so an ordinary turn does not
+   * resend it. Resending meant rebuilding a config from whatever fields this
+   * bridge happened to copy, and the runtime merges a per-turn provider over
+   * the saved one, so any field left out of the copy silently overrode the
+   * saved value with a default. A partial copy is a claim about the provider,
+   * not a partial update.
+   */
+  private turnProviderOverride: ProviderDraft | null = null;
 
   constructor() {
     const module: SujiuNativeModule = sujiu as SujiuNativeModule;
@@ -374,18 +406,19 @@ export class SujiuNativeBridge implements SujiuBridge {
       return;
     }
     this.running = true;
+
+    // Read the override before the request is built: it applies to one turn
+    // only, and leaving it set would silently re-apply it to the next one.
+    const override: ProviderDraft | null = this.turnProviderOverride;
+    this.turnProviderOverride = null;
+
     const request: NativeTurnRequest = {
       sessionId: sessionId,
       userText: userText,
-      provider: this.draft === null ? undefined : {
-        id: this.draft.id,
-        name: this.draft.name,
-        kind: this.draft.kind,
-        baseUrl: this.draft.baseUrl,
-        model: this.draft.model,
-        maxTokens: this.draft.maxTokens,
-        temperature: this.draft.temperature
-      } as NativeProviderConfig,
+      // No provider means "use the one the runtime already has". Sending the
+      // saved draft again would restate it field by field, and every field
+      // this bridge forgot to copy would be read as the value the user chose.
+      provider: override === null ? undefined : toNativeProvider(override),
       apiKey: this.apiKey
     };
 
@@ -456,19 +489,18 @@ export class SujiuNativeBridge implements SujiuBridge {
    */
   configureProvider(draft: ProviderDraft): Promise<void> {
     return this.runtime
-      .configureProvider({
-        id: draft.id,
-        name: draft.name,
-        kind: draft.kind,
-        baseUrl: draft.baseUrl,
-        model: draft.model,
-        maxTokens: draft.maxTokens,
-        temperature: draft.temperature,
-        replaysAssistantReasoning: draft.replaysAssistantReasoning
-      } as NativeProviderConfig)
+      .configureProvider(toNativeProvider(draft))
       .then(() => {
         this.draft = draft;
       });
+  }
+
+  /**
+   * Runs the next turn against `draft` instead of the saved provider, without
+   * saving it. This is a genuine override, so the description is sent whole.
+   */
+  withProviderForNextTurn(draft: ProviderDraft): void {
+    this.turnProviderOverride = draft;
   }
 
   providerDraft(): ProviderDraft | null {

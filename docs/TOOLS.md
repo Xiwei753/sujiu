@@ -177,12 +177,28 @@ reported as one, rather than papered over by moving world-book entries away from
 the positions their meaning asks for.
 
 Thinking-mode endpoints additionally require the reasoning that produced an
-assistant tool call to be sent back with it, or they reject the request. The
-step keeps that reasoning and carries the provider that produced it, so it is
+assistant message to be sent back with it, or they reject the request. The step
+keeps that reasoning and carries the provider that produced it, so it is
 replayed only to that same endpoint; another provider gets the normalized
 transcript, whose visible text is portable, without a sidecar that belongs to a
-foreign protocol. Whether to replay at all is answered by the provider layer from
-the endpoint and model, so no settings form has to know the field name.
+foreign protocol.
+
+Whether an endpoint speaks a given wire format is negotiated with the endpoint
+itself, never read off a vendor or a model name — a gateway serves any model
+under any name. Only evidence that a path does not exist moves the runtime to
+the next format: a rejected key, a rate limit and a service error are all
+temporary refusals, and treating one of them as "this endpoint cannot speak"
+would leave a working provider permanently misclassified.
+
+A compaction summary is part of the world-book keyword scan. The model reads it,
+so the scan has to see it too — otherwise compacting a long conversation would
+quietly stop triggering the lore it used to trigger.
+
+A provider config is what a person can honestly fill in: an id, a base URL, a
+credential and a model. Anything more specific to one wire format is negotiated,
+and re-describing a provider in a per-turn request is a claim about it rather
+than a partial update, so it is merged over the saved one instead of replacing
+it.
 
 A compaction summary is part of the world-book keyword scan. The model reads it,
 so the scan has to see it too — otherwise compacting a long conversation would

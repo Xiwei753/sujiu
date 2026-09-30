@@ -2,6 +2,7 @@ pub mod character;
 pub mod context;
 pub mod model;
 pub mod prompt;
+pub mod protocol;
 pub mod provider;
 pub mod session;
 pub mod transcript;
@@ -19,8 +20,11 @@ pub use prompt::{
     CacheContinuity, PromptCompiler, PromptPlan, PromptSegment, PromptSource,
     DEFAULT_APP_SYSTEM_PROMPT,
 };
+pub use protocol::{
+    classify, EndpointCapabilities, ModelListing, ProbeFailure, ProbeVerdict, Protocol,
+};
 pub use provider::{
-    ProviderCapabilities, ProviderConfig, ProviderKind, REPLAYS_ASSISTANT_REASONING_KEY,
+    apply_reasoning_override, ProviderConfig, ProviderKind, REPLAYS_ASSISTANT_REASONING_KEY,
 };
 pub use session::{ChatMessage, ChatRole, Session};
 pub use transcript::{

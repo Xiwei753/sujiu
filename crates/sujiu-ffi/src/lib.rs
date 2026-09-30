@@ -873,4 +873,101 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn an_unreadable_document_survives_everything_a_later_turn_does() {
+        let dir = scratch_dir("unreadable-later");
+        let file = dir.join("sujiu-runtime.json");
+        let unreadable = r#"{
+            "version": 2,
+            "characters": [],
+            "sessions": [{
+                "id": "session-precious",
+                "transcript": { "turns": [{
+                    "id": "turn-1",
+                    "user": "Do not lose this",
+                    "steps": [{ "text": "Kept.", "continuation": { "retire": {} } }]
+                }] }
+            }],
+            "sources": [],
+            "records": [],
+            "providerConfig": null
+        }"#;
+        std::fs::write(&file, unreadable).expect("write the stored document");
+
+        let runtime = SujiuRuntime::new(crate::seed::seed()).expect("runtime");
+        runtime
+            .use_directory(dir.to_str().expect("utf-8"))
+            .expect("attach");
+
+        // The state has to be reported, or a platform cannot tell the user why
+        // their changes stopped being saved.
+        let protection = runtime
+            .storage_protection()
+            .expect("the runtime must say the store is protected");
+        assert!(
+            !protection.trim().is_empty(),
+            "a protection reason a user cannot read is not a reason"
+        );
+
+        // Every one of these used to be enough on its own to replace the file.
+        // Protecting only the call that discovered the document left the next
+        // save free to destroy it, which is the same data loss one step later.
+        runtime
+            .set_provider_config(Some(ProviderConfig {
+                id: "late".into(),
+                name: "Late".into(),
+                kind: sujiu_core::ProviderKind::OpenAiCompatible,
+                base_url: "https://late.example/v1".into(),
+                model: "late-model".into(),
+                credential_ref: None,
+                extra: serde_json::Map::new(),
+            }))
+            .expect("configuring a provider is still allowed");
+        let created = runtime.create_session(None);
+        runtime
+            .compact_session(&created, 1, "summary")
+            .expect("compaction is still allowed");
+
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("still there"),
+            unreadable,
+            "a later save must not reach a document the runtime could not read"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_user_can_deliberately_replace_a_document_the_runtime_cannot_read() {
+        let dir = scratch_dir("discard-protected");
+        let file = dir.join("sujiu-runtime.json");
+        std::fs::write(
+            &file,
+            r#"{ "version": 2, "sessions": [ { "transcript": { "continuation": "retire" } } ] }"#,
+        )
+        .expect("write the stored document");
+
+        let runtime = SujiuRuntime::new(crate::seed::seed()).expect("runtime");
+        runtime
+            .use_directory(dir.to_str().expect("utf-8"))
+            .expect("attach");
+        assert!(runtime.storage_protection().is_some());
+
+        runtime
+            .discard_protected_document(crate::seed::seed())
+            .expect("the user asked for this");
+
+        assert!(
+            runtime.storage_protection().is_none(),
+            "an explicit discard has to leave the protected state"
+        );
+        let written = std::fs::read_to_string(&file).expect("read back");
+        assert!(
+            !written.contains("retire"),
+            "the document that could not be read is gone, as the user asked"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

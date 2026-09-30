@@ -16,8 +16,9 @@ use sujiu_ai::{
     OpenAiCompatProvider, ProviderContinuation, ToolRegistry,
 };
 use sujiu_core::{
-    Character, ChatMessage, ChatRole, CompactionInput, ContextKind, ContextRecord, ContextSource,
-    PromptCompiler, ProviderConfig, ProviderIdentity, ProviderKind, Session, Transcript, Turn,
+    apply_reasoning_override, Character, ChatMessage, ChatRole, CompactionInput, ContextKind,
+    ContextRecord, ContextSource, EndpointCapabilities, ModelListing, PromptCompiler,
+    ProviderConfig, ProviderIdentity, ProviderKind, Session, Transcript, Turn,
     DEFAULT_APP_SYSTEM_PROMPT,
 };
 
@@ -80,6 +81,70 @@ pub struct ModelSummary {
     pub provider_name: String,
     pub kind: String,
     pub configured: bool,
+}
+
+/// What discovery found, and what the user may still do about it.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelDiscovery {
+    /// One of `unknown`, `available`, `unavailable`, `permission_denied`,
+    /// `rate_limited`, `unreachable`.
+    pub listing: String,
+    /// A sentence for the settings screen explaining this outcome.
+    pub note: String,
+    /// Always true. Discovery never takes the manual choice away.
+    pub manual_entry_allowed: bool,
+    pub models: Vec<ModelSummary>,
+}
+
+impl ModelDiscovery {
+    fn without_endpoint(listing: ModelListing, note: &str) -> Self {
+        Self {
+            listing: listing_label(listing),
+            note: note.to_string(),
+            manual_entry_allowed: true,
+            models: Vec::new(),
+        }
+    }
+}
+
+fn listing_label(listing: ModelListing) -> String {
+    match listing {
+        ModelListing::Unknown => "unknown",
+        ModelListing::Available => "available",
+        ModelListing::Unavailable => "unavailable",
+        ModelListing::PermissionDenied => "permission_denied",
+        ModelListing::RateLimited => "rate_limited",
+        ModelListing::Unreachable => "unreachable",
+    }
+    .to_string()
+}
+
+/// Say what a listing outcome does and does not mean.
+///
+/// The distinction matters because these look alarming and are not: an endpoint
+/// without a model list is usually a gateway, and a key without listing
+/// permission is usually scoped to chat. Both can still hold a conversation.
+fn listing_note(listing: ModelListing, config: &ProviderConfig) -> String {
+    let host = config.base_url.trim();
+    match listing {
+        ModelListing::Unknown => format!(
+            "{host} did not answer a model listing. You can still type a model name."
+        ),
+        ModelListing::Available => format!("{host} listed its models."),
+        ModelListing::Unavailable => format!(
+            "{host} has no model listing endpoint. That is common for a gateway and does not mean it cannot chat, so you can still type a model name."
+        ),
+        ModelListing::PermissionDenied => format!(
+            "The key for {host} is not allowed to list models. It may still be allowed to chat, so you can still type a model name."
+        ),
+        ModelListing::RateLimited => format!(
+            "{host} is rate limiting right now. You can still type a model name."
+        ),
+        ModelListing::Unreachable => format!(
+            "{host} could not be reached to list models. You can still type a model name."
+        ),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +241,33 @@ struct Inner {
     store: Arc<InMemoryContextStore>,
     tools: Arc<ToolRegistry>,
     provider_config: Option<ProviderConfig>,
+    storage_state: StorageState,
+}
+
+/// Whether the attached document may still be written to.
+///
+/// Skipping one write is not the same as protecting a file. The first version
+/// of this only refused to write back on the call that noticed the problem,
+/// which left the runtime happily overwriting the document on the next
+/// configure, turn or compaction — so the refusal has to be a state the
+/// runtime stays in, not a decision it makes once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum StorageState {
+    Writable,
+    /// A document is there that this build cannot read. Writing would destroy
+    /// the only copy, so the runtime keeps working in memory and says so.
+    Protected {
+        reason: String,
+    },
+}
+
+impl StorageState {
+    fn reason(&self) -> Option<&str> {
+        match self {
+            StorageState::Writable => None,
+            StorageState::Protected { reason } => Some(reason),
+        }
+    }
 }
 
 /// Seed data for a fresh runtime.
@@ -327,6 +419,13 @@ const SNAPSHOT_VERSION: u32 = 2;
 pub struct SujiuRuntime {
     inner: Mutex<Inner>,
     cancel: Mutex<Option<CancelToken>>,
+    /// What each configured endpoint was found to speak.
+    ///
+    /// A probe is a network round trip and some endpoints rate limit, so the
+    /// answer is remembered per endpoint. It is only ever a memory: a wrong
+    /// answer costs one extra probe after a restart, and re-probing is always
+    /// possible.
+    capabilities: sujiu_ai::CapabilityCache,
     /// Where the snapshot lives. A platform attaches a directory; a runtime
     /// without one forgets everything when it exits.
     storage: Mutex<Arc<dyn AppStorage>>,
@@ -347,12 +446,19 @@ impl SujiuRuntime {
     }
 
     fn assemble(seed: Seed, storage: Arc<dyn AppStorage>, restore: bool) -> std::io::Result<Self> {
-        let snapshot = if restore {
-            storage
-                .load(SNAPSHOT_FILE)
-                .and_then(|document| parse_snapshot(&document))
-        } else {
-            None
+        let document = restore.then(|| storage.load(SNAPSHOT_FILE)).flatten();
+        let snapshot = document.as_deref().and_then(parse_snapshot);
+
+        // A document that is there but unreadable is not a fresh install. The
+        // seed is what a first launch looks like, and writing it over a file we
+        // failed to understand would trade a recoverable file for an empty one.
+        let storage_state = match document.as_deref() {
+            Some(unreadable) if snapshot.is_none() => StorageState::Protected {
+                reason: format!(
+                    "the stored document could not be read by this version ({unreadable})"
+                ),
+            },
+            _ => StorageState::Writable,
         };
 
         let sources = snapshot
@@ -401,15 +507,18 @@ impl SujiuRuntime {
                 store,
                 tools: Arc::new(tools),
                 provider_config,
+                storage_state,
             }),
             cancel: Mutex::new(None),
+            capabilities: sujiu_ai::CapabilityCache::new(),
             storage: Mutex::new(storage),
             tokio,
         };
 
         if restore {
             // A first launch writes its seed, so the next launch is a restore
-            // and not a reset.
+            // and not a reset. A protected document is left alone, and
+            // `persist` is the thing that knows how to leave it alone.
             runtime.persist();
         }
 
@@ -425,7 +534,6 @@ impl SujiuRuntime {
     /// is a store whose contents are still worth keeping.
     pub fn use_directory(&self, path: &str) -> Result<(), String> {
         let storage = FileStorage::new(path).map_err(|error| error.to_string())?;
-        let mut write_back = true;
         if let Some(document) = storage.load(SNAPSHOT_FILE) {
             match parse_snapshot(&document) {
                 Some(snapshot) => {
@@ -443,16 +551,59 @@ impl SujiuRuntime {
                         inner.store.add_record(record);
                     }
                 }
-                // Keep what is there. A directory that has content this build
-                // cannot read is not an empty directory, and replacing it with
-                // the seed would destroy the only copy.
-                None => write_back = false,
+                // Keep what is there, now and later. A directory that has
+                // content this build cannot read is not an empty directory,
+                // and every later write would replace the only copy of it.
+                None => {
+                    self.inner.lock().unwrap().storage_state = StorageState::Protected {
+                        reason: format!(
+                            "the stored document in {path} could not be read by this version ({document})"
+                        ),
+                    };
+                }
             }
+        } else {
+            self.inner.lock().unwrap().storage_state = StorageState::Writable;
         }
         *self.storage.lock().unwrap() = Arc::new(storage);
-        if write_back {
-            self.persist();
+        self.persist();
+        Ok(())
+    }
+
+    /// Why the runtime will not write to its store, when it will not.
+    ///
+    /// A platform should surface this. A runtime that silently keeps its
+    /// changes in memory looks exactly like one that saved them, and the user
+    /// only finds out at the next launch.
+    pub fn storage_protection(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .storage_state
+            .reason()
+            .map(str::to_owned)
+    }
+
+    /// Replace an unreadable document with the seed, on purpose.
+    ///
+    /// This is the user's call, not the runtime's: it is the only way out of
+    /// the protected state, and it throws away whatever was in the file. It
+    /// exists so a user who has decided the old document is not worth keeping
+    /// is not locked out of the app forever.
+    pub fn discard_protected_document(&self, seed: Seed) -> Result<(), TurnError> {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.storage_state.reason().is_none() {
+            return Ok(());
         }
+
+        inner.catalog = Catalog {
+            characters: seed.characters,
+            sessions: seed.sessions,
+        };
+        inner.storage_state = StorageState::Writable;
+        drop(inner);
+
+        self.persist();
         Ok(())
     }
 
@@ -463,6 +614,10 @@ impl SujiuRuntime {
     }
 
     fn persist(&self) {
+        if self.storage_protection().is_some() {
+            return;
+        }
+
         let snapshot = {
             let inner = self.inner.lock().unwrap();
             let (sources, records) = inner.store.snapshot();
@@ -506,8 +661,22 @@ impl SujiuRuntime {
             }
         }
         self.inner.lock().unwrap().provider_config = config;
+        // A changed endpoint is a different question, so the old answer does
+        // not carry over to it.
+        self.forget_capabilities_about();
         self.persist();
         Ok(())
+    }
+
+    /// Drop everything negotiation concluded.
+    ///
+    /// Called when the provider config changes, because a cached answer about
+    /// a gateway the user has just re-pointed is worse than no answer. The
+    /// whole cache goes rather than one entry: the config id may have been
+    /// re-pointed at a different endpoint under the same name, and the cache
+    /// is cheap to refill.
+    pub fn forget_capabilities_about(&self) {
+        self.capabilities.clear();
     }
 
     pub fn sessions(&self) -> Vec<SessionSummary> {
@@ -614,6 +783,62 @@ impl SujiuRuntime {
             kind: provider_kind_label(config.kind),
             configured: !config.base_url.trim().is_empty() && !config.model.trim().is_empty(),
         }]
+    }
+
+    /// Ask the endpoint which models it serves, without deciding anything.
+    ///
+    /// Discovery is a convenience for the settings screen, never a step in the
+    /// conversation: the transcript protocol comes from negotiation, so a
+    /// model list that comes back empty changes nothing about how a turn runs.
+    ///
+    /// Every outcome keeps `manual_entry_allowed` true. A gateway with no
+    /// listing endpoint is still perfectly able to chat, and a key without
+    /// listing permission is still a key that can chat; refusing to let the
+    /// user type a model would turn a cosmetic limitation into a dead end.
+    pub async fn discover_models(&self, api_key: Option<&str>) -> ModelDiscovery {
+        let inner = self.inner.lock().unwrap();
+        let Some(config) = inner.provider_config.clone() else {
+            return ModelDiscovery::without_endpoint(
+                ModelListing::Unknown,
+                "no provider configured",
+            );
+        };
+
+        let (listing, discovered) =
+            sujiu_ai::list_models(None, &config, api_key.unwrap_or_default()).await;
+
+        let mut models = discovered
+            .iter()
+            .map(|id| ModelSummary {
+                id: id.clone(),
+                name: id.clone(),
+                provider_id: config.id.clone(),
+                provider_name: config.name.clone(),
+                kind: provider_kind_label(config.kind),
+                configured: *id == config.model,
+            })
+            .collect::<Vec<_>>();
+
+        // The configured model stays selectable even when the endpoint will not
+        // list anything, otherwise discovery would hide the model the user
+        // already chose and is using successfully.
+        if models.is_empty() && !config.model.trim().is_empty() {
+            models.push(ModelSummary {
+                id: config.model.clone(),
+                name: config.model.clone(),
+                provider_id: config.id.clone(),
+                provider_name: config.name.clone(),
+                kind: provider_kind_label(config.kind),
+                configured: true,
+            });
+        }
+
+        ModelDiscovery {
+            listing: listing_label(listing),
+            note: listing_note(listing, &config),
+            manual_entry_allowed: true,
+            models,
+        }
     }
 
     pub async fn context_sources(&self) -> Result<Vec<ContextSourceSummary>, ContextStoreError> {
@@ -800,9 +1025,12 @@ impl SujiuRuntime {
         request: &SendTurnRequest,
         sink: &mut TurnEventSink<'_>,
     ) -> Result<(), TurnFailure> {
-        let (messages, continuation, provider) = self
+        let prepared = self
             .prepare(request)
             .map_err(|error| TurnFailure(error.to_string()))?;
+        let messages = prepared.messages.clone();
+        let continuation = prepared.continuation.clone();
+        let provider = self.build_provider(prepared).await?;
         let tools = self.inner.lock().unwrap().tools.clone();
 
         let runtime = AgentRuntime::new(provider.as_ref(), tools.as_ref(), AgentConfig::default());
@@ -844,17 +1072,7 @@ impl SujiuRuntime {
 
     /// Build the model messages, the reusable provider state, and the provider
     /// for one turn.
-    fn prepare(
-        &self,
-        request: &SendTurnRequest,
-    ) -> Result<
-        (
-            Vec<sujiu_ai::ModelMessage>,
-            Option<ProviderContinuation>,
-            TurnProvider,
-        ),
-        TurnError,
-    > {
+    fn prepare(&self, request: &SendTurnRequest) -> Result<PreparedTurn, TurnError> {
         let inner = self.inner.lock().unwrap();
 
         let session = inner
@@ -865,11 +1083,21 @@ impl SujiuRuntime {
             .cloned()
             .ok_or_else(|| TurnError::SessionNotFound(request.session_id.clone()))?;
 
-        let config = request
-            .provider
-            .clone()
-            .or_else(|| inner.provider_config.clone())
-            .ok_or(TurnError::NoProviderConfigured)?;
+        // A per-turn provider is an override, not a replacement.
+        //
+        // Treating it as a replacement meant that a platform which re-sent a
+        // partial config on every turn silently dropped everything the stored
+        // one had — capabilities included. The override is therefore merged
+        // onto the stored config, and only a field the override actually
+        // carries wins.
+        let config = match (inner.provider_config.clone(), request.provider.clone()) {
+            (_, Some(override_)) if inner.provider_config.is_some() => {
+                merge_provider_config(inner.provider_config.as_ref().unwrap(), &override_)
+            }
+            (_, Some(only)) => only,
+            (Some(stored), None) => stored,
+            (None, None) => return Err(TurnError::NoProviderConfigured),
+        };
 
         if config.base_url.trim().is_empty() || config.model.trim().is_empty() {
             return Err(TurnError::NoProviderConfigured);
@@ -918,6 +1146,50 @@ impl SujiuRuntime {
         };
         let continuation = session.transcript.continuation_for(&identity).cloned();
 
+        Ok(PreparedTurn {
+            messages: plan.model_messages(),
+            continuation,
+            config,
+            identity,
+            api_key,
+        })
+    }
+
+    /// Ask the endpoint what it speaks, then build the adapter it can use.
+    ///
+    /// Negotiation is a network call, so it is cached per endpoint. The first
+    /// turn of a session pays for it and later turns do not, and a probe that
+    /// could not conclude is never cached, because a rate limit is not a fact
+    /// about the endpoint.
+    async fn build_provider(&self, prepared: PreparedTurn) -> Result<TurnProvider, TurnFailure> {
+        let negotiation = sujiu_ai::negotiate_protocol(
+            None,
+            &prepared.config,
+            &prepared.api_key,
+            Some(&self.capabilities),
+        )
+        .await;
+
+        if negotiation.selected.is_none() {
+            return Err(TurnFailure(negotiation.reason.unwrap_or_else(|| {
+                "no usable protocol was found at that endpoint".to_string()
+            })));
+        }
+
+        // The selected protocol is always one of the supported ones, so this
+        // cannot be None. It is not defaulted into existence: a fabricated
+        // capability set is exactly the guess this negotiation replaced.
+        let negotiated =
+            EndpointCapabilities::negotiate(&negotiation.supported).ok_or_else(|| {
+                TurnFailure("negotiation selected a protocol it did not report".to_string())
+            })?;
+        let capabilities =
+            apply_reasoning_override(negotiated, prepared.config.forced_reasoning_replay());
+
+        let config = prepared.config;
+        let api_key = prepared.api_key;
+        let identity = prepared.identity;
+
         let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
             base_url: config.base_url.clone(),
             identity,
@@ -943,24 +1215,15 @@ impl SujiuRuntime {
                     .unwrap_or(DEFAULT_TEMPERATURE),
             ),
             supports_developer_role: false,
-            // Whether the replay of assistant reasoning is a requirement of the
-            // endpoint. It is answered by the provider layer from the endpoint
-            // and model the user configured, so the capability works on the
-            // same path a real configuration takes. A platform that wants to
-            // override it for a gateway in front of a known endpoint can, and
-            // the key is named in the shared core rather than invented here.
-            requires_reasoning_content_for_tool_calls: config
-                .capabilities()
-                .replays_assistant_reasoning,
+            // What the endpoint said it can do, not what a form guessed. The
+            // protocol was chosen by negotiation, and a stated override is only
+            // still allowed to speak about reasoning on top of that.
+            capabilities,
         });
 
-        Ok((
-            plan.model_messages(),
-            continuation,
-            TurnProvider {
-                provider: Box::new(provider),
-            },
-        ))
+        Ok(TurnProvider {
+            provider: Box::new(provider),
+        })
     }
 
     pub fn cancel(&self) {
@@ -1017,8 +1280,178 @@ impl Drop for SujiuRuntime {
 struct TurnFailure(String);
 
 /// The provider used for one turn, erased so callers never see an adapter.
+///
+/// The protocol it speaks is not repeated here: it is already inside the
+/// `EndpointCapabilities` the adapter was built from, and a second copy could
+/// disagree with the one the adapter actually uses.
 struct TurnProvider {
     provider: Box<dyn sujiu_ai::AiProvider>,
+}
+
+/// Everything one turn needs before a provider exists.
+struct PreparedTurn {
+    messages: Vec<sujiu_ai::ModelMessage>,
+    continuation: Option<ProviderContinuation>,
+    config: ProviderConfig,
+    identity: ProviderIdentity,
+    api_key: String,
+}
+
+/// Overlay a per-turn provider onto the stored one.
+///
+/// A platform that only means to change the model should not have to restate
+/// the endpoint and its capabilities, and a platform that restates them
+/// incompletely should not silently drop them. Fields the override genuinely
+/// sets win; the rest are inherited.
+fn merge_provider_config(stored: &ProviderConfig, override_: &ProviderConfig) -> ProviderConfig {
+    let blank = |value: &str| value.trim().is_empty();
+
+    let extra = if override_.extra.is_empty() {
+        stored.extra.clone()
+    } else {
+        let mut extra = stored.extra.clone();
+        extra.extend(override_.extra.clone());
+        extra
+    };
+
+    ProviderConfig {
+        id: if blank(&override_.id) {
+            stored.id.clone()
+        } else {
+            override_.id.clone()
+        },
+        name: if blank(&override_.name) {
+            stored.name.clone()
+        } else {
+            override_.name.clone()
+        },
+        kind: override_.kind,
+        base_url: if blank(&override_.base_url) {
+            stored.base_url.clone()
+        } else {
+            override_.base_url.clone()
+        },
+        model: if blank(&override_.model) {
+            stored.model.clone()
+        } else {
+            override_.model.clone()
+        },
+        credential_ref: override_
+            .credential_ref
+            .clone()
+            .or_else(|| stored.credential_ref.clone()),
+        extra,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> ProviderConfig {
+        ProviderConfig {
+            id: "stored".into(),
+            name: "Stored".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: "https://stored.example/v1".into(),
+            model: "stored-model".into(),
+            credential_ref: Some("stored-key".into()),
+            extra: serde_json::Map::new(),
+        }
+    }
+
+    /// A platform that resends a partial provider for one turn used to throw
+    /// the whole saved config away, including a capability it had no field for.
+    #[test]
+    fn a_partial_per_turn_provider_keeps_what_it_does_not_mention() {
+        let mut stored = config();
+        stored.extra.insert(
+            sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+
+        // The shape a settings form actually sends back: a name and a model.
+        let override_ = ProviderConfig {
+            id: String::new(),
+            name: "Same provider".into(),
+            kind: ProviderKind::OpenAiCompatible,
+            base_url: String::new(),
+            model: "another-model".into(),
+            credential_ref: None,
+            extra: serde_json::Map::new(),
+        };
+
+        let merged = merge_provider_config(&stored, &override_);
+
+        assert_eq!(merged.base_url, "https://stored.example/v1");
+        assert_eq!(merged.id, "stored");
+        assert_eq!(
+            merged.credential_ref.as_deref(),
+            Some("stored-key"),
+            "a turn must not lose the credential the user saved"
+        );
+        assert_eq!(merged.model, "another-model", "the model was overridden");
+        assert_eq!(
+            merged.forced_reasoning_replay(),
+            Some(true),
+            "a capability the turn never mentioned has to survive the turn"
+        );
+    }
+
+    #[test]
+    fn a_per_turn_provider_may_still_state_a_capability_of_its_own() {
+        let mut stored = config();
+        stored.extra.insert(
+            sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+
+        let mut override_ = config();
+        override_.id = "turn".into();
+        override_.base_url = "https://other.example/v1".into();
+        override_.extra.insert(
+            sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY.to_string(),
+            serde_json::Value::Bool(false),
+        );
+
+        let merged = merge_provider_config(&stored, &override_);
+
+        assert_eq!(merged.base_url, "https://other.example/v1");
+        assert_eq!(
+            merged.forced_reasoning_replay(),
+            Some(false),
+            "an override that really does state a capability still wins"
+        );
+    }
+
+    #[test]
+    fn a_capability_the_turn_does_not_repeat_is_not_an_agreement_to_drop_it() {
+        // The per-key case: a turn that sets one extra key must not clear the
+        // others, which is what a whole-object replacement would have done.
+        let mut stored = config();
+        stored.extra.insert(
+            sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        stored
+            .extra
+            .insert("temperature".to_string(), serde_json::Value::from(0.3));
+
+        let mut override_ = config();
+        override_
+            .extra
+            .insert("maxTokens".to_string(), serde_json::Value::from(512));
+
+        let merged = merge_provider_config(&stored, &override_);
+
+        assert_eq!(merged.extra.get("maxTokens"), Some(&serde_json::json!(512)));
+        assert_eq!(
+            merged.extra.get("temperature"),
+            Some(&serde_json::json!(0.3)),
+            "an unrelated saved setting is not collateral damage"
+        );
+        assert_eq!(merged.forced_reasoning_replay(), Some(true));
+    }
 }
 
 impl TurnProvider {
