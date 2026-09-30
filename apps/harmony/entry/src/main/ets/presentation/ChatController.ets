@@ -20,12 +20,6 @@ import { AppearanceMode, CredentialService, PlatformServices } from '../platform
 const CREDENTIAL_NAME: string = 'provider_api_key';
 
 /**
- * How many discovered models a chooser offers before it defers to the text
- * field. Twelve fills two rows on a phone and leaves the save button in reach.
- */
-const MODEL_CHOICE_LIMIT: number = 12;
-
-/**
  * Turn lifecycle a chat surface renders. Sujiu states, not provider states.
  */
 export enum GenerationState {
@@ -291,27 +285,20 @@ export class ChatController {
    * like a probe that found one model and is the difference between a settings
    * screen that offers the endpoint's choice and one that cannot.
    *
-   * Probing deliberately does not write into `this.models` either. An unconfigured
-   * endpoint's catalogue is not a conversation's model list, and merging the two
-   * makes an unrelated conversation start offering models from an address the
-   * user has not finished configuring.
+   * Probing deliberately does not write into `this.models` either. An
+   * unconfigured endpoint's catalogue is not a conversation's model list, and
+   * merging the two makes an unrelated conversation start offering models from
+   * an address the user has not finished configuring.
+   *
+   * The whole list is returned, with no cap. There used to be a limit of twelve
+   * here, which existed only because the models were rendered as chips down the
+   * page and the ones past it pushed the save button out of reach. They are
+   * rendered now in a bounded, scrollable list, so every model the endpoint
+   * reported is reachable by scrolling — which is strictly more than the cap
+   * ever offered, since a model past the cap could not be chosen at all.
    */
   get discoveredModels(): ModelSummary[] {
     return this.exploration === null ? [] : this.exploration.models.models;
-  }
-
-  /**
-   * The models a chooser shows, capped.
-   *
-   * The cap is a layout decision, not a claim about how many there are. A
-   * gateway listing eighty-one models would push the save button off the
-   * bottom of the screen otherwise, and a form whose commit action is a scroll
-   * away is a form people abandon. Nothing is hidden by it: the model field
-   * stays editable right below, so the cap costs a convenience and not an
-   * option.
-   */
-  get offeredModels(): ModelSummary[] {
-    return this.discoveredModels.slice(0, MODEL_CHOICE_LIMIT);
   }
 
   /**
@@ -429,6 +416,13 @@ export class ChatController {
       this.storedEndpoint = null;
     }
     this.hasCredential = this.credentials.hasSecret(CREDENTIAL_NAME);
+
+    // Read back what this endpoint told us last time, so the model list is
+    // there before anybody asks for one. This asks nothing: a launch that
+    // quietly re-probed would cost every user a round trip every time they
+    // opened the app. It is a restore, not a probe, so it does not flash a
+    // "probing" state that no probe is running.
+    await this.restoreRememberedEndpoint();
   }
 
   /**
@@ -440,7 +434,43 @@ export class ChatController {
    * it is chosen from, and would make the endpoint unsaveable until the user had
    * guessed the very answer the runtime could have looked up.
    */
-  async exploreEndpoint(baseUrl: string, secret: string): Promise<void> {
+  /**
+   * Ask an endpoint what it can do, or ask it again.
+   *
+   * `refresh` is the re-probe control, and it is the only thing that sets it.
+   * Left false, the runtime answers from what this endpoint already said, which
+   * is what makes opening the settings screen free and a fresh launch still have
+   * a model list. Set true after the user has changed something the last answer
+   * cannot know about: a key, a gateway's routing, or simply suspicion that
+   * what is on screen is old.
+   */
+  /**
+   * Put the remembered exploration on screen, if there is one.
+   *
+   * Silent when there is nothing to restore. An endpoint nobody has asked about
+   * yet is the normal state of a fresh configuration, and inventing an
+   * "explored" flag for it would claim a probe happened.
+   */
+  private async restoreRememberedEndpoint(): Promise<void> {
+    const stored: StoredEndpoint | null = this.storedEndpoint;
+    if (stored === null || stored.baseUrl.trim().length === 0) {
+      return;
+    }
+    try {
+      const remembered: EndpointExploration | undefined =
+        await this.bridge.rememberedEndpoint(stored.baseUrl.trim());
+      if (remembered === undefined) {
+        return;
+      }
+      this.exploration = remembered;
+      this.endpointNote = remembered.models.note;
+      this.explored = true;
+    } catch (error) {
+      hilog.error(0x0000, 'Sujiu', 'rememberedEndpoint failed: %{public}s', (error as Error).message);
+    }
+  }
+
+  async exploreEndpoint(baseUrl: string, secret: string, refresh: boolean = false): Promise<void> {
     if (this.exploringEndpoint || baseUrl.trim().length === 0) {
       return;
     }
@@ -455,7 +485,7 @@ export class ChatController {
       const key: string = secret.trim().length > 0
         ? secret.trim()
         : this.credentials.loadSecret(CREDENTIAL_NAME);
-      const found: EndpointExploration = await this.bridge.discoverEndpoint(baseUrl.trim(), key);
+      const found: EndpointExploration = await this.bridge.discoverEndpoint(baseUrl.trim(), key, refresh);
       this.exploration = found;
       this.endpointNote = found.models.note;
       // A typed model is the user's own words, so it is kept whatever the
@@ -577,9 +607,13 @@ export class ChatController {
    * goes to the runtime; the key goes to the credential service. A blank address
    * fails here instead of at the first turn.
    */
-  async saveProvider(draft: ProviderDraft, secret: string): Promise<void> {
+  async saveProvider(draft: ProviderDraft, secret: string): Promise<boolean> {
     if (this.savingProvider) {
-      return;
+      // Reported as a failure rather than a silent no-op. A caller that
+      // changes what is on screen afterwards has to know whether this reached
+      // the runtime, and returning true here would be a lie the caller cannot
+      // detect.
+      return false;
     }
     this.savingProvider = true;
     this.providerNoticeCode = '';
@@ -591,10 +625,12 @@ export class ChatController {
       await this.bridge.configureProvider(draft);
       this.providerDraft = draft;
       this.models = await this.bridge.listModels();
+      return true;
     } catch (error) {
       // The UI shows a localized code, so the runtime detail is logged here.
       hilog.error(0x0000, 'Sujiu', 'saveProvider failed: %{public}s', (error as Error).message);
       this.fail('provider_not_saved', (error as Error).message);
+      return false;
     } finally {
       this.savingProvider = false;
     }
@@ -737,6 +773,73 @@ export class ChatController {
 
   selectModel(modelId: string): void {
     this.currentModel = this.models.find((item: ModelSummary) => item.id === modelId);
+  }
+
+  /**
+   * Switches to a model the endpoint listed, from anywhere — the top bar, not
+   * only the settings form.
+   *
+   * A listed model is not a configured one, and that difference decides what
+   * this has to do. `selectModel` only searches `this.models`, which holds what
+   * has been saved, so calling it with a discovered id would quietly set the
+   * current model to nothing. Worse, nothing would be sent: an endpoint carries
+   * exactly one `selected_model` in Rust, so a model the user picked has to be
+   * *saved* to become the model the next turn uses. That is why this is a save
+   * and not an assignment, and why it reuses `saveProvider` rather than
+   * reaching past it — the configured list is re-read afterwards, so the chat
+   * and the settings form agree about what is current.
+   *
+   * The key comes from the credential store, because a model picker has no key
+   * field. An empty key is not a refusal: `saveProvider` saves the description
+   * and only writes a secret when one is given, so a user who never stored a key
+   * still gets the model they chose and a `missing_credential` at the first
+   * turn, which is a more honest place for that news than a picker that
+   * silently does nothing.
+   */
+  async chooseModel(modelId: string): Promise<void> {
+    const address: string = this.storedEndpoint === null ? '' : this.storedEndpoint.baseUrl.trim();
+    if (address.length === 0) {
+      // Nothing has been configured, so there is no endpoint to attach a model
+      // to. Pointing at the settings form is more useful than a notice, because
+      // the form is where an address gets typed.
+      this.fail('provider_not_saved');
+      return;
+    }
+    const previous: string = this.storedEndpoint?.selectedModel ?? '';
+    if (previous === modelId) {
+      this.selectModel(modelId);
+      return;
+    }
+    // Caught rather than left to propagate. A pick comes from a sheet that has
+    // already closed, so a rejected save with nobody listening would leave the
+    // user with a top bar that did not change and no explanation anywhere. A
+    // failed switch is the one place a notice is the whole answer.
+    let saved: boolean = false;
+    try {
+      saved = await this.saveProvider({
+        id: this.storedEndpoint?.id ?? 'endpoint-default',
+        name: this.storedEndpoint?.label ?? address,
+        baseUrl: address,
+        selectedModel: modelId
+      } as ProviderDraft, this.credentials.loadSecret(CREDENTIAL_NAME));
+      if (saved) {
+        // The runtime now names this model, so the list it reports contains it
+        // and `selectModel` can find it. Re-reading the stored endpoint first
+        // also picks up a save the bridge accepted but the local copy predates.
+        this.storedEndpoint = await this.bridge.storedEndpoint();
+      }
+    } catch (reason) {
+      this.fail('provider_not_saved', `${reason}`);
+      return;
+    }
+    // Only now, and only if the runtime took it. Moving the highlight before
+    // the save was the bug this guards: the top bar would name a model the
+    // endpoint was still not using, so the next turn ran on something else and
+    // the screen had already told the user otherwise. A failed switch leaves
+    // the old model named and shows why.
+    if (saved) {
+      this.selectModel(modelId);
+    }
   }
 
   setAppearance(mode: AppearanceMode): void {

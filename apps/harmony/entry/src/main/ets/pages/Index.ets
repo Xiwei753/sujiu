@@ -10,6 +10,7 @@ import {
 import { AppGraph } from '../app/Controller';
 import { Composer } from '../components/Composer';
 import { ConversationView } from '../components/ConversationView';
+import { SafeArea } from '../ui/SafeArea';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { CharacterSelectorSheet, ContextSheet, ModelSelectorSheet } from '../components/SelectorSheets';
 import { AppearanceMode } from '../platform/PlatformServices';
@@ -82,6 +83,23 @@ struct Index {
   @State private showDiagnostics: boolean = false;
   /** True right after a successful copy, so the user knows the paste is safe. */
   @State private diagnosticsCopied: boolean = false;
+
+  /**
+   * Whether the discovered-model list is open.
+   *
+   * The list is a bounded scroll area rather than chips scattered down the
+   * form, for one concrete reason: an endpoint that lists eighty-one models
+   * pushed the save button off the bottom of the screen, and a form whose one
+   * commit control is a scroll away is a form people abandon. Inside a panel
+   * of fixed height the list can hold every model the endpoint reported — no
+   * cap, no "and 69 more" that a user cannot get at — and the rest of the form
+   * stays exactly where it was.
+   *
+   * It opens by default, because the reason a user presses "ask this endpoint"
+   * is to see what came back, and an answer that stays hidden behind a second
+   * tap is not the answer they asked for.
+   */
+  @State private modelListOpen: boolean = true;
   private pathStack: NavPathStack = new NavPathStack();
 
   aboutToAppear(): void {
@@ -127,9 +145,13 @@ struct Index {
       return;
     }
     this.providerBaseUrl = stored.baseUrl;
-    if (stored.selectedModel !== undefined && stored.selectedModel.length > 0) {
-      this.providerModel = stored.selectedModel;
-    }
+    // Assigned unconditionally, including the empty case. Skipping the
+    // assignment when there is no stored model leaves whatever the field
+    // happened to hold — so an endpoint that was just saved with no model still
+    // shows the model it had before, and the user is told a model is
+    // configured when it is not. An endpoint with no model is a normal state
+    // and is drawn as an empty field, which is different from not having asked.
+    this.providerModel = stored.selectedModel ?? '';
     this.providerFieldEpoch += 1;
   }
 
@@ -214,7 +236,12 @@ struct Index {
         .onClick(() => this.openSheet(SheetKind.More));
     }
     .width('100%')
-    .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+    // The window is laid out full screen so the navigation indicator yields to
+    // the page instead of the page stepping around it. Nothing avoids the
+    // status bar any more, so the bar that must not be under the clock says so
+    // here. The six below is the bar's own breathing room, kept separate so the
+    // inset can change without touching the spacing.
+    .padding({ left: 8, right: 8, top: SafeArea.topVp + 6, bottom: 6 })
     .backgroundColor(this.theme.pageBackground);
   }
 
@@ -296,9 +323,19 @@ struct Index {
       ModelSelectorSheet({
         controller: this.controller,
         theme: this.theme,
+        // Goes through the controller rather than selectModel because the list
+        // is what the endpoint *probed*, and a probed model is not a configured
+        // one. Selecting it in place would highlight it and change nothing: the
+        // turn builds its provider from the endpoint's own model, so a pick
+        // here has to be saved to be real.
+        //
+        // The sheet closes immediately rather than after the save. The save
+        // reaches the network, and a picker that hangs open on a slow endpoint
+        // reads as a frozen screen; the model field in Settings and the top bar
+        // both follow the save, so there is nothing to wait and watch.
         onPick: (modelId: string) => {
-          this.controller.selectModel(modelId);
           this.closeSheet();
+          this.controller.chooseModel(modelId);
         }
       });
     } else if (this.sheet === SheetKind.Characters) {
@@ -422,6 +459,19 @@ struct Index {
       }
     }
     .hideTitleBar(true)
+    .onWillShow(() => {
+      // The stored endpoint can change while the app is running — picking a
+      // model from the top bar rewrites it — so a form filled once at launch
+      // is a form showing what was true at launch. Two screens disagreeing
+      // about which model is configured is not a cosmetic problem: re-saving
+      // this form would revert the pick the user just made.
+      //
+      // Gated on the settings route because this runs for every destination,
+      // and because the fields below are only ever drawn there.
+      if (name === RouteName.Settings) {
+        this.openSettingsOnStoredEndpoint();
+      }
+    })
     .backgroundColor(this.theme.pageBackground);
   }
 
@@ -508,8 +558,8 @@ struct Index {
    * for its own answer in advance. This is the order the work actually happens
    * in: type an address, ask, then choose.
    */
-  private exploreProvider(): void {
-    this.controller.exploreEndpoint(this.providerBaseUrl.trim(), this.providerKey.trim());
+  private exploreProvider(refresh: boolean = false): void {
+    this.controller.exploreEndpoint(this.providerBaseUrl.trim(), this.providerKey.trim(), refresh);
   }
 
   private chooseModel(id: string): void {
@@ -560,6 +610,112 @@ struct Index {
   }
 
   /**
+   * The models this endpoint listed, in a panel that can be opened, closed and
+   * scrolled.
+   *
+   * The list shows *every* model the endpoint reported. An earlier version
+   * wrapped the first twelve into chips down the page and wrote "and 69 more",
+   * which is the worst of both: the models were scattered through the form
+   * instead of being a list, and the ones past the cap were unreachable without
+   * typing a name that the user could not have known. A scroll area inside a
+   * fixed-height panel has neither problem, and it is also the only shape in
+   * which eighty-one rows are not a hazard.
+   *
+   * The height is bounded so the list never grows the page, and the manual
+   * entry field stays right below it in every state, so a model this endpoint
+   * did not report is still one text field away.
+   */
+  @Builder
+  private modelPicker() {
+    Column({ space: 6 }) {
+      Row({ space: 6 }) {
+        Text($r('app.string.provider_model_choose'))
+          .fontSize(12)
+          .fontColor(this.theme.textSecondary)
+          .layoutWeight(1);
+        Text($r('app.string.provider_models_count_short', this.controller.discoveredModelCount))
+          .fontSize(12)
+          .fontColor(this.theme.textSecondary);
+        // A chevron that names the action, because a triangle on its own has to
+        // be guessed at and a settings screen is the wrong place to test a
+        // gesture vocabulary on.
+        Text(this.modelListOpen ? $r('app.string.provider_models_hide') : $r('app.string.provider_models_show'))
+          .fontSize(12)
+          .fontColor(this.theme.accent);
+      }
+      .width('100%')
+      .onClick(() => {
+        this.modelListOpen = !this.modelListOpen;
+      });
+
+      if (this.modelListOpen) {
+        // Clipped to its own box on purpose. Without this the last visible row
+        // spills over the label of the field underneath it, which reads as a
+        // rendering fault rather than as "there is more below" — and the field
+        // being overlapped is the one control that names a model by hand.
+        Column() {
+          List({ space: 2 }) {
+          ForEach(this.controller.discoveredModels, (model: ModelSummary) => {
+            ListItem() {
+              Row({ space: 8 }) {
+                // Only the row the field already names is marked. The colour
+                // reflects the user's own text; it is not the program proposing
+                // a model. A probe that highlighted its first result would be
+                // choosing for the user, and one highlighted row among eighty
+                // reads exactly like that.
+                Text(model.name)
+                  .fontSize(13)
+                  .fontColor(this.providerModel === model.id
+                    ? this.theme.textOnAccent
+                    : this.theme.textPrimary)
+                  .layoutWeight(1)
+                  .maxLines(1)
+                  .textOverflow({ overflow: TextOverflow.Ellipsis });
+                if (this.providerModel === model.id) {
+                  Text($r('app.string.provider_model_current'))
+                    .fontSize(11)
+                    .fontColor(this.theme.textOnAccent);
+                }
+              }
+              .width('100%')
+              .padding({ left: 10, right: 10, top: 8, bottom: 8 })
+              .borderRadius(8)
+              .backgroundColor(this.providerModel === model.id
+                ? this.theme.accent
+                : this.theme.surfaceMuted)
+              .onClick(() => this.chooseModel(model.id));
+            }
+          }, (model: ModelSummary) => model.id);
+        }
+        .width('100%')
+        // The List takes the box it is given and scrolls inside it. Without a
+        // weight it lays out at its full content height — all eighty-one rows —
+        // and the parent's clip only hides what falls outside, while the rows
+        // near the boundary still draw over the field below. A child that
+        // overflows its box is not a scroll view, however much the parent
+        // clips.
+        .layoutWeight(1)
+        .clip(true)
+        .scrollBar(BarState.Auto)
+        .edgeEffect(EdgeEffect.Spring);
+        }
+        .width('100%')
+        .height(216)
+        .clip(true)
+        // A visible edge, so the row cut by the boundary reads as a scroll
+        // affordance rather than a rendering fault. The height is not tuned to
+        // a whole number of rows on purpose: a row's height depends on the font
+        // scale, so a box that happens to end on a boundary today ends
+        // mid-row the moment the user has larger text. A defined edge is
+        // honest at any size, an exact fit is not.
+        .border({ width: 1, color: this.theme.outline, radius: 10 })
+        .backgroundColor(this.theme.surface);
+      }
+    }
+    .width('100%');
+  }
+
+  /**
    * What asking an address told us.
    *
    * The protocol and the model list are shown as two separate answers because
@@ -592,46 +748,7 @@ struct Index {
           .width('100%');
       }
       if (this.controller.discoveredModels.length > 0) {
-        Text($r('app.string.provider_model_choose'))
-          .fontSize(12)
-          .fontColor(this.theme.textSecondary)
-          .width('100%');
-        // Capped by the controller, and the reason is the model field below and
-        // the save button. A gateway that lists eighty-one models would push
-        // the one control that commits the configuration off the bottom of the
-        // screen, and a form whose save button is a scroll away is a form people
-        // give up on. Nothing is hidden: the field below is the way to name a
-        // model the cap leaves out, and the status line says how many there
-        // really are.
-        Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
-          ForEach(this.controller.offeredModels, (model: ModelSummary) => {
-            Text(model.name)
-              .fontSize(12)
-              .padding({ left: 10, right: 10, top: 6, bottom: 6 })
-              .borderRadius(14)
-              // A chip is coloured only when it is what the field already says.
-              // The colour reflects the user's own text, it is not the program
-              // proposing a model — which is why an untouched list is entirely
-              // uncoloured. A probe that highlighted its first result would be
-              // choosing for the user, and a chip list with one blue entry
-              // among eighty reads exactly like that.
-              .backgroundColor(
-                this.providerModel === model.id ? this.theme.accent : this.theme.surfaceMuted
-              )
-              .fontColor(
-                this.providerModel === model.id ? this.theme.textOnAccent : this.theme.textPrimary
-              )
-              .margin({ right: 6, bottom: 6 })
-              .onClick(() => this.chooseModel(model.id));
-          }, (model: ModelSummary) => model.id);
-        }
-        .width('100%');
-        if (this.controller.discoveredModelCount > this.controller.offeredModels.length) {
-          Text($r('app.string.provider_models_more', this.controller.discoveredModelCount))
-            .fontSize(12)
-            .fontColor(this.theme.textSecondary)
-            .width('100%');
-        }
+        this.modelPicker()
       }
       if (this.controller.providerNoticeCode.length > 0) {
         Text(Copy.errorText(this.controller.providerNoticeCode, ''))
@@ -753,7 +870,9 @@ struct Index {
         .fontColor(this.theme.textPrimary);
     }
     .width('100%')
-    .padding(12)
+    // Padded as well, because it is the same window. A settings page that began
+    // under the status bar would look like a page whose own header is missing.
+    .padding({ top: SafeArea.topVp, left: 12, right: 12, bottom: 12 })
     .backgroundColor(this.theme.pageBackground);
   }
 
@@ -907,7 +1026,11 @@ struct Index {
                 .fontColor(this.theme.textPrimary)
                 .enabled(!this.controller.exploringEndpoint && this.providerBaseUrl.trim().length > 0)
                 .width('100%')
-                .onClick(() => this.exploreProvider());
+                // This one asks again. Everywhere else the runtime answers from
+                // what the endpoint already said, which is what keeps opening
+                // this screen free — and which would also keep showing a stale
+                // answer to a user who has just corrected their key.
+                .onClick(() => this.exploreProvider(true));
             }
             Row({ space: 8 }) {
               Button($r('app.string.provider_save'))

@@ -2,6 +2,7 @@ import { common } from '@kit.AbilityKit';
 import { SessionSummary } from '../bridge/SujiuBridge';
 import { ChatController, SessionGroup } from '../presentation/ChatController';
 import { Copy } from '../ui/Copy';
+import { SafeArea } from '../ui/SafeArea';
 import { AppTheme } from '../ui/theme/Theme';
 
 /**
@@ -111,6 +112,12 @@ export struct HistoryPanel {
     .width('100%')
     .height('100%')
     .alignItems(HorizontalAlign.Start)
+    // Full screen means this panel reaches under the status bar and the
+    // navigation indicator. The padding goes on the panel rather than around
+    // it so the background still fills edge to edge and only the contents step
+    // clear: a drawer whose title sits under the clock looks like a drawer with
+    // no title.
+    .padding({ top: SafeArea.topVp, bottom: SafeArea.bottomVp })
     .backgroundColor(this.theme.pageBackground);
   }
 }

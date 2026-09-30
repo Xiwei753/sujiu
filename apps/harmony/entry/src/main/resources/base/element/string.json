@@ -157,6 +157,10 @@
       "value": "%1$s · %2$s"
     },
     {
+      "name": "model_sheet_count",
+      "value": "%d from this endpoint"
+    },
+    {
       "name": "character_sheet_search",
       "value": "Search characters"
     },
@@ -285,8 +289,20 @@
       "value": "Models it lists"
     },
     {
-      "name": "provider_models_more",
-      "value": "%d in all — type a name to pick any of them"
+      "name": "provider_models_count_short",
+      "value": "%d"
+    },
+    {
+      "name": "provider_models_hide",
+      "value": "Hide"
+    },
+    {
+      "name": "provider_models_show",
+      "value": "Show"
+    },
+    {
+      "name": "provider_model_current",
+      "value": "current"
     },
     {
       "name": "provider_listing_available",

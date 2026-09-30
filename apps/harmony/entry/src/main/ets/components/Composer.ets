@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { ChatController } from '../presentation/ChatController';
 import { Copy } from '../ui/Copy';
+import { SafeArea } from '../ui/SafeArea';
 import { AppTheme } from '../ui/theme/Theme';
 
 /**
@@ -76,7 +77,21 @@ export struct Composer {
     }
     .width('100%')
     .alignItems(VerticalAlign.Bottom)
-    .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+    /**
+     * The inset goes on the row, not on the composer.
+     *
+     * The composer's background still reaches the physical bottom edge — that
+     * is what full screen bought, and it is why the band below the row is our
+     * own colour rather than a strip the window set aside. What the inset buys
+     * is that the navigation indicator, which is drawn over whatever it lands
+     * on, lands on background instead of on the text field. Measured, that
+     * difference is the pill sitting across the bottom edge of the input rather
+     * than below it — tried the other way round and screenshotted it.
+     *
+     * So the bar gives way to the page, and the page still keeps its controls
+     * clear. Those are different jobs and one inset cannot do both.
+     */
+    .padding({ left: 12, right: 12, top: 8, bottom: SafeArea.bottomVp + 8 })
     .backgroundColor(this.theme.pageBackground);
   }
 }

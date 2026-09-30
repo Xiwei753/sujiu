@@ -241,8 +241,25 @@ export interface SujiuBridge {
    * Nothing is stored, and no model needs to be known: the settings screen asks
    * this first, shows what came back, and the user then does the one thing only
    * a person can do, which is pick a model.
+   *
+   * `refresh` is what a "ask again" control passes. Left out, the runtime
+   * answers from what this endpoint already told it, which is free; that is why
+   * an ordinary open of the screen costs nothing and a fresh launch still has a
+   * model list. Asking again is a deliberate act, because an endpoint that has
+   * been re-pointed or a key that has just been corrected will not be
+   * re-read otherwise.
    */
-  discoverEndpoint(baseUrl: string, apiKey: string): Promise<EndpointExploration>;
+  discoverEndpoint(baseUrl: string, apiKey: string, refresh?: boolean): Promise<EndpointExploration>;
+  /**
+   * What an endpoint told us before, without asking it again.
+   *
+   * Nothing here reaches the network, which is the difference from
+   * `discoverEndpoint`. A launch reads this so a model list is there before
+   * anybody asks for one, and a screen that wants the current truth asks for it
+   * instead. Resolves to nothing when this endpoint has never been asked about,
+   * which is an ordinary state and not a failure.
+   */
+  rememberedEndpoint(baseUrl: string): Promise<EndpointExploration | undefined>;
   /** Hands a provider description to the runtime. Rejects a blank address. */
   configureProvider(draft: ProviderDraft): Promise<void>;
   /**

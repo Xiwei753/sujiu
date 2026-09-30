@@ -168,7 +168,8 @@ interface NativeRuntime {
    * Asks an endpoint what it can do. Needs an address and a key and nothing
    * else: no stored endpoint, no chosen model, no vendor named.
    */
-  discoverEndpoint(baseUrl: string, apiKey: string): NativeEndpointExploration;
+  discoverEndpoint(baseUrl: string, apiKey: string, refresh?: boolean): NativeEndpointExploration;
+  rememberedEndpoint(baseUrl: string): NativeEndpointExploration | undefined;
   /** The endpoint already configured, or null. Never carries a credential. */
   storedEndpoint(): NativeStoredEndpoint | null;
   /**
@@ -605,10 +606,33 @@ export class SujiuNativeBridge implements SujiuBridge {
    * the model list it shows is what the endpoint actually offered rather than
    * what an earlier choice happened to leave behind.
    */
-  discoverEndpoint(baseUrl: string, apiKey: string): Promise<EndpointExploration> {
+  rememberedEndpoint(baseUrl: string): Promise<EndpointExploration | undefined> {
+    try {
+      const native: NativeEndpointExploration | undefined = this.runtime.rememberedEndpoint(baseUrl);
+      // Both spellings of nothing are checked, and the reason is worth writing
+      // down: napi-rs hands back `null` for an `Option` of `None`, not
+      // `undefined`. A guard written against the declared TypeScript type looks
+      // correct, compiles, and then maps a null straight into the converter,
+      // which fails on the first property it tries to read. The symptom is an
+      // endpoint with nothing remembered reporting "cannot read property
+      // protocol of null", which points at the mapper instead of at the guard.
+      //
+      // Nothing stays nothing rather than becoming a promise of a blank answer,
+      // because "never asked" and "asked and found nothing" are different
+      // answers and a caller has to be able to tell them apart.
+      if (native === undefined || native === null) {
+        return Promise.resolve(undefined);
+      }
+      return Promise.resolve(toEndpointExploration(native));
+    } catch (error) {
+      return Promise.reject(new Error(`remembered_endpoint failed: ${(error as Error).message}`));
+    }
+  }
+
+  discoverEndpoint(baseUrl: string, apiKey: string, refresh: boolean = false): Promise<EndpointExploration> {
     try {
       return Promise.resolve(
-        toEndpointExploration(this.runtime.discoverEndpoint(baseUrl, apiKey))
+        toEndpointExploration(this.runtime.discoverEndpoint(baseUrl, apiKey, refresh))
       );
     } catch (error) {
       return Promise.reject(new Error(`discover_endpoint failed: ${(error as Error).message}`));

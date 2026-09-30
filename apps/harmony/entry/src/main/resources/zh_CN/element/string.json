@@ -157,6 +157,10 @@
       "value": "%1$s · %2$s"
     },
     {
+      "name": "model_sheet_count",
+      "value": "该接口提供 %d 个"
+    },
+    {
       "name": "character_sheet_search",
       "value": "搜索角色"
     },
@@ -341,8 +345,20 @@
       "value": "这一步由你来定，Sujiu 不会替你选择。"
     },
     {
-      "name": "provider_models_more",
-      "value": "共 %d 个 —— 直接填写名字即可选择其中任意一个"
+      "name": "provider_models_count_short",
+      "value": "%d"
+    },
+    {
+      "name": "provider_models_hide",
+      "value": "收起"
+    },
+    {
+      "name": "provider_models_show",
+      "value": "展开"
+    },
+    {
+      "name": "provider_model_current",
+      "value": "当前"
     },
     {
       "name": "provider_listing_available",
