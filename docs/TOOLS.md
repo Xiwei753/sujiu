@@ -193,9 +193,10 @@ would leave a working provider permanently misclassified.
 A status code alone never counts as that evidence. Gateways that route by model
 answer an unresolvable model with the same 404 they use for a path they never
 had, so a bare 404 — empty body, plain text, or a structured error about
-something else — is inconclusive rather than a missing protocol. A 404 that
-names a model this key may not use is reported as exactly that, because the
-fix is a different model and not a different endpoint.
+something else — is ambiguous rather than a missing protocol: the runtime walks
+past it to the next format but concludes nothing. A 404 that names a model this
+key may not use is reported as exactly that and stops the walk, because the fix
+is a different model and not a different endpoint.
 
 A user configures an endpoint, not a vendor. They supply a base URL and a key,
 the runtime asks what is there, and the only choice left for them is the model.

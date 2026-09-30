@@ -94,10 +94,16 @@ impl Protocol {
 pub enum ProbeVerdict {
     /// The endpoint answered as this protocol.
     Supported,
-    /// The endpoint does not have this protocol. Only this may fall through.
+    /// The endpoint does not have this protocol, and said so in a way that
+    /// names the missing route. This is the only answer that counts as proof of
+    /// absence.
     Unsupported,
-    /// We could not tell. The reason is kept so it is not mistaken for a
-    /// capability, and so a later probe can be worth retrying.
+    /// The endpoint answered, and the answer is consistent with "this path does
+    /// not exist" and with "this request could not be routed". Silence, not a
+    /// no: worth asking the next protocol about, worthless as a verdict.
+    Ambiguous,
+    /// We could not tell, and the reason means asking again right now would be
+    /// pointless or unfair: a rejected key, a throttle, an outage.
     Inconclusive(ProbeFailure),
 }
 
@@ -107,8 +113,22 @@ impl ProbeVerdict {
     }
 
     /// Whether a negotiation may move on to the next protocol.
+    ///
+    /// Both a positively missing route and an ambiguous answer qualify, and the
+    /// difference is kept elsewhere. Asking the next protocol costs one cheap
+    /// request and can only find out something true, so an ambiguous answer is
+    /// worth walking past. What it may not do is count as proof of absence.
     pub fn may_fall_through(&self) -> bool {
-        matches!(self, ProbeVerdict::Unsupported)
+        matches!(self, ProbeVerdict::Unsupported | ProbeVerdict::Ambiguous)
+    }
+
+    /// Whether this answer is silence rather than a no.
+    ///
+    /// A gateway that routes by model answers a request it cannot route with
+    /// the same 404 it uses for a path it never had. That body is consistent
+    /// with both, so it is worth asking again and worth nothing as a verdict.
+    pub fn is_ambiguous(&self) -> bool {
+        matches!(self, ProbeVerdict::Ambiguous)
     }
 }
 
@@ -223,10 +243,13 @@ fn classify_missing_path(body: &str) -> ProbeVerdict {
     }
 
     if names_a_missing_model(body) {
+        // The path answered, so asking another protocol about the same model
+        // would learn nothing. The user has to change the model, not the
+        // endpoint, and this says so.
         return ProbeVerdict::Inconclusive(ProbeFailure::ModelUnavailable);
     }
 
-    ProbeVerdict::Inconclusive(ProbeFailure::Malformed)
+    ProbeVerdict::Ambiguous
 }
 
 /// Whether a rejection body names a model, function or deployment we may not use.
@@ -418,11 +441,27 @@ mod tests {
 
     #[test]
     fn only_a_missing_endpoint_lets_negotiation_move_on() {
-        // Only a body that says so. A bare status is not a statement about a
-        // path, and treating it as one is how a working endpoint gets dropped.
+        // Only a body that says so is proof of absence. A bare status is still
+        // worth walking past, because the next protocol costs one cheap request
+        // and can only find out something true -- but it must never be recorded
+        // as evidence that this endpoint does not speak it.
         assert!(classify(Some(404), r#"{"error":"unknown endpoint"}"#).may_fall_through());
         assert!(classify(Some(405), "no such endpoint").may_fall_through());
-        assert!(!classify(Some(404), "").may_fall_through());
+
+        let bare = classify(Some(404), "");
+        assert!(
+            bare.may_fall_through(),
+            "the next protocol is still worth asking"
+        );
+        assert!(
+            bare.is_ambiguous(),
+            "and it is silence, not proof that the protocol is missing"
+        );
+        assert_ne!(
+            bare,
+            ProbeVerdict::Unsupported,
+            "an ambiguous answer must never be written down as an absent protocol"
+        );
 
         // A wrong key, a throttle and an outage are answers about this
         // moment. None of them may permanently downgrade a working endpoint.
@@ -583,12 +622,18 @@ mod tests {
 
         // The trap. A gateway that routes by model answers a request it cannot
         // route with the identical plain text it uses for a path it never had,
-        // so this body is evidence of nothing and must not be read either way.
+        // so this body is evidence of nothing. It is still worth asking the
+        // next protocol, because that costs a request and cannot lie; what it
+        // must never be is a reason to write the endpoint down as mute.
         for body in ["404 page not found", "", "<html>404 Not Found</html>"] {
             let verdict = classify(Some(404), body);
             assert!(
-                !verdict.may_fall_through(),
-                "{body:?} is ambiguous: claiming the protocol is missing would be a lie"
+                verdict.may_fall_through(),
+                "{body:?} should not stop the walk: the next protocol may well work"
+            );
+            assert!(
+                verdict.is_ambiguous(),
+                "{body:?} is silence, not a missing protocol"
             );
         }
     }

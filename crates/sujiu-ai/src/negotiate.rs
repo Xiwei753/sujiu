@@ -142,6 +142,7 @@ pub async fn negotiate(
 
     let preferred = config.protocols();
     let mut attempts = Vec::new();
+    let mut ambiguous = false;
 
     for protocol in &preferred {
         let verdict = probe(client, config, api_key, *protocol).await;
@@ -185,16 +186,18 @@ pub async fn negotiate(
             return negotiation;
         }
 
-        // A probe we could not conclude stops the walk as well, but for a
-        // different reason: continuing would mean trying the next protocol
-        // against a service that is currently refusing to talk, and the first
-        // useful answer would be a misleading one.
+        // A probe we could not conclude stops the walk, but for a different
+        // reason: continuing would mean trying the next protocol against a
+        // service that is currently refusing to talk, and the first useful
+        // answer would be a misleading one.
         if !verdict.may_fall_through() {
             let failure = match &verdict {
                 ProbeVerdict::Inconclusive(failure) => Some(failure.clone()),
                 // Unreachable: the loop already returned for a supported
-                // protocol, and an unsupported one falls through.
-                ProbeVerdict::Supported | ProbeVerdict::Unsupported => None,
+                // protocol, and everything else falls through.
+                ProbeVerdict::Supported | ProbeVerdict::Unsupported | ProbeVerdict::Ambiguous => {
+                    None
+                }
             };
 
             let negotiation = Negotiation::failed(
@@ -207,13 +210,23 @@ pub async fn negotiate(
             // permanent.
             return negotiation;
         }
+
+        // An ambiguous answer falls through like a missing route but is not
+        // one, so it is remembered separately: if the walk ends with nothing
+        // selected, the honest report is that we could not tell, not that this
+        // endpoint speaks nothing we know.
+        if verdict.is_ambiguous() {
+            ambiguous = true;
+        }
     }
 
-    Negotiation::failed(
-        "the endpoint offered none of the protocols this build speaks",
-        None,
-        &attempts,
-    )
+    let reason = if ambiguous {
+        "the endpoint would not give an answer we could read for any protocol we speak, so we could not tell what it speaks"
+    } else {
+        "the endpoint offered none of the protocols this build speaks"
+    };
+
+    Negotiation::failed(reason, None, &attempts)
 }
 
 /// Ask one protocol whether it is there.

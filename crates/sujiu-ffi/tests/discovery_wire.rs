@@ -16,7 +16,8 @@ use std::sync::mpsc;
 use std::thread;
 
 use serde_json::{json, Value};
-use sujiu_ffi::runtime::SujiuRuntime;
+use sujiu_core::EndpointConfig;
+use sujiu_ffi::runtime::{SendTurnRequest, SujiuRuntime};
 
 /// What the endpoint says about one route.
 ///
@@ -31,6 +32,10 @@ enum Route {
     /// A raw body, for the routes a real turn streams from. The probe reads
     /// only the status, so a stream is also a valid answer to a probe.
     Stream(String),
+    /// A 404 carrying no JSON at all, which is what a real gateway replies
+    /// with when it cannot route a request — and, identically, when the path
+    /// does not exist. The status and the body together prove nothing.
+    PlainNotFound,
 }
 
 /// A loopback endpoint that answers three routes and records every request.
@@ -141,6 +146,10 @@ fn write_route(mut stream: &TcpStream, route: &Route) {
             json!({"error": {"message": "unknown endpoint", "type": "invalid_request_error"}})
                 .to_string(),
         ),
+        // What a gateway that routes by model actually replies with: its
+        // router's own plain-text page, identical to the one it gives for a
+        // path it never had. The status alone must not be read either way.
+        Route::PlainNotFound => (404, "text/plain", "404 page not found".to_string()),
         Route::Ok(body) => (200, "application/json", body.to_string()),
         Route::Status(status, body) => (*status, "application/json", body.to_string()),
         Route::Stream(body) => (200, "text/event-stream", body.clone()),
@@ -179,6 +188,25 @@ fn answers() -> Route {
 /// parses the body. Answering it with a chat-completions shape would make this
 /// test pass its negotiation assertions and then fail the turn for a reason
 /// that has nothing to do with the thing under test.
+/// A probe answer for the Chat Completions route that also serves a real turn.
+///
+/// A turn streams, and a probe only reads the status, so one body can answer
+/// both questions -- as long as it is a stream, because a plain JSON body
+/// satisfies the probe and then produces a silent empty conversation.
+fn chat_answers() -> Route {
+    let mut body = String::new();
+    for frame in [
+        json!({"id": "chat_1", "choices": [{"delta": {"content": "pong"}}]}),
+        json!({"id": "chat_1", "choices": [{"delta": {}, "finish_reason": "stop"}]}),
+    ] {
+        body.push_str("data: ");
+        body.push_str(&frame.to_string());
+        body.push_str("\r\n\r\n");
+    }
+    body.push_str("data: [DONE]\r\n\r\n");
+    Route::Stream(body)
+}
+
 fn responses_answers() -> Route {
     let mut body = String::new();
     for frame in [
@@ -247,6 +275,105 @@ fn an_endpoint_is_explored_from_a_url_and_a_key_alone() {
     assert!(
         runtime.endpoint().is_none(),
         "exploring an endpoint must not quietly store one"
+    );
+}
+
+/// The gateway that exposed this, reproduced exactly.
+///
+/// It routes by model, so it answers a path it never had and a request it
+/// cannot route with the *same* plain-text 404. Reading that status as "no
+/// such protocol" made a working endpoint look mute, and the user was told to
+/// go and reconfigure a provider that was never broken. This is the shape that
+/// does it, and the conversation below is what the fix buys back.
+#[test]
+fn a_gateway_that_routes_by_model_is_still_found() {
+    // No Responses route at all, and the listing works.
+    let server = EndpointServer::start(
+        Route::Ok(models(&["google/gemma-3-4b-it"])),
+        Route::PlainNotFound,
+        chat_answers(),
+    );
+    let runtime = runtime();
+
+    let exploration = runtime
+        .tokio
+        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+
+    assert_eq!(
+        exploration.protocol, "openai_chat_completions",
+        "a plain-text 404 is evidence of nothing, so Chat Completions must still get its turn"
+    );
+
+    // And it is not just reported -- a real conversation has to reach it.
+    runtime
+        .set_endpoint(Some(EndpointConfig {
+            id: "gateway".to_string(),
+            name: String::new(),
+            base_url: server.base_url(),
+            selected_model: Some("google/gemma-3-4b-it".to_string()),
+            credential_ref: None,
+            overrides: serde_json::Map::new(),
+        }))
+        .expect("endpoint");
+
+    let session = runtime.create_session(None);
+    let mut recorder = Recorder { failed: false };
+    runtime.tokio.block_on(runtime.send_turn(
+        SendTurnRequest {
+            session_id: session.clone(),
+            user_text: "ping".to_string(),
+            provider: None,
+            api_key: Some("sk-test".to_string()),
+        },
+        &mut recorder,
+    ));
+    let failed = recorder.failed;
+
+    assert!(!failed, "the turn must reach the protocol that answered");
+    let state = runtime
+        .conversation_state(&session)
+        .expect("the session was just created");
+    assert!(
+        state
+            .messages
+            .iter()
+            .any(|message| message.text.contains("pong")),
+        "and the answer has to come back from the endpoint, not from a guess"
+    );
+}
+
+/// When every protocol is answered with silence, say so.
+///
+/// This is the case the whole three-way verdict exists for. The endpoint is up,
+/// it is not refusing us, and it answered every question with a 404 that means
+/// nothing either way. "The endpoint offered none of the protocols this build
+/// speaks" would be a confident false statement derived from silence, and a
+/// user who believed it would go and reconfigure a provider that works.
+#[test]
+fn an_endpoint_that_only_says_nothing_is_reported_as_unknown_not_as_unsupported() {
+    let server = EndpointServer::start(
+        Route::Ok(models(&["some-model"])),
+        Route::PlainNotFound,
+        Route::PlainNotFound,
+    );
+    let runtime = runtime();
+
+    let exploration = runtime
+        .tokio
+        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+
+    assert_eq!(
+        exploration.protocol, "",
+        "nothing was established, and an empty string says so plainly"
+    );
+    let reason = exploration.reason.expect("a reason a user can read");
+    assert!(
+        reason.contains("could not tell"),
+        "silence must be reported as silence: {reason}"
+    );
+    assert!(
+        !reason.contains("none of the protocols"),
+        "absence may only be claimed from evidence, and there was none: {reason}"
     );
 }
 
