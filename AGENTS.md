@@ -561,6 +561,26 @@ rebuilt reaches a device as an old runtime behind a new bridge. A new NAPI metho
 the ArkTS calls but the committed `.so` does not export is exactly that failure,
 and it compiles cleanly until the call is made at runtime.
 
+**A brand-new Rust file has to be committed before the library is built, or the
+fingerprint silently omits it.** `harmony-runtime-fingerprint.sh` hashes only
+files `git ls-files` reports, which is deliberate — an untracked build artifact
+must not be able to change the record. The cost is that a new `crates/**.rs`
+file is invisible to the fingerprint until it is tracked, so building it while
+still untracked records a fingerprint that omits the very file you just added.
+The local check passes, the device gets a correct library, and **CI fails on the
+commit** where the file becomes tracked and the fingerprint moves.
+
+This is not a theory: it is what the first issue-#3 push did, with
+`crates/sujiu-ai/src/diagnostics.rs`. The fix is not a rebuild, because a
+rebuild alone does not help if the file is still untracked. It is:
+
+```text
+git add the new Rust source   ->  scripts/build-harmony-runtime.sh  ->  commit
+```
+
+When a commit adds a `.rs` file and CI reports the runtime library stale while
+your own check passes, this is why.
+
 If a physical device is unavailable, still perform the build and state clearly
 that install/runtime behavior was not verified.
 
