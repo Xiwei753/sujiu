@@ -32,6 +32,13 @@
 //! so persisting it must never be what keeps a character or a world book alive.
 //! Projected sources are therefore filtered back out on the way out and rebuilt
 //! from the domain documents on the way in.
+//!
+//! The `<id>` in each path above is a **logical** id, and it is never spliced in
+//! as written. Every one of them goes through [`path_segment`] on the way in and
+//! on the way out, because an id can arrive from an imported card, a world book
+//! or a migrated document, and a value that chose its own directory could
+//! otherwise leave the generation it belongs to. The manifest keeps the logical
+//! id, so nothing above this layer has to know the mapping exists.
 
 use serde::{Deserialize, Serialize};
 use sujiu_core::{
@@ -104,6 +111,114 @@ pub fn generation_key(generation: u64) -> String {
     format!("{GENERATION_PREFIX}/gen-{generation:08}")
 }
 
+/// The longest a mapped segment may be before a hash name is used instead.
+///
+/// Well under the 255-byte limit every mainstream filesystem puts on one path
+/// component, and comfortably above any id Sujiu mints itself. It exists because
+/// a percent-escaped segment is up to three times the id it came from, so an id
+/// long enough to be legal as a name can still be too long once mapped.
+const MAX_SEGMENT_BYTES: usize = 120;
+
+/// The name an id with no content is stored under.
+///
+/// The marker is `~` because no mapped segment can ever contain one: `~` is
+/// escaped to `%7E`, and nothing in the safe set produces a bare `~`. So this
+/// cannot be the image of any other id, which is what keeps the mapping
+/// collision-free.
+const EMPTY_SEGMENT: &str = "~empty";
+
+/// The prefix a mapped segment that had to be shortened carries.
+const HASHED_SEGMENT_PREFIX: &str = "~hash-";
+
+/// Map a domain id onto the one path segment that stands for it on disk.
+///
+/// An id is a **logical** id. It is whatever a card, a world book, a migrated
+/// document or a platform named the entity, which means it can contain `/`, a
+/// backslash, `..`, or nothing at all. Splicing such a value straight into a key
+/// would let it decide the directory a document lands in — escaping the
+/// generation it belongs to, or overwriting a sibling, or the manifest itself.
+/// So every id goes through here, on the way in and on the way out, and the
+/// manifest stores the logical id unchanged.
+///
+/// The rule, in one sentence: letters, digits, `.`, `_` and `-` survive; every
+/// other byte becomes `%` plus two uppercase hex digits; `.` and `..` are
+/// escaped whole; an empty id and an over-long id get a marked name of their own.
+///
+/// Three properties are load-bearing, and the tests hold each of them:
+///
+/// - **Round trip.** Both sides call this one function, so `load` looks in
+///   exactly the place `save` wrote, without having to decode anything.
+/// - **No collisions.** The output alphabet is the safe set plus well-formed
+///   `%XX` escapes, and `%` is itself escaped. A safe id can only be produced by
+///   itself, and two different unsafe ids cannot collapse onto one name. The
+///   marked names use `~`, which the output alphabet cannot contain.
+/// - **Stability for ordinary ids.** `session-1` and `character-lin` map to
+///   themselves. A store written by an earlier build keeps resolving, so this
+///   rule needs no migration of its own.
+///
+/// A hash name is a fallback, not a security boundary: the id it stands for is in
+/// the manifest, and the 64-bit FNV-1a below is a stable name, chosen because it
+/// is fixed by this function and cannot drift between runs the way a
+/// deliberately-unseeded hasher can.
+pub fn path_segment(id: &str) -> String {
+    if id.is_empty() {
+        return EMPTY_SEGMENT.to_owned();
+    }
+
+    let escaped = escape(id);
+    if escaped == "." || escaped == ".." {
+        return escape_dots(id);
+    }
+    if escaped.len() > MAX_SEGMENT_BYTES {
+        return format!("{HASHED_SEGMENT_PREFIX}{:016x}", fnv1a64(id.as_bytes()));
+    }
+    escaped
+}
+
+fn escape(id: &str) -> String {
+    let mut escaped = String::with_capacity(id.len());
+    for byte in id.as_bytes() {
+        if is_safe(*byte) {
+            escaped.push(*byte as char);
+        } else {
+            escaped.push('%');
+            escaped.push_str(&format!("{byte:02X}"));
+        }
+    }
+    escaped
+}
+
+/// The same mapping with `.` escaped too, so a segment is never `.` or `..`.
+fn escape_dots(id: &str) -> String {
+    let mut escaped = String::with_capacity(id.len());
+    for byte in id.as_bytes() {
+        match byte {
+            b'%' => escaped.push_str("%25"),
+            b'.' => escaped.push_str("%2E"),
+            byte if is_safe(*byte) => escaped.push(*byte as char),
+            byte => {
+                escaped.push('%');
+                escaped.push_str(&format!("{byte:02X}"));
+            }
+        }
+    }
+    escaped
+}
+
+fn is_safe(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')
+}
+
+/// FNV-1a, 64-bit. Not a security hash: it names a segment deterministically.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
 /// An entity document's key inside a generation.
 ///
 /// Generation `0` is the top-level layout the first library build wrote, and it
@@ -116,24 +231,28 @@ fn entity_key(generation: u64, key: &str) -> String {
     }
 }
 
+/// Every key that names a domain document goes through `path_segment`.
+///
+/// None of these take a raw id, and that is the point: a path built from a value
+/// the domain did not mint is a path the domain does not get to choose.
 pub fn conversation_key(id: &str) -> String {
-    format!("conversations/{id}/conversation.json")
+    format!("conversations/{}/conversation.json", path_segment(id))
 }
 
 pub fn character_key(id: &str) -> String {
-    format!("characters/{id}.json")
+    format!("characters/{}.json", path_segment(id))
 }
 
 pub fn persona_key(id: &str) -> String {
-    format!("personas/{id}.json")
+    format!("personas/{}.json", path_segment(id))
 }
 
 pub fn world_book_key(id: &str) -> String {
-    format!("worldbooks/{id}.json")
+    format!("worldbooks/{}.json", path_segment(id))
 }
 
 pub fn prompt_profile_key(id: &str) -> String {
-    format!("prompt_profiles/{id}.json")
+    format!("prompt_profiles/{}.json", path_segment(id))
 }
 
 /// Whether a source id belongs to the projection of a domain entity.
@@ -1048,5 +1167,220 @@ mod tests {
     fn a_document_from_a_newer_version_is_left_alone() {
         let document = serde_json::json!({ "version": 99, "sessions": [] }).to_string();
         assert!(migrate_legacy_document(&document).is_none());
+    }
+}
+
+/// An id is a logical id, and only a mapped one may become a path segment.
+#[cfg(test)]
+mod path_tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+    use crate::storage::MemoryStorage;
+
+    /// The property every one of these tests leans on: no mapping of these ids
+    /// may contain a separator, name a parent directory, or be empty.
+    fn assert_inert(segment: &str) {
+        assert!(!segment.is_empty(), "an empty segment names the directory");
+        assert!(!segment.contains('/'), "`/` in {segment:?}");
+        assert!(!segment.contains('\\'), "a backslash in {segment:?}");
+        assert!(!segment.contains('\0'), "a NUL in {segment:?}");
+        assert_ne!(segment, ".", "`.` is the directory itself");
+        assert_ne!(segment, "..", "`..` is the parent directory");
+    }
+
+    #[test]
+    fn an_ordinary_id_is_its_own_segment() {
+        for id in [
+            "session-1",
+            "character-lin",
+            "world-book-coast",
+            "profile_roleplay",
+            "v2.1",
+            "A1",
+        ] {
+            assert_eq!(path_segment(id), id, "{id} should be left alone");
+        }
+    }
+
+    #[test]
+    fn an_id_that_asks_to_climb_out_is_escaped_instead() {
+        // A segment that *is* a parent directory has to be escaped whole.
+        assert_eq!(path_segment(".."), "%2E%2E");
+        assert_eq!(path_segment("."), "%2E");
+        // A `..` in the middle of a name is only a substring: it reaches no
+        // directory, because the separator that would make it one is escaped.
+        assert_eq!(
+            path_segment("../../sujiu-library.json"),
+            "..%2F..%2Fsujiu-library.json"
+        );
+        assert_eq!(path_segment("a/../../b"), "a%2F..%2F..%2Fb");
+        for segment in [
+            path_segment(".."),
+            path_segment("."),
+            path_segment("../../sujiu-library.json"),
+            path_segment("a/../../b"),
+        ] {
+            assert_inert(&segment);
+        }
+    }
+
+    #[test]
+    fn an_id_with_a_separator_in_it_cannot_introduce_a_directory() {
+        for id in [
+            "a/b",
+            "a\\b",
+            "a/b/c",
+            "conversations/x/../../y",
+            "\\",
+            "//",
+        ] {
+            assert_inert(&path_segment(id));
+        }
+        assert_eq!(path_segment("a/b"), "a%2Fb");
+        assert_eq!(path_segment("a\\b"), "a%5Cb");
+    }
+
+    #[test]
+    fn an_empty_id_gets_a_name_of_its_own() {
+        assert_eq!(path_segment(""), EMPTY_SEGMENT);
+        assert_inert(&path_segment(""));
+    }
+
+    #[test]
+    fn an_over_long_id_is_named_by_its_hash() {
+        let long = "l".repeat(400);
+        let segment = path_segment(&long);
+        assert_inert(&segment);
+        assert!(segment.starts_with(HASHED_SEGMENT_PREFIX));
+        assert!(segment.len() <= MAX_SEGMENT_BYTES);
+        // The same id always gets the same name, or a save would orphan its own
+        // document.
+        assert_eq!(segment, path_segment(&long));
+        // And two different long ids do not get the same one.
+        let other = "l".repeat(399) + "m";
+        assert_ne!(segment, path_segment(&other));
+    }
+
+    #[test]
+    fn the_boundary_between_a_plain_name_and_a_hash_is_where_it_says() {
+        // Exactly at the cap the id is still used, one byte over it is hashed.
+        let at_cap = "l".repeat(MAX_SEGMENT_BYTES);
+        assert_eq!(path_segment(&at_cap), at_cap);
+        let over_cap = "l".repeat(MAX_SEGMENT_BYTES + 1);
+        assert!(path_segment(&over_cap).starts_with(HASHED_SEGMENT_PREFIX));
+    }
+
+    /// The whole reason for the marked names: two different ids may never land
+    /// on one file, or a save would silently drop one of them.
+    #[test]
+    fn two_different_ids_never_land_on_one_document() {
+        // The two long ids differ in one byte, and are borrowed so the array can
+        // hold them next to the literals.
+        let long_a = "l".repeat(400);
+        let long_b = format!("{}m", "l".repeat(399));
+        let ids = [
+            "",
+            ".",
+            "..",
+            "a",
+            "a.json",
+            "a%2Ejson",
+            "a.b",
+            "a/b",
+            "a%2Fb",
+            "a\\b",
+            "~empty",
+            "~hash-0000000000000000",
+            "sujiu-library.json",
+            "generations",
+            "generations/gen-00000001",
+            long_a.as_str(),
+            long_b.as_str(),
+        ];
+        let segments: BTreeSet<String> = ids.iter().copied().map(path_segment).collect();
+        assert_eq!(segments.len(), ids.len(), "these ids collide: {segments:?}");
+    }
+
+    /// A marked name is unreachable from any id, which is what lets the collision
+    /// test above pass without a special case per token.
+    #[test]
+    fn a_marked_name_cannot_come_from_an_id() {
+        // `~` is escaped, so no id produces a bare one and therefore nothing
+        // produces either marked name.
+        assert_eq!(path_segment("~"), "%7E");
+        assert_eq!(path_segment("~empty"), "%7Eempty");
+        assert_eq!(
+            path_segment("~hash-0000000000000000"),
+            "%7Ehash-0000000000000000"
+        );
+        assert!(path_segment("").contains('~'));
+        assert!(path_segment(&"l".repeat(MAX_SEGMENT_BYTES + 1)).contains('~'));
+    }
+
+    /// The rule has to hold for every kind of document, not just characters.
+    #[test]
+    fn every_document_key_goes_through_the_same_mapping() {
+        let nasty = "../../escape";
+        let keys = [
+            conversation_key(nasty),
+            character_key(nasty),
+            persona_key(nasty),
+            world_book_key(nasty),
+            prompt_profile_key(nasty),
+        ];
+        for key in keys {
+            // What matters is not that the text is gone but that no component of
+            // the key is a relative directory.
+            for component in key.split('/') {
+                assert_ne!(component, "..", "{key:?} still climbs");
+                assert_ne!(component, ".", "{key:?} is a relative path");
+            }
+            assert_eq!(key.matches("escape").count(), 1, "{key:?}");
+        }
+        assert_eq!(
+            conversation_key("session-1"),
+            "conversations/session-1/conversation.json"
+        );
+        assert_eq!(
+            character_key("character-lin"),
+            "characters/character-lin.json"
+        );
+    }
+
+    /// An id is mapped on the way in and on the way out by the same call, so a
+    /// document written under a hostile id is found again by the id the manifest
+    /// kept.
+    #[test]
+    fn a_hostile_id_survives_a_save_and_a_load() {
+        let storage = MemoryStorage::new();
+        let id = "../../../escaped/./..";
+        let library = Library {
+            conversations: vec![Conversation::new(id)],
+            characters: vec![Character::new(id, "Lin")],
+            ..Library::default()
+        };
+        let index = LibraryIndex::default();
+        save(&storage, &library, &index).expect("a save");
+
+        let document = storage.load(LIBRARY_FILE).expect("a manifest");
+        let index: LibraryIndex = serde_json::from_str(&document).expect("a readable manifest");
+        // The manifest keeps the logical id, not the path spelling.
+        assert_eq!(index.conversation_ids, vec![id.to_owned()]);
+        let inside = format!("{}/", generation_key(index.generation));
+        for key in [character_key(id), conversation_key(id)] {
+            assert!(storage.load(&format!("{inside}{key}")).is_some(), "{key}");
+        }
+
+        let loaded = load(&storage).expect("a readable library");
+        assert_eq!(loaded.library.conversations[0].id, id);
+        assert_eq!(loaded.library.characters[0].id, id);
+    }
+
+    /// An id is escaped, not truncated: the two must not become the same file.
+    #[test]
+    fn escaping_keeps_two_near_identical_ids_apart() {
+        assert_ne!(path_segment("a b"), path_segment("a%20b"));
+        assert_ne!(path_segment("a%2Fb"), path_segment("a/b"));
     }
 }

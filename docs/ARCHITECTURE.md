@@ -751,6 +751,39 @@ those entities are independent and may be shared between conversations. There is
 no `characters/<id>/chats/…`: a character is not the root, and a world book
 filed under a character could not outlive it.
 
+### A domain id is not a path
+
+An id is a **logical** id. It is whatever an imported card, a world book or a
+migrated document happened to call the entity, so it can contain `/`, a
+backslash, `..`, or nothing at all. Splicing such a value straight into a key
+would let it choose the directory its document lands in — leave the generation
+it belongs to, overwrite a sibling, or land on the manifest itself. That is a
+storage bug with no error message: the store loads, and the wrong file is there.
+
+So every id goes through one mapping, `documents::path_segment`, on the way in
+and on the way out:
+
+- letters, digits, `.`, `_` and `-` survive; every other byte becomes `%` plus
+  two uppercase hex digits
+- a segment that would be exactly `.` or `..` is escaped whole
+- an empty id gets a marked name, and an id too long for a path component
+  (percent-encoding triples it) gets a name derived from a stable 64-bit hash
+
+Three properties are load-bearing:
+
+- **Round trip.** Both sides call the same function, so a load looks in exactly
+  the place a save wrote, with nothing to decode.
+- **No collisions.** The output alphabet is the safe set plus well-formed escapes,
+  and `%` is itself escaped, so a safe id can only be produced by itself. The
+  marked names use `~`, which that alphabet cannot contain.
+- **Stability for ordinary ids.** `session-1` maps to `session-1`. A store
+  written by an earlier build keeps resolving, so this rule needs no migration of
+  its own.
+
+The manifest stores the logical id, unchanged. Nothing above this layer knows the
+mapping exists — including a platform, which must not read these documents at
+all.
+
 The manifest is written **last**, and it names the generation it describes. That
 is the whole transaction: a save writes a complete new generation directory,
 then one atomic write switches the manifest over, then the previous generation

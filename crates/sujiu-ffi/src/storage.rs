@@ -94,6 +94,15 @@ impl FileStorage {
         &self.root
     }
 
+    /// Where a key resolves.
+    ///
+    /// A key is a **storage key**, not a path: it may name a document inside a
+    /// directory, and its separators are chosen by the caller. The caller is
+    /// `documents`, which maps every domain id through `documents::path_segment`
+    /// before building a key, so an id cannot pick its own directory. This
+    /// deliberately does **not** encode a key again — one mapping, applied once,
+    /// on both the read and the write side, is what lets `load` find what `save`
+    /// wrote. Encoding here as well would make the two disagree.
     fn document(&self, key: &str) -> PathBuf {
         self.root.join(key)
     }

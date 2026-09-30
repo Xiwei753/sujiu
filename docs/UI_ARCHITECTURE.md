@@ -389,16 +389,25 @@ contract method is optional and reports whether a directory was attached.
 The layout inside that directory is rooted at the conversation:
 
 ```text
-sujiu-library.json                       manifest: ids, endpoint, stored context
-conversations/<conversation-id>/conversation.json
-characters/<character-id>.json
-personas/<persona-id>.json
-worldbooks/<world-book-id>.json
-prompt_profiles/<profile-id>.json
+sujiu-library.json                       manifest: generation, ids, endpoint, stored context
+generations/gen-<n>/conversations/<conversation-id>/conversation.json
+generations/gen-<n>/characters/<character-id>.json
+generations/gen-<n>/personas/<persona-id>.json
+generations/gen-<n>/worldbooks/<world-book-id>.json
+generations/gen-<n>/prompt_profiles/<profile-id>.json
 ```
 
 A platform must not create, read or interpret these documents. It opens a data
 directory and it reads summaries over the bridge.
+
+A `<id>` above is a **logical** id and is never the path spelling. Every one of
+them is mapped through a single path-safe rule before it becomes a directory or
+a file name, because an id can arrive from an imported card, a world book or a
+migrated document and must not be able to choose where it is stored. So a
+platform that looks for `characters/some.card.json` on disk is reading a
+document the runtime never promised to write, and the ids it should be using are
+the ones in the manifest and over the bridge. See
+[ARCHITECTURE.md § A domain id is not a path](ARCHITECTURE.md).
 
 #### Surviving the background
 
