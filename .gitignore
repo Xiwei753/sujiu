@@ -26,5 +26,13 @@ apps/harmony/oh_modules/
 apps/harmony/oh-package-lock.json5
 apps/harmony/local.properties
 
+# Local, uncommitted test credentials.
+#
+# This holds real API keys used to exercise endpoint probing by hand. It must
+# never be committed: a key in the repository is a leaked key, and one in a
+# build output is a leaked key that ships. Test keys are free and disposable,
+# but "free" is not the same as "public".
+/local/
+
 # Rust
 /target/

@@ -23,6 +23,8 @@ use sujiu_core::{
     DEFAULT_APP_SYSTEM_PROMPT,
 };
 
+use sujiu_ai::diagnostics::{fields, DiagnosticEntry, DiagnosticKind, DiagnosticLog, LOG_KEY};
+
 use crate::events::{TurnEventKind, TurnEventReporter, TurnEventSink};
 use crate::storage::{AppStorage, FileStorage, MemoryStorage};
 
@@ -130,6 +132,17 @@ pub struct EndpointExploration {
     /// build is not going to use. So this is normally a single entry: it says
     /// what was established, not what might also be there.
     pub protocols: Vec<String>,
+    /// How the protocol probe came out, as a code.
+    ///
+    /// The user is told two different things here and they must not be told one
+    /// thing: a wrong key and an address that does not exist look identical if
+    /// both are reduced to "probe failed", and the fix for one is the other
+    /// field. `reason` is the sentence to read; this is the case to switch on.
+    ///
+    /// One of: `supported`, `no_usable_protocol`, `credentials_rejected`,
+    /// `no_such_endpoint`, `rate_limited`, `server_unavailable`,
+    /// `network_error`, `unreadable`, `undetermined`.
+    pub status: String,
     /// Why negotiation concluded what it did, when it is not a clean answer.
     pub reason: Option<String>,
     pub models: ModelDiscovery,
@@ -539,6 +552,14 @@ pub struct SujiuRuntime {
     /// answer costs one extra probe after a restart, and re-probing is always
     /// possible.
     capabilities: sujiu_ai::CapabilityCache,
+    /// What was asked of the endpoint and what came back.
+    ///
+    /// Shared rather than owned by any one call because the two activities that
+    /// write to it — discovery and a conversation — are the two a user needs to
+    /// tell apart, and they happen in different places. Persisted alongside the
+    /// snapshot, because the question this answers ("why did that not work?") is
+    /// usually asked after the process that failed is gone.
+    diagnostics: Arc<DiagnosticLog>,
     /// Where the snapshot lives. A platform attaches a directory; a runtime
     /// without one forgets everything when it exits.
     storage: Mutex<Arc<dyn AppStorage>>,
@@ -624,9 +645,19 @@ impl SujiuRuntime {
             }),
             cancel: Mutex::new(None),
             capabilities: sujiu_ai::CapabilityCache::new(),
+            diagnostics: Arc::new(DiagnosticLog::default()),
             storage: Mutex::new(storage),
             tokio,
         };
+
+        // A log is restored separately from the conversation document, and
+        // deliberately so: a diagnostic log this build cannot read is still
+        // worth keeping and must never be a reason to protect the store.
+        if let Some(saved) = runtime.storage.lock().unwrap().load(LOG_KEY) {
+            if let Ok(entries) = serde_json::from_str::<Vec<DiagnosticEntry>>(&saved) {
+                runtime.diagnostics.restore(entries);
+            }
+        }
 
         if restore {
             // A first launch writes its seed, so the next launch is a restore
@@ -753,6 +784,47 @@ impl SujiuRuntime {
         self.inner.lock().unwrap().endpoint.clone()
     }
 
+    /// The log a settings screen shows and a user pastes into a bug report.
+    ///
+    /// `limit` is the number of most recent entries; zero means everything.
+    pub fn diagnostics(&self, limit: usize) -> Vec<DiagnosticEntry> {
+        self.diagnostics.recent(limit)
+    }
+
+    /// Only the discovery half, which is what someone configuring an endpoint
+    /// wants to read. A turn's own log is noise while deciding a key.
+    pub fn discovery_diagnostics(&self, limit: usize) -> Vec<DiagnosticEntry> {
+        self.diagnostics
+            .recent(limit)
+            .into_iter()
+            .filter(|entry| entry.kind == DiagnosticKind::Discovery)
+            .collect()
+    }
+
+    /// The log as text, one entry per line.
+    pub fn diagnostics_text(&self) -> String {
+        self.diagnostics.render()
+    }
+
+    /// Empty the log, so a user can start a fresh investigation.
+    pub fn clear_diagnostics(&self) {
+        self.diagnostics.clear();
+        self.persist_diagnostics();
+    }
+
+    /// Write the log out.
+    ///
+    /// Separate from `persist` on purpose. A diagnostic line is not
+    /// conversation state: it must be saveable while the store is protected, and
+    /// it must never be the reason a document is rewritten. A user who lost
+    /// their sessions still needs the log that explains what the endpoint did.
+    fn persist_diagnostics(&self) {
+        let Ok(document) = serde_json::to_string(&self.diagnostics.entries()) else {
+            return;
+        };
+        self.storage.lock().unwrap().save(LOG_KEY, &document);
+    }
+
     /// The wire formats this build speaks, in the order it prefers them.
     ///
     /// This replaces the old "provider kinds" list. A frontend used to be
@@ -778,6 +850,30 @@ impl SujiuRuntime {
                 return Err(TurnError::NoProviderConfigured);
             }
         }
+
+        // What was configured, and which model, before the address is dropped
+        // from view. A log that only recorded requests would show what the
+        // endpoint did and not what the user had set up to ask it.
+        if let Some(config) = config.as_ref() {
+            self.diagnostics.record(
+                DiagnosticKind::Discovery,
+                "endpoint_configured",
+                "the endpoint was saved",
+                fields([
+                    ("endpoint", config.normalized_base_url()),
+                    (
+                        "model",
+                        config
+                            .selected_model
+                            .clone()
+                            .filter(|model| !model.trim().is_empty())
+                            .unwrap_or_else(|| "(not chosen yet)".to_string()),
+                    ),
+                ]),
+            );
+            self.persist_diagnostics();
+        }
+
         self.inner.lock().unwrap().endpoint = config;
         // A changed endpoint is a different question, so the old answer does
         // not carry over to it.
@@ -955,7 +1051,29 @@ impl SujiuRuntime {
             overrides: serde_json::Map::new(),
         };
 
-        self.explore_endpoint(&config, Some(api_key)).await
+        self.diagnostics.record(
+            DiagnosticKind::Discovery,
+            "discovery_request",
+            "the user asked what this endpoint can do",
+            fields([
+                ("endpoint", config.normalized_base_url()),
+                (
+                    "key",
+                    // Masked, and only so a user can tell whether the field they
+                    // typed is the one being used. A blank one is the single
+                    // most common reason a probe answers nothing.
+                    if api_key.trim().is_empty() {
+                        "(not given)".to_string()
+                    } else {
+                        sujiu_ai::mask_secret(api_key)
+                    },
+                ),
+            ]),
+        );
+
+        let exploration = self.explore_endpoint(&config, Some(api_key)).await;
+        self.persist_diagnostics();
+        exploration
     }
 
     /// Explore an endpoint that has **not** been saved yet.
@@ -976,8 +1094,25 @@ impl SujiuRuntime {
     ) -> EndpointExploration {
         let models = self.explore(config, api_key).await;
 
-        let negotiation =
-            sujiu_ai::negotiate_protocol(None, config, api_key.unwrap_or_default(), None).await;
+        // The listing runs first so the probe has a real model to retry with. A
+        // gateway that routes by model answers the placeholder with the same 404
+        // it uses for a missing path, which proves nothing about the protocol;
+        // asking again with a model this endpoint actually lists is the only way
+        // to make the route answer at all.
+        let listed: Vec<String> = models.models.iter().map(|model| model.id.clone()).collect();
+
+        let negotiation = sujiu_ai::negotiate_asking(
+            None,
+            config,
+            api_key.unwrap_or_default(),
+            // Deliberately not the turn cache: what a settings screen needs to
+            // see is what the endpoint says now, not what a turn was told
+            // earlier in this process.
+            None,
+            Some(self.diagnostics.as_ref()),
+            &listed,
+        )
+        .await;
 
         EndpointExploration {
             protocol: negotiation
@@ -989,14 +1124,20 @@ impl SujiuRuntime {
                 .iter()
                 .map(|protocol| protocol_label(*protocol))
                 .collect(),
+            status: negotiation.status().to_string(),
             reason: negotiation.failure_explanation(),
             models,
         }
     }
 
     async fn explore(&self, config: &EndpointConfig, api_key: Option<&str>) -> ModelDiscovery {
-        let (listing, discovered) =
-            sujiu_ai::list_models(None, config, api_key.unwrap_or_default()).await;
+        let (listing, discovered) = sujiu_ai::list_models(
+            None,
+            config,
+            api_key.unwrap_or_default(),
+            Some(self.diagnostics.as_ref()),
+        )
+        .await;
 
         let mut models = discovered
             .iter()
@@ -1243,6 +1384,16 @@ impl SujiuRuntime {
 
         match outcome.stop {
             AgentStop::Completed => {
+                self.diagnostics.record(
+                    DiagnosticKind::Chat,
+                    "turn_completed",
+                    "the turn answered",
+                    fields([
+                        ("steps", outcome.turn.steps.len().to_string()),
+                        ("tool_calls", count_tool_calls(&outcome).to_string()),
+                    ]),
+                );
+                self.persist_diagnostics();
                 sink.turn_completed(&outcome.final_text);
                 Ok(())
             }
@@ -1250,10 +1401,26 @@ impl SujiuRuntime {
             // is not an error the user needs to dismiss, and a turn that ran
             // out of rounds never will answer on its own.
             AgentStop::Cancelled => {
+                self.diagnostics.note(
+                    DiagnosticKind::Chat,
+                    "turn_cancelled",
+                    "the user stopped the turn",
+                );
+                self.persist_diagnostics();
                 sink.turn_cancelled();
                 Ok(())
             }
             AgentStop::MaxRounds(rounds) => {
+                self.diagnostics.record(
+                    DiagnosticKind::Chat,
+                    "turn_failed",
+                    "the model kept asking for tools until the round limit",
+                    fields([
+                        ("stage", "tool_rounds".to_string()),
+                        ("rounds", rounds.to_string()),
+                    ]),
+                );
+                self.persist_diagnostics();
                 sink.turn_failed(&format!("max_tool_rounds_exceeded: {rounds}"));
                 Ok(())
             }
@@ -1261,6 +1428,16 @@ impl SujiuRuntime {
             // turn continues from them. The reason is reported separately so
             // the UI can show what went wrong.
             AgentStop::Failed(error) => {
+                // The stage is what makes this line worth keeping: "the request
+                // failed" and "the fifth tool call failed" need completely
+                // different fixes, and the message alone rarely says which.
+                self.diagnostics.record(
+                    DiagnosticKind::Chat,
+                    "turn_failed",
+                    "the request itself failed",
+                    fields([("stage", "request".to_string()), ("detail", error.clone())]),
+                );
+                self.persist_diagnostics();
                 sink.turn_failed(&error);
                 Ok(())
             }
@@ -1364,13 +1541,30 @@ impl SujiuRuntime {
             &prepared.config,
             &prepared.api_key,
             Some(&self.capabilities),
+            Some(self.diagnostics.as_ref()),
+            // A turn already has a chosen model, so the probe names it and
+            // cannot be blinded by a gateway that routes on model. The retry
+            // exists for the settings screen, where nothing has been picked yet.
+            None,
         )
         .await;
 
         if negotiation.selected.is_none() {
-            return Err(TurnFailure(negotiation.reason.unwrap_or_else(|| {
-                "no usable protocol was found at that endpoint".to_string()
-            })));
+            let reason = negotiation
+                .reason
+                .unwrap_or_else(|| "no usable protocol was found at that endpoint".to_string());
+            self.diagnostics.record(
+                DiagnosticKind::Chat,
+                "turn_failed",
+                "the turn stopped before any request was sent",
+                fields([
+                    ("stage", "negotiate".to_string()),
+                    ("endpoint", prepared.config.normalized_base_url()),
+                    ("reason", reason.clone()),
+                ]),
+            );
+            self.persist_diagnostics();
+            return Err(TurnFailure(reason));
         }
 
         // The selected protocol is always one of the supported ones, so this
@@ -1383,9 +1577,49 @@ impl SujiuRuntime {
         let capabilities =
             apply_reasoning_override(negotiated, prepared.config.forced_reasoning_replay());
 
+        let message_count = prepared.messages.len();
         let config = prepared.config;
         let api_key = prepared.api_key;
         let identity = prepared.identity;
+
+        // The protocol the request will actually use, named before the request
+        // exists.
+        //
+        // This line is what makes the log worth keeping: "why did it answer the
+        // way it did" is very often "which wire format was it even speaking",
+        // and a log that only recorded the answer leaves that unanswerable.
+        self.diagnostics.record(
+            DiagnosticKind::Chat,
+            "chat_request",
+            format!("one turn over {}", protocol_label(capabilities.protocol)),
+            fields([
+                ("endpoint", config.normalized_base_url()),
+                ("protocol", protocol_label(capabilities.protocol)),
+                (
+                    "supported",
+                    negotiation
+                        .supported
+                        .iter()
+                        .map(|protocol| protocol_label(*protocol))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+                ("from_cache", negotiation.from_cache.to_string()),
+                (
+                    "model",
+                    config
+                        .selected_model
+                        .clone()
+                        .unwrap_or_else(|| "(not chosen yet)".to_string()),
+                ),
+                ("messages", message_count.to_string()),
+                (
+                    "replays_reasoning",
+                    capabilities.replays_assistant_reasoning.to_string(),
+                ),
+            ]),
+        );
+        self.persist_diagnostics();
 
         // The adapter is chosen by what the endpoint said it speaks, in the
         // order the protocol priority fixes. The user is not asked, and neither
@@ -1716,6 +1950,20 @@ fn next_turn_id(transcript: &Transcript) -> String {
         }
         number += 1;
     }
+}
+
+/// How many tool calls a finished turn made, across every step.
+///
+/// Counted rather than read from one place because a tool-using turn spreads
+/// them over several steps, and a log that reported only the last step's count
+/// would under-report exactly the turns worth investigating.
+fn count_tool_calls(outcome: &AgentOutcome) -> usize {
+    outcome
+        .turn
+        .steps
+        .iter()
+        .map(|step| step.tool_calls.len())
+        .sum()
 }
 
 /// The wire label of a tool call state.

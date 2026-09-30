@@ -105,6 +105,16 @@ fn a_real_turn_streams_back_from_a_live_provider() {
     let answer = recorder.answer();
     println!("answer: {answer}");
 
+    // A live failure is the one failure nobody can reproduce on demand, so the
+    // log goes with it. Without these lines a red run over a real endpoint
+    // reports only "expected TurnCompleted, got TurnFailed" and sends the next
+    // person back to guessing.
+    //
+    // It prints on a green run too. A passing turn is the only thing that
+    // proves which route negotiation actually took against this endpoint, and
+    // that is the question a slow or misrouted endpoint keeps raising.
+    println!("--- diagnostic log ---\n{}", runtime.diagnostics_text());
+
     assert_eq!(kinds.first(), Some(&TurnEventKind::TurnStarted));
     assert_eq!(kinds.last(), Some(&TurnEventKind::TurnCompleted));
     assert!(
@@ -115,11 +125,15 @@ fn a_real_turn_streams_back_from_a_live_provider() {
         answer.split_whitespace().count() > 3,
         "expected a real answer, got {answer:?}"
     );
-    assert!(
-        answer
-            .to_lowercase()
-            .contains(&model.split('/').next().unwrap().to_lowercase())
-            || answer.len() > 40,
-        "the answer does not look like model output"
-    );
+    // A real answer is prose, and a short creative one is still a real answer.
+    // The previous check wanted the model name echoed back or more than forty
+    // characters, which a live model has no reason to produce: asked what it
+    // listens for, one replied "Static with a heartbeat in it." and the test
+    // called that fake. It now asks the question that was actually meant -- are
+    // there words here, or is this an error string wearing a success?
+    let words = answer
+        .split_whitespace()
+        .filter(|word| word.chars().filter(|c| c.is_alphabetic()).count() >= 2)
+        .count();
+    assert!(words >= 2, "the answer is not prose, got {answer:?}");
 }

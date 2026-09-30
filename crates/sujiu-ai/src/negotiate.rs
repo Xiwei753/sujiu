@@ -25,11 +25,21 @@ use serde_json::{json, Value};
 
 use sujiu_core::{classify, EndpointConfig, ModelListing, ProbeFailure, ProbeVerdict, Protocol};
 
+use crate::diagnostics::{fields, truncate, DiagnosticKind, DiagnosticLog};
+
 /// What happened when we asked one protocol whether it was there.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ProtocolAttempt {
     pub protocol: Protocol,
     pub verdict: ProbeVerdict,
+    /// The status the endpoint answered with, when it answered at all.
+    ///
+    /// Kept because a bare verdict cannot be acted on: "unsupported" and "the
+    /// service was down" both stop a walk, and only the status says which
+    /// happened. A screen and a log line both need it.
+    pub status: Option<u16>,
+    /// A bounded excerpt of the body, redacted.
+    pub body_excerpt: String,
 }
 
 impl ProtocolAttempt {
@@ -39,6 +49,23 @@ impl ProtocolAttempt {
     /// could not answer, and answering it by downgrading would be a guess.
     pub fn may_fall_through(&self) -> bool {
         self.verdict.may_fall_through()
+    }
+
+    /// The verdict as one word a log or a screen can show.
+    fn verdict_label(&self) -> &'static str {
+        match &self.verdict {
+            ProbeVerdict::Supported => "supported",
+            ProbeVerdict::Unsupported => "unsupported",
+            ProbeVerdict::Ambiguous => "ambiguous",
+            ProbeVerdict::Inconclusive(failure) => match failure {
+                ProbeFailure::NoSuchEndpoint => "no_such_endpoint",
+                ProbeFailure::Credentials => "credentials_rejected",
+                ProbeFailure::RateLimited => "rate_limited",
+                ProbeFailure::Unavailable => "unreachable",
+                ProbeFailure::ModelUnavailable => "model_unavailable",
+                ProbeFailure::Malformed => "unreadable",
+            },
+        }
     }
 }
 
@@ -67,6 +94,28 @@ pub struct Negotiation {
     /// The classified reason the walk stopped, when it stopped on a question
     /// rather than on a "no such endpoint".
     pub failure: Option<ProbeFailure>,
+    /// Every protocol that was actually asked, in order, with what it said.
+    ///
+    /// The walk stops early, so this is normally short. It is kept because the
+    /// interesting case is the one that failed: knowing that Responses was
+    /// tried and answered 401 is the difference between retyping a key and
+    /// retyping an address.
+    #[serde(default)]
+    pub attempts: Vec<ProtocolAttempt>,
+    /// Whether at least one protocol answered ambiguously.
+    ///
+    /// An ambiguous answer — a bare `404 page not found`, which is what a
+    /// gateway that routes by model returns both for a path it never had and
+    /// for a model it cannot resolve — is allowed to fall through to the next
+    /// protocol, because it is the only answer that proves nothing either way.
+    /// But "proves nothing" has to survive the walk. Without this flag the
+    /// exhaustion path is indistinguishable from a clean sweep, and an endpoint
+    /// that merely declined to answer gets reported as speaking none of the
+    /// protocols this build knows — a false statement about a working endpoint,
+    /// and the kind a user will act on by going and reconfiguring something
+    /// that was never broken.
+    #[serde(default)]
+    pub ambiguous: bool,
 }
 
 impl Negotiation {
@@ -75,6 +124,9 @@ impl Negotiation {
         failure: Option<ProbeFailure>,
         attempts: &[ProtocolAttempt],
     ) -> Self {
+        let ambiguous = attempts
+            .iter()
+            .any(|attempt| attempt.verdict.is_ambiguous());
         Self {
             selected: None,
             supported: Vec::new(),
@@ -87,6 +139,8 @@ impl Negotiation {
             reason: Some(reason.into()),
             from_cache: false,
             failure,
+            attempts: attempts.to_vec(),
+            ambiguous,
         }
     }
 
@@ -98,6 +152,61 @@ impl Negotiation {
     /// doing nothing.
     pub fn failure_explanation(&self) -> Option<String> {
         self.reason.clone()
+    }
+
+    /// The one-word outcome a screen branches on.
+    ///
+    /// `reason` is a sentence for a person and `status` is a code for a
+    /// decision, and neither does the other's job. "We could not tell" and
+    /// "this endpoint speaks nothing we know" need different advice — one says
+    /// try again, the other says use a different endpoint — and when they
+    /// arrive as the same sentence every one of them is shown as an
+    /// undifferentiated probe failure, which is the outcome the user cannot act
+    /// on.
+    ///
+    /// One of: `supported`, `no_usable_protocol`, `credentials_rejected`,
+    /// `no_such_endpoint`, `rate_limited`, `server_unavailable`,
+    /// `network_error`, `unreadable`, `undetermined`.
+    pub fn status(&self) -> &'static str {
+        if self.selected.is_some() {
+            return "supported";
+        }
+        let failure = match self.failure.clone() {
+            Some(failure) => failure,
+            // Every protocol was asked and every one of them answered that it
+            // does not do this. That is a real negative, and the advice is to
+            // go somewhere else.
+            //
+            // Unless one of them only declined to answer. "This endpoint has
+            // none of our protocols" and "we could not find out" need different
+            // advice — one says use a different endpoint, the other says try
+            // again — and the second is what a gateway that answers every probe
+            // with a bare 404 looks like.
+            None if self.ambiguous => return "undetermined",
+            None => return "no_usable_protocol",
+        };
+        match failure {
+            ProbeFailure::Credentials => "credentials_rejected",
+            ProbeFailure::NoSuchEndpoint => "no_such_endpoint",
+            ProbeFailure::RateLimited => "rate_limited",
+            ProbeFailure::Malformed => "unreadable",
+            // The endpoint only rejected the placeholder model name, which says
+            // nothing about which protocols it speaks. Walking past it concludes
+            // nothing, and a screen must not turn that into a verdict.
+            ProbeFailure::ModelUnavailable => "undetermined",
+            ProbeFailure::Unavailable => {
+                // "The network is not there" and "the server is unwell" share a
+                // verdict and share no fix. An HTTP status is the evidence that
+                // separates them: a transport failure never got far enough to
+                // have one, and a server that answered at all is demonstrably
+                // reachable.
+                if self.attempts.iter().any(|attempt| attempt.status.is_some()) {
+                    "server_unavailable"
+                } else {
+                    "network_error"
+                }
+            }
+        }
     }
 }
 
@@ -118,12 +227,22 @@ pub const IMPLEMENTED_PROTOCOLS: &[Protocol] = &[
 /// Probes run in `preferred` order and stop at the first supported one, so the
 /// common case costs one request. `cache` is optional; without it every call
 /// re-probes, which is the right behaviour for a user who just fixed their
-/// network.
+/// network. `log` is optional and only ever adds lines: a caller with nowhere
+/// to write a diagnostic gets exactly the behaviour it had before.
+///
+/// `probe_model` names the model to put in the probe request. `None` means
+/// "use the chosen model if there is one, otherwise the placeholder", which is
+/// what a turn wants. A settings screen passes a model it discovered when the
+/// placeholder came back inconclusive, because a gateway that routes by model
+/// answers a placeholder with the same 404 it uses for a missing path — see
+/// [`negotiate_asking`] for the policy that decides when to do that.
 pub async fn negotiate(
     client: Option<&reqwest::Client>,
     config: &EndpointConfig,
     api_key: &str,
     cache: Option<&CapabilityCache>,
+    log: Option<&DiagnosticLog>,
+    probe_model: Option<&str>,
 ) -> Negotiation {
     let owned;
     let client = match client {
@@ -137,19 +256,95 @@ pub async fn negotiate(
     let key = config.capability_key();
 
     if let Some(cached) = cache.and_then(|cache| cache.get(&key)) {
+        if let Some(log) = log {
+            log.record(
+                DiagnosticKind::Discovery,
+                "probe_cached",
+                "the endpoint was already asked; the earlier answer is being reused",
+                fields([
+                    ("endpoint", config.normalized_base_url()),
+                    (
+                        "protocol",
+                        cached
+                            .selected
+                            .map(protocol_name)
+                            .unwrap_or_else(|| "none".to_string()),
+                    ),
+                ]),
+            );
+        }
         return cached;
     }
 
     let preferred = config.protocols();
-    let mut attempts = Vec::new();
+
+    if let Some(log) = log {
+        log.record(
+            DiagnosticKind::Discovery,
+            "probe_start",
+            "asking the endpoint what it speaks",
+            fields([
+                ("endpoint", config.normalized_base_url()),
+                (
+                    "protocols",
+                    preferred
+                        .iter()
+                        .map(|protocol| protocol_name(*protocol))
+                        .collect::<Vec<_>>()
+                        .join(","),
+                ),
+                (
+                    "model",
+                    config
+                        .selected_model
+                        .clone()
+                        .filter(|model| !model.trim().is_empty())
+                        .unwrap_or_else(|| "(not chosen yet)".to_string()),
+                ),
+            ]),
+        );
+    }
+
+    let mut attempts: Vec<ProtocolAttempt> = Vec::new();
     let mut ambiguous = false;
 
+    // One place decides which model a probe names, so the diagnostic log and the
+    // wire request can never disagree about it.
+    let model = probe_model
+        .map(str::to_string)
+        .or_else(|| {
+            config
+                .selected_model
+                .clone()
+                .filter(|model| !model.trim().is_empty())
+        })
+        .unwrap_or_else(|| PLACEHOLDER_MODEL.to_string());
+
     for protocol in &preferred {
-        let verdict = probe(client, config, api_key, *protocol).await;
-        attempts.push(ProtocolAttempt {
-            protocol: *protocol,
-            verdict: verdict.clone(),
-        });
+        let attempt = probe(client, config, api_key, *protocol, &model, log).await;
+
+        if let Some(log) = log {
+            log.record(
+                DiagnosticKind::Discovery,
+                "protocol_result",
+                format!("{}: {}", protocol_name(*protocol), attempt.verdict_label()),
+                fields([
+                    ("endpoint", config.normalized_base_url()),
+                    ("protocol", protocol_name(*protocol)),
+                    (
+                        "status",
+                        attempt
+                            .status
+                            .map(|status| status.to_string())
+                            .unwrap_or_else(|| "no answer".to_string()),
+                    ),
+                    ("body", attempt.body_excerpt.clone()),
+                ]),
+            );
+        }
+
+        let verdict = attempt.verdict.clone();
+        attempts.push(attempt);
 
         if verdict.is_supported() {
             let supported: Vec<Protocol> = attempts
@@ -177,10 +372,16 @@ pub async fn negotiate(
                 }),
                 from_cache: false,
                 failure: None,
+                attempts: attempts.clone(),
+                ambiguous: false,
             };
 
             if let Some(cache) = cache {
                 cache.put(key, negotiation.clone());
+            }
+
+            if let Some(log) = log {
+                record_probe_end(log, config, &negotiation, &attempts);
             }
 
             return negotiation;
@@ -205,6 +406,9 @@ pub async fn negotiate(
                 failure,
                 &attempts,
             );
+            if let Some(log) = log {
+                record_probe_end(log, config, &negotiation, &attempts);
+            }
             // Deliberately not cached: a bad key or a rate limit is not a fact
             // about the endpoint, and caching it would make a transient failure
             // permanent.
@@ -226,40 +430,150 @@ pub async fn negotiate(
         "the endpoint offered none of the protocols this build speaks"
     };
 
-    Negotiation::failed(reason, None, &attempts)
+    let negotiation = Negotiation::failed(reason, None, &attempts);
+    if let Some(log) = log {
+        record_probe_end(log, config, &negotiation, &attempts);
+    }
+    negotiation
 }
+
+/// Ask an endpoint what it speaks, retrying with a real model when the
+/// placeholder cannot get an answer anyone can read.
+///
+/// A probe has to name a model, and on a settings screen none has been chosen
+/// yet, so the first attempt names a placeholder. That works against an
+/// endpoint that ignores the model field. It is blind against a gateway that
+/// **routes by model**: that one answers "no such model" with the very same
+/// `404 page not found` it uses for a path it never had, so every protocol comes
+/// back ambiguous and the walk ends having learned nothing — about an endpoint
+/// that may well be working perfectly.
+///
+/// Reading that answer honestly is the fix, and it is not enough. Ambiguous
+/// really does mean "we could not tell", and the honest report of not being able
+/// tell is a screen that cannot help. So when the listing already succeeded and
+/// handed back a model the user could actually pick, the probe asks again with
+/// that model. Naming a model a gateway recognises is the only way to make the
+/// route answer at all.
+///
+/// The retry costs a real request and only happens on the path that learned
+/// nothing, so the common case — an endpoint that answers the placeholder, or
+/// one that answers with a real status — still costs exactly one probe per
+/// protocol. A listing whose models are all unservable will still come back
+/// inconclusive, which is the truthful answer rather than a guess.
+pub async fn negotiate_asking(
+    client: Option<&reqwest::Client>,
+    config: &EndpointConfig,
+    api_key: &str,
+    cache: Option<&CapabilityCache>,
+    log: Option<&DiagnosticLog>,
+    listed_models: &[String],
+) -> Negotiation {
+    let first = negotiate(client, config, api_key, cache, log, None).await;
+
+    // Only a walk that proved nothing earns a second question. A supported
+    // protocol, a rejected key and a rate limit are all answers.
+    if first.status() != "undetermined" || listed_models.is_empty() {
+        return first;
+    }
+
+    let model = listed_models[0].clone();
+
+    if let Some(log) = log {
+        log.record(
+            DiagnosticKind::Discovery,
+            "probe_retry",
+            "the placeholder could not get an answer anyone could read, so asking again with a model this endpoint actually lists",
+            fields([
+                ("endpoint", config.normalized_base_url()),
+                ("placeholder", PLACEHOLDER_MODEL.to_string()),
+                ("retry_model", model.clone()),
+            ]),
+        );
+    }
+
+    let second = negotiate(client, config, api_key, cache, log, Some(&model)).await;
+
+    if let Some(log) = log {
+        log.record(
+            DiagnosticKind::Discovery,
+            "probe_retry_end",
+            format!("the second attempt finished as {}", second.status()),
+            fields([
+                ("endpoint", config.normalized_base_url()),
+                ("model", model),
+                ("status", second.status().to_string()),
+            ]),
+        );
+    }
+
+    second
+}
+
+/// Record how a probe ended, whichever way it ended.
+///
+/// Every exit from the walk passes through here, including the ones that settle
+/// nothing. A probe that stopped on a rate limit and a probe that ran out of
+/// protocols are very different problems, and without this line a log ends
+/// mid-question.
+fn record_probe_end(
+    log: &DiagnosticLog,
+    config: &EndpointConfig,
+    negotiation: &Negotiation,
+    attempts: &[ProtocolAttempt],
+) {
+    log.record(
+        DiagnosticKind::Discovery,
+        "probe_end",
+        match negotiation.selected {
+            Some(protocol) => format!("{} is the protocol to use", protocol_name(protocol)),
+            None => "nothing usable was found at this endpoint".to_string(),
+        },
+        fields([
+            ("endpoint", config.normalized_base_url()),
+            (
+                "selected",
+                negotiation
+                    .selected
+                    .map(protocol_name)
+                    .unwrap_or_else(|| "none".to_string()),
+            ),
+            ("asked", attempts.len().to_string()),
+            (
+                "reason",
+                negotiation
+                    .reason
+                    .clone()
+                    .filter(|reason| !reason.is_empty())
+                    .unwrap_or_else(|| "no reason given".to_string()),
+            ),
+        ]),
+    );
+}
+
+/// The model name a probe sends when nothing has been chosen and nothing has
+/// been discovered to try instead.
+const PLACEHOLDER_MODEL: &str = "probe";
 
 /// Ask one protocol whether it is there.
 ///
 /// A real, minimal request is the only honest probe: an endpoint that answers
 /// it can also answer a conversation, and an endpoint that does not answer it
 /// at all cannot be used for anything. The reply is classified, never assumed.
+///
+/// `model` has already been resolved by the caller, so this function cannot
+/// disagree with the diagnostic line recorded above it about what was asked.
 async fn probe(
     client: &reqwest::Client,
     config: &EndpointConfig,
     api_key: &str,
     protocol: Protocol,
-) -> ProbeVerdict {
+    model: &str,
+    log: Option<&DiagnosticLog>,
+) -> ProtocolAttempt {
     let base = config.base_url.trim_end_matches('/');
     let url = format!("{base}{}", protocol.path());
 
-    // A probe asks what the endpoint speaks, so it must not depend on a model
-    // being chosen yet. Naming a model the user has not picked would answer a
-    // different question, and one that fails for reasons of that model alone.
-    //
-    // A probe has to name a model, and one has not always been chosen yet.
-    //
-    // The placeholder used to be a trap, because a gateway that routes by model
-    // answers "no such model" with the same 404 it uses for a missing path, so
-    // the probe would conclude that a working endpoint speaks none of our
-    // protocols. The fix belongs in how the *answer* is read rather than in
-    // what we ask: a 404 that does not name a route is inconclusive, and a
-    // placeholder that is answered at all still proves the protocol is served.
-    let model = config
-        .selected_model
-        .clone()
-        .filter(|model| !model.trim().is_empty())
-        .unwrap_or_else(|| "probe".to_string());
+    let model = model.to_string();
 
     let body = match protocol {
         Protocol::OpenAiChatCompletions => json!({
@@ -285,7 +599,26 @@ async fn probe(
         .json(&body);
 
     if api_key.is_empty() {
-        return ProbeVerdict::Inconclusive(sujiu_core::ProbeFailure::Credentials);
+        // Not a request, so there is no status and no body. Recorded anyway:
+        // "nothing was asked, because there was no key" is the single most
+        // useful thing to read when a probe appears to have done nothing.
+        if let Some(log) = log {
+            log.record(
+                DiagnosticKind::Discovery,
+                "probe_skipped",
+                "no key was supplied, so the endpoint was not asked",
+                fields([
+                    ("endpoint", config.normalized_base_url()),
+                    ("protocol", protocol_name(protocol)),
+                ]),
+            );
+        }
+        return ProtocolAttempt {
+            protocol,
+            verdict: ProbeVerdict::Inconclusive(sujiu_core::ProbeFailure::Credentials),
+            status: None,
+            body_excerpt: String::new(),
+        };
     }
 
     request = match protocol {
@@ -295,13 +628,47 @@ async fn probe(
         _ => request.bearer_auth(api_key),
     };
 
+    if let Some(log) = log {
+        log.record(
+            DiagnosticKind::Discovery,
+            "probe_request",
+            format!("POST {}{}", config.normalized_base_url(), protocol.path()),
+            fields([
+                ("endpoint", config.normalized_base_url()),
+                ("protocol", protocol_name(protocol)),
+                ("model", model),
+            ]),
+        );
+    }
+
     match request.send().await {
         Ok(response) => {
             let status = response.status().as_u16();
             let text = response.text().await.unwrap_or_default();
-            classify(Some(status), &text)
+            ProtocolAttempt {
+                protocol,
+                verdict: classify(Some(status), &text),
+                status: Some(status),
+                // The excerpt is bounded and goes through the log's own
+                // redaction, so a body that echoes the key cannot reach it.
+                body_excerpt: truncate(&text),
+            }
         }
-        Err(error) => ProbeVerdict::Inconclusive(transport_failure(&error)),
+        Err(error) => ProtocolAttempt {
+            protocol,
+            verdict: ProbeVerdict::Inconclusive(transport_failure(&error)),
+            status: None,
+            body_excerpt: truncate(&error.to_string()),
+        },
+    }
+}
+
+/// The wire name of a protocol, for a log line and a screen.
+fn protocol_name(protocol: Protocol) -> String {
+    match protocol {
+        Protocol::OpenAiResponses => "openai_responses".to_string(),
+        Protocol::OpenAiChatCompletions => "openai_chat_completions".to_string(),
+        Protocol::AnthropicMessages => "anthropic_messages".to_string(),
     }
 }
 
@@ -383,6 +750,20 @@ impl ListingStrategy {
     fn may_fall_through(self, failure: ModelListing) -> bool {
         matches!(failure, ModelListing::Unavailable)
     }
+
+    /// The strategy's own name, so a log line says which question was asked.
+    ///
+    /// A chain of three strategies where only the strategy names are recorded
+    /// leaves the reader unable to tell "asked `/models`" from "asked
+    /// `/v1/models`", and those are exactly the two that look identical from the
+    /// outside.
+    fn name(self) -> &'static str {
+        match self {
+            ListingStrategy::OpenAiCompatible => "openai_compatible",
+            ListingStrategy::AnthropicCompatible => "anthropic_compatible",
+            ListingStrategy::HostRootVersioned => "host_root_v1",
+        }
+    }
 }
 
 /// The models in a listing body, in whichever shape the endpoint wrote them.
@@ -437,6 +818,7 @@ pub async fn list_models(
     client: Option<&reqwest::Client>,
     config: &EndpointConfig,
     api_key: &str,
+    log: Option<&DiagnosticLog>,
 ) -> (ModelListing, Vec<String>) {
     let owned;
     let client = match client {
@@ -448,6 +830,14 @@ pub async fn list_models(
     };
 
     if api_key.is_empty() {
+        if let Some(log) = log {
+            log.record(
+                DiagnosticKind::Discovery,
+                "model_listing",
+                "no key was supplied, so no model list was asked for",
+                fields([("endpoint", config.normalized_base_url())]),
+            );
+        }
         return (ModelListing::PermissionDenied, Vec::new());
     }
 
@@ -457,6 +847,19 @@ pub async fn list_models(
         let Some(url) = strategy.url(&config.base_url) else {
             continue;
         };
+
+        if let Some(log) = log {
+            log.record(
+                DiagnosticKind::Discovery,
+                "model_listing_request",
+                format!("GET {url} ({})", strategy.name()),
+                fields([
+                    ("endpoint", config.normalized_base_url()),
+                    ("strategy", strategy.name().to_string()),
+                    ("url", url.clone()),
+                ]),
+            );
+        }
 
         let mut request = client.get(&url).header("content-type", "application/json");
 
@@ -472,6 +875,7 @@ pub async fn list_models(
             Ok(response) => response,
             Err(error) => {
                 last = listing_failure(&error);
+                record_listing_outcome(log, strategy, &url, None, &error.to_string(), last);
                 if !strategy.may_fall_through(last) {
                     return (last, Vec::new());
                 }
@@ -484,6 +888,7 @@ pub async fn list_models(
 
         if !(200..300).contains(&status) {
             last = listing_status_failure(status);
+            record_listing_outcome(log, strategy, &url, Some(status), &text, last);
             if !strategy.may_fall_through(last) {
                 return (last, Vec::new());
             }
@@ -491,16 +896,115 @@ pub async fn list_models(
         }
 
         let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            record_listing_outcome(
+                log,
+                strategy,
+                &url,
+                Some(status),
+                &text,
+                ModelListing::Unreachable,
+            );
             return (ModelListing::Unreachable, Vec::new());
         };
 
         // A 200 with nothing in it is a listing route that does not list
         // anything, which is still "no models here" rather than "no route", and
         // the other strategies would only find the same empty answer.
-        return (ModelListing::Available, parse_model_list(&value));
+        let models = parse_model_list(&value);
+        record_listing_outcome(
+            log,
+            strategy,
+            &url,
+            Some(status),
+            &text,
+            ModelListing::Available,
+        );
+
+        if let Some(log) = log {
+            log.record(
+                DiagnosticKind::Discovery,
+                "model_listing_result",
+                format!("{} models were listed", models.len()),
+                fields([
+                    ("endpoint", config.normalized_base_url()),
+                    ("strategy", strategy.name().to_string()),
+                    ("count", models.len().to_string()),
+                    // The count is the headline, but the names are what a user
+                    // needs to type one, and a listing is not a secret.
+                    (
+                        "models",
+                        models
+                            .iter()
+                            .take(20)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                ]),
+            );
+        }
+
+        return (ModelListing::Available, models);
+    }
+
+    if let Some(log) = log {
+        log.record(
+            DiagnosticKind::Discovery,
+            "model_listing_result",
+            "no listing route answered, so a model has to be typed in",
+            fields([
+                ("endpoint", config.normalized_base_url()),
+                ("outcome", listing_name(last)),
+            ]),
+        );
     }
 
     (last, Vec::new())
+}
+
+/// Record how one listing strategy answered.
+fn record_listing_outcome(
+    log: Option<&DiagnosticLog>,
+    strategy: ListingStrategy,
+    url: &str,
+    status: Option<u16>,
+    body: &str,
+    outcome: ModelListing,
+) {
+    let Some(log) = log else {
+        return;
+    };
+
+    log.record(
+        DiagnosticKind::Discovery,
+        "model_listing_result",
+        format!("{url}: {outcome:?}"),
+        fields([
+            ("strategy", strategy.name().to_string()),
+            ("url", url.to_string()),
+            (
+                "status",
+                status
+                    .map(|status| status.to_string())
+                    .unwrap_or_else(|| "no answer".to_string()),
+            ),
+            ("outcome", listing_name(outcome)),
+            ("body", truncate(body)),
+        ]),
+    );
+}
+
+/// The listing outcome as one word a log or a screen can show.
+fn listing_name(listing: ModelListing) -> String {
+    match listing {
+        ModelListing::Unknown => "unknown",
+        ModelListing::Available => "available",
+        ModelListing::Unavailable => "unavailable",
+        ModelListing::PermissionDenied => "permission_denied",
+        ModelListing::RateLimited => "rate_limited",
+        ModelListing::Unreachable => "unreachable",
+    }
+    .to_string()
 }
 
 /// Classify a transport failure so a dropped connection is not read as a
@@ -600,7 +1104,7 @@ mod tests {
         let cache = CapabilityCache::new();
 
         // No server is running, so every attempt is inconclusive.
-        let negotiation = negotiate(None, &config("m"), "sk-test", Some(&cache)).await;
+        let negotiation = negotiate(None, &config("m"), "sk-test", Some(&cache), None, None).await;
 
         assert!(negotiation.selected.is_none());
         assert!(!negotiation.undetermined.is_empty());
@@ -609,7 +1113,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_probe_without_a_credential_is_a_credential_problem() {
-        let negotiation = negotiate(None, &config("m"), "", Some(&CapabilityCache::new())).await;
+        let negotiation = negotiate(
+            None,
+            &config("m"),
+            "",
+            Some(&CapabilityCache::new()),
+            None,
+            None,
+        )
+        .await;
 
         assert!(negotiation.selected.is_none());
         assert_eq!(negotiation.failure, Some(ProbeFailure::Credentials));
@@ -620,10 +1132,211 @@ mod tests {
 
     #[tokio::test]
     async fn listing_a_model_never_forbids_typing_one() {
-        let (listing, models) = list_models(None, &config("m"), "sk-test").await;
+        let (listing, models) = list_models(None, &config("m"), "sk-test", None).await;
 
         assert!(models.is_empty());
         assert!(listing.allows_manual_entry());
+    }
+
+    /// The status is what a settings screen switches on, so the two cases a user
+    /// acts on differently must not land on the same word. A missing key and a
+    /// wrong address both read as "probe failed" when they are one string, and
+    /// the fix for one is the other field.
+    #[test]
+    fn every_way_a_probe_fails_gets_its_own_status() {
+        let attempt = |verdict: ProbeVerdict, status: Option<u16>| ProtocolAttempt {
+            protocol: Protocol::OpenAiResponses,
+            verdict,
+            status,
+            body_excerpt: String::new(),
+        };
+
+        let statuses: Vec<&str> = [
+            ProbeFailure::Credentials,
+            ProbeFailure::NoSuchEndpoint,
+            ProbeFailure::RateLimited,
+            ProbeFailure::Malformed,
+            ProbeFailure::ModelUnavailable,
+        ]
+        .into_iter()
+        .map(|failure| {
+            let verdict = ProbeVerdict::Inconclusive(failure.clone());
+            Negotiation::failed("why", Some(failure), &[attempt(verdict, Some(400))]).status()
+        })
+        .collect();
+        assert_eq!(
+            statuses,
+            [
+                "credentials_rejected",
+                "no_such_endpoint",
+                "rate_limited",
+                "unreadable",
+                "undetermined"
+            ]
+        );
+
+        // Unreachable is one verdict for two different faults. A status means
+        // the server answered and is unwell; no status at all means the request
+        // never landed. Telling those apart by guesswork sends the user to fix
+        // their key when their router is off.
+        let sick = Negotiation::failed(
+            "why",
+            Some(ProbeFailure::Unavailable),
+            &[attempt(
+                ProbeVerdict::Inconclusive(ProbeFailure::Unavailable),
+                Some(503),
+            )],
+        );
+        let offline = Negotiation::failed(
+            "why",
+            Some(ProbeFailure::Unavailable),
+            &[attempt(
+                ProbeVerdict::Inconclusive(ProbeFailure::Unavailable),
+                None,
+            )],
+        );
+        assert_eq!(sick.status(), "server_unavailable");
+        assert_eq!(offline.status(), "network_error");
+
+        // Every protocol said no. That is a real answer, not a failure to find
+        // one out, and it is the only outcome that means "go elsewhere".
+        let nowhere = Negotiation::failed("why", None, &[]);
+        assert_eq!(nowhere.status(), "no_usable_protocol");
+
+        // A supported protocol outranks every failure code, because a walk that
+        // found a working path is not a failure to report one.
+        let found = Negotiation {
+            selected: Some(Protocol::OpenAiResponses),
+            supported: vec![Protocol::OpenAiResponses],
+            ..Negotiation::failed("why", Some(ProbeFailure::Credentials), &[])
+        };
+        assert_eq!(found.status(), "supported");
+    }
+
+    /// The one that needed a live endpoint to find.
+    ///
+    /// A real Chat-Completions-only gateway answers every probe with a bare
+    /// `404 page not found` — the same body it uses for a route it never had and
+    /// for a model it cannot resolve. Every attempt is therefore ambiguous,
+    /// nothing is selected, and the walk ends having concluded nothing at all.
+    ///
+    /// Reporting that as `no_usable_protocol` tells the user their working
+    /// endpoint supports nothing this build speaks, and sends them off to
+    /// reconfigure it. The endpoint listed eighty-one models and answered a
+    /// chat request perfectly well.
+    #[test]
+    fn an_endpoint_that_only_declined_to_answer_is_not_reported_as_speaking_nothing() {
+        let attempt = |protocol| ProtocolAttempt {
+            protocol,
+            verdict: ProbeVerdict::Ambiguous,
+            status: Some(404),
+            body_excerpt: "404 page not found".to_string(),
+        };
+
+        let evasive = Negotiation::failed(
+            "we could not tell what it speaks",
+            None,
+            &[
+                attempt(Protocol::OpenAiResponses),
+                attempt(Protocol::OpenAiChatCompletions),
+                attempt(Protocol::AnthropicMessages),
+            ],
+        );
+
+        assert_eq!(evasive.status(), "undetermined");
+
+        // The distinction is not cosmetic: it is the difference between "use a
+        // different endpoint" and "try again", and only the second one is true.
+        let mut definite = Negotiation::failed(
+            "the endpoint offered none of the protocols this build speaks",
+            None,
+            &[
+                attempt(Protocol::OpenAiResponses),
+                attempt(Protocol::OpenAiChatCompletions),
+            ],
+        );
+        definite.ambiguous = false;
+        assert_eq!(definite.status(), "no_usable_protocol");
+    }
+
+    /// A probe has to leave a record, or the question "which protocol was
+    /// tried and what did it say" has no answer after the fact.
+    #[tokio::test]
+    async fn a_probe_records_every_protocol_it_asked_about() {
+        let log = DiagnosticLog::new(50);
+        // An address that cannot resolve, so every protocol is attempted and
+        // every attempt is a real one rather than a cached answer.
+        let mut unreachable = config("m");
+        unreachable.base_url = "https://sujiu-does-not-resolve.invalid/v1".into();
+        unreachable.selected_model = None;
+
+        let negotiation = negotiate(
+            None,
+            &unreachable,
+            "sk-live-1234567890abcdef",
+            None,
+            Some(&log),
+            None,
+        )
+        .await;
+
+        let entries = log.entries();
+        let stages: Vec<&str> = entries.iter().map(|entry| entry.stage.as_str()).collect();
+        assert!(stages.contains(&"probe_start"));
+        assert!(stages.contains(&"probe_request"));
+        assert!(stages.contains(&"protocol_result"));
+        assert!(stages.contains(&"probe_end"));
+
+        // Every protocol the endpoint is asked about appears by name, and the
+        // probe ran before any model was chosen.
+        for protocol in config("m").protocols() {
+            assert!(
+                log.render().contains(&protocol_name(protocol)),
+                "{} was never recorded",
+                protocol_name(protocol)
+            );
+        }
+        assert!(log.render().contains("(not chosen yet)"));
+
+        // The walk is short-circuited on the first inconclusive answer, so the
+        // attempts are reported with what the endpoint said.
+        assert!(!negotiation.attempts.is_empty());
+        assert!(negotiation
+            .attempts
+            .iter()
+            .all(|attempt| attempt.status.is_none() || attempt.status.is_some()));
+
+        assert!(
+            !log.render().contains("sk-live-1234567890abcdef"),
+            "a probe log must not carry the key it used"
+        );
+    }
+
+    /// The whole point of the log: after a failed configuration, a reader can
+    /// tell a rejected key from an address that does not resolve.
+    #[tokio::test]
+    async fn a_listing_records_the_route_it_asked_and_what_came_back() {
+        let log = DiagnosticLog::new(50);
+        let mut unreachable = config("m");
+        unreachable.base_url = "https://sujiu-does-not-resolve.invalid/v1".into();
+
+        let (listing, models) =
+            list_models(None, &unreachable, "sk-live-1234567890abcdef", Some(&log)).await;
+
+        assert!(models.is_empty());
+        assert!(matches!(listing, ModelListing::Unreachable));
+
+        let rendered = log.render();
+        assert!(rendered.contains("model_listing_request"));
+        assert!(
+            rendered.contains("/models"),
+            "the route asked is not recorded"
+        );
+        assert!(
+            rendered.contains("unreachable"),
+            "the outcome is not recorded"
+        );
+        assert!(!rendered.contains("sk-live-1234567890abcdef"));
     }
 
     #[test]
@@ -709,10 +1422,14 @@ mod tests {
         let rate_limited = ProtocolAttempt {
             protocol: Protocol::OpenAiResponses,
             verdict: ProbeVerdict::Inconclusive(ProbeFailure::RateLimited),
+            status: Some(429),
+            body_excerpt: String::new(),
         };
         let no_such_endpoint = ProtocolAttempt {
             protocol: Protocol::OpenAiResponses,
             verdict: ProbeVerdict::Unsupported,
+            status: Some(404),
+            body_excerpt: "unknown endpoint".to_string(),
         };
 
         assert!(!rate_limited.may_fall_through());
@@ -734,6 +1451,8 @@ mod tests {
                 reason: None,
                 from_cache: false,
                 failure: None,
+                attempts: Vec::new(),
+                ambiguous: false,
             },
         );
 

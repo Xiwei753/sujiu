@@ -254,6 +254,60 @@ pub unsafe extern "C" fn sujiu_list_models_json(runtime: *mut SujiuRuntime) -> *
     into_c_string(ok_json(&runtime.models()))
 }
 
+/// The diagnostic log, oldest entry first.
+///
+/// `limit` is an optional decimal line count; 0 or an absent value means "as
+/// much as the log still holds". The entries are already redacted on the Rust
+/// side, so a caller may show them as they are.
+#[no_mangle]
+pub unsafe extern "C" fn sujiu_diagnostics_json(
+    runtime: *mut SujiuRuntime,
+    limit: *const c_char,
+) -> *mut c_char {
+    let Some(runtime) = (unsafe { runtime.as_ref() }) else {
+        return null_envelope("runtime pointer is null");
+    };
+
+    into_c_string(ok_json(&runtime.diagnostics(diagnostic_limit(limit))))
+}
+
+/// Only the capability/model discovery half of the log, so a reader can debug
+/// configuration without the conversation noise mixed in.
+#[no_mangle]
+pub unsafe extern "C" fn sujiu_discovery_diagnostics_json(
+    runtime: *mut SujiuRuntime,
+    limit: *const c_char,
+) -> *mut c_char {
+    let Some(runtime) = (unsafe { runtime.as_ref() }) else {
+        return null_envelope("runtime pointer is null");
+    };
+
+    into_c_string(ok_json(
+        &runtime.discovery_diagnostics(diagnostic_limit(limit)),
+    ))
+}
+
+/// The log as plain text, one already-rendered line per entry, for the "copy the
+/// log to report a problem" case.
+#[no_mangle]
+pub unsafe extern "C" fn sujiu_diagnostics_text_json(runtime: *mut SujiuRuntime) -> *mut c_char {
+    let Some(runtime) = (unsafe { runtime.as_ref() }) else {
+        return null_envelope("runtime pointer is null");
+    };
+
+    into_c_string(ok_json(&runtime.diagnostics_text()))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn sujiu_diagnostics_clear(runtime: *mut SujiuRuntime) -> *mut c_char {
+    let Some(runtime) = (unsafe { runtime.as_ref() }) else {
+        return null_envelope("runtime pointer is null");
+    };
+
+    runtime.clear_diagnostics();
+    into_c_string(ok_json(&serde_json::Value::Null))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn sujiu_list_context_sources_json(
     runtime: *mut SujiuRuntime,
@@ -489,6 +543,18 @@ unsafe fn optional_str(value: *const c_char) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// A line count for the diagnostic readers. A caller that sends nothing, or
+/// something that is not a number, is asking for the whole log — refusing the
+/// request over a malformed limit would help nobody.
+fn diagnostic_limit(limit: *const c_char) -> usize {
+    let raw = match unsafe { optional_str(limit) } {
+        Some(value) => value,
+        None => return 0,
+    };
+
+    raw.trim().parse::<usize>().unwrap_or(0)
+}
+
 fn ok_json<T: Serialize>(data: &T) -> String {
     serde_json::to_string(&ApiEnvelope::ok(data)).expect("ok envelope is serializable")
 }
@@ -517,9 +583,30 @@ fn into_c_string(value: String) -> *mut c_char {
 mod tests {
     use super::*;
     use crate::events::TurnEventKind;
+    use sujiu_ai::DiagnosticKind;
 
     fn runtime() -> SujiuRuntime {
         SujiuRuntime::new(seed::seed()).expect("runtime")
+    }
+
+    /// Calls one of the extern entry points and takes the string back, so a test
+    /// exercises the same path a platform would rather than a Rust-side shortcut.
+    ///
+    /// The caller passes a closure because the entry points take a different
+    /// argument list each; what they all have in common is the handle and the
+    /// returned string, and that is what this reads.
+    unsafe fn call_json(
+        call: impl FnOnce(*mut SujiuRuntime) -> *mut c_char,
+        rt: &mut SujiuRuntime,
+    ) -> serde_json::Value {
+        let raw = call(rt as *mut SujiuRuntime);
+        assert!(!raw.is_null(), "the entry point returned nothing");
+        let value = unsafe { CStr::from_ptr(raw) }
+            .to_str()
+            .expect("utf-8")
+            .to_owned();
+        unsafe { sujiu_string_free(raw) };
+        serde_json::from_str(&value).expect("a JSON envelope")
     }
 
     #[test]
@@ -1191,5 +1278,186 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The whole point of the log is that a user can read it and act on it, so it
+    /// has to arrive across the boundary intact, and it has to arrive without the
+    /// key that was just used.
+    #[test]
+    fn a_discovery_run_leaves_a_readable_log_and_no_credential_in_it() {
+        let runtime = runtime();
+        let key = "sk-sujiu-test-1234567890abcdef";
+
+        runtime.tokio.block_on(runtime.discover_endpoint(
+            "https://sujiu-does-not-resolve.invalid/v1".into(),
+            key.into(),
+        ));
+
+        let raw = runtime.diagnostics_text();
+        assert!(
+            !raw.is_empty(),
+            "a probe that ran and produced nothing readable is no help at all"
+        );
+        assert!(
+            !raw.contains(key),
+            "the key was written to the log in full: {raw}"
+        );
+        assert!(
+            raw.contains("sujiu-does-not-resolve.invalid"),
+            "the log has to name the endpoint that was asked about: {raw}"
+        );
+        assert!(
+            raw.contains("discovery"),
+            "the log has to say which investigation a line belongs to: {raw}"
+        );
+    }
+
+    /// Discovery and conversation are two different investigations. A reader who
+    /// asked for one and got the other cannot tell which lines are relevant.
+    #[test]
+    fn the_two_halves_of_the_log_can_be_read_apart() {
+        let runtime = runtime();
+        runtime.set_endpoint(Some(endpoint())).expect("provider");
+
+        let mut reporter = CollectingReporter::default();
+        runtime.tokio.block_on(runtime.send_turn(
+            SendTurnRequest {
+                session_id: "session-1".into(),
+                user_text: "hello".into(),
+                provider: None,
+                api_key: Some("sk-test-key-1234567890abcdef".into()),
+            },
+            &mut reporter,
+        ));
+
+        let everything = runtime.diagnostics(0);
+        let discovery = runtime.discovery_diagnostics(0);
+
+        assert!(
+            everything.len() > discovery.len(),
+            "a turn that negotiated the endpoint produced both kinds of line, and only {} of \
+             them are discovery: {everything:#?}",
+            discovery.len()
+        );
+        assert!(
+            discovery
+                .iter()
+                .all(|entry| entry.kind == DiagnosticKind::Discovery),
+            "a filtered read must not leak the other half in"
+        );
+        assert!(
+            everything
+                .iter()
+                .any(|entry| entry.kind == DiagnosticKind::Chat),
+            "the turn's own lines are in the unfiltered read"
+        );
+    }
+
+    /// A log that never ends is a log nobody reads. The tail is what is wanted;
+    /// the rest is a copy the runtime does not need to keep.
+    #[test]
+    fn a_reader_asking_for_the_last_few_lines_gets_the_last_few_lines() {
+        let runtime = runtime();
+        for index in 0..10 {
+            runtime
+                .set_endpoint(Some(EndpointConfig {
+                    base_url: format!("https://gateway-{index}.invalid/v1"),
+                    ..endpoint()
+                }))
+                .expect("an address is still an endpoint");
+        }
+
+        let tail = runtime.diagnostics(3);
+        assert_eq!(tail.len(), 3, "a limit is a cap, never a promise of more");
+        assert_eq!(runtime.diagnostics(0).len(), 10, "asking for everything");
+        assert!(
+            tail.iter()
+                .all(|entry| entry.stage == "endpoint_configured"),
+            "the last three lines are the last three things that happened: {tail:#?}"
+        );
+    }
+
+    /// A user who has already pasted their endpoint details into a bug report
+    /// should be able to clear the log without clearing their configuration.
+    #[test]
+    fn clearing_the_log_keeps_the_endpoint() {
+        let runtime = runtime();
+        runtime.set_endpoint(Some(endpoint())).expect("provider");
+        assert!(!runtime.diagnostics(0).is_empty());
+
+        runtime.clear_diagnostics();
+
+        assert!(runtime.diagnostics(0).is_empty());
+        assert_eq!(
+            runtime.models().len(),
+            1,
+            "the configuration is not part of the log"
+        );
+    }
+
+    /// The entries are what a platform renders, so their shape is a contract
+    /// rather than a detail: a reader needs to know when a line happened, which
+    /// investigation it belongs to, what stage of that investigation it was,
+    /// the sentence, and the structured detail underneath it.
+    #[test]
+    fn an_entry_carries_the_facts_a_reader_needs() {
+        let mut runtime = runtime();
+        runtime
+            .set_endpoint(Some(EndpointConfig {
+                base_url: "https://example.invalid/v1".into(),
+                ..endpoint()
+            }))
+            .expect("provider");
+
+        let envelope = unsafe {
+            call_json(
+                |rt| sujiu_diagnostics_json(rt, std::ptr::null()),
+                &mut runtime,
+            )
+        };
+        let entries = envelope
+            .get("data")
+            .and_then(|data| data.as_array())
+            .expect("an array of entries");
+
+        let entry = entries.last().expect("the entry that was just recorded");
+        assert_eq!(
+            entry.get("kind").and_then(|k| k.as_str()),
+            Some("discovery")
+        );
+        assert_eq!(
+            entry.get("stage").and_then(|k| k.as_str()),
+            Some("endpoint_configured")
+        );
+        assert!(entry.get("message").and_then(|k| k.as_str()).is_some());
+        assert!(
+            entry.get("atMs").and_then(|k| k.as_i64()).is_some(),
+            "an entry has to be orderable"
+        );
+
+        let fields = entry.get("fields").expect("the structured detail");
+        assert_eq!(
+            fields.get("endpoint").and_then(|v| v.as_str()),
+            Some("https://example.invalid/v1")
+        );
+    }
+
+    /// Platform code is not the only caller. A null handle must produce a
+    /// reportable envelope instead of a crash inside somebody else's process.
+    #[test]
+    fn the_diagnostic_entry_points_refuse_a_null_runtime() {
+        for raw in [
+            unsafe { sujiu_diagnostics_json(std::ptr::null_mut(), std::ptr::null()) },
+            unsafe { sujiu_discovery_diagnostics_json(std::ptr::null_mut(), std::ptr::null()) },
+            unsafe { sujiu_diagnostics_text_json(std::ptr::null_mut()) },
+            unsafe { sujiu_diagnostics_clear(std::ptr::null_mut()) },
+        ] {
+            let value = unsafe { CStr::from_ptr(raw) }
+                .to_str()
+                .expect("utf-8")
+                .to_owned();
+            assert!(value.contains("\"ok\":false"), "got {value}");
+            unsafe { sujiu_string_free(raw) };
+        }
     }
 }

@@ -47,6 +47,7 @@ It owns:
 - protocol negotiation against the endpoint
 - provider HTTP adapters
 - model discovery for the settings screen
+- the diagnostic log
 - built-in retrieval tools such as world-book search
 
 The runtime accepts zero, one or multiple tool calls from a model turn, executes client-owned tools in Rust, appends tool results to the transcript and asks the provider to continue until a final assistant response is produced or the configured round limit is reached.
@@ -390,6 +391,74 @@ Every provider call goes through one client with a connect timeout and a read ti
 
 The read timeout measures the **gap between reads**, not the length of the response, so a long answer that keeps streaming is never cut off. Only silence counts, and silence is bounded. When it fires, the failure is a transport failure, which is the shape the rest of the runtime already knows how to report: not a protocol the endpoint lacks, and not a completed turn.
 
+**Silence and slowness send the same bytes.** The read timeout is 120 seconds,
+and that is a measured compromise rather than a round number. A slow endpoint
+sends *exactly* the same bytes as a socket that died — nothing at all — and no
+client-side setting can tell them apart. Measured against NVIDIA's free tier in
+`local/endpoints.json`, on one account and one base URL:
+
+| model | to first byte |
+| --- | --- |
+| `/models` listing | ~1s |
+| `z-ai/glm-5.3-flash` | **6.3s** |
+| `deepseek-ai/deepseek-v4.1-flash` | **62–81s**, every time |
+
+At 60 seconds the second model was cut off having learned nothing. At 120 the
+same turn completes, streaming `ThinkingDelta` and `TextDelta` before
+`TurnCompleted`.
+
+The spread is the real lesson, and it is worth stating plainly: **latency here
+is a property of the model, not of the endpoint.** One free tier serves a
+6-second model and an 80-second model from the same address with the same key, so
+"this endpoint is slow" is not a fact any client can establish. That is exactly
+why the timeout cannot be a judgement about one endpoint, and why it is global.
+
+Raising it is not free, and the cost was accepted deliberately. It buys slow
+models at the price of a dead endpoint taking twice as long to admit it, which is
+the failure this timeout exists to prevent. 120 seconds is where the slow model
+in that table fits and the cost is still tolerable; past that, more of the second
+failure is bought back with more of the first, and where that stops being worth
+it is a judgement call rather than something a measurement settles. The timeout
+was also left **global** rather than per-endpoint, so a slow service is fixed in
+one place instead of turning every configuration screen into a tuning panel.
+
+The failure is reported as what it is either way — a transport failure with a log
+line naming the stage — rather than being silently tolerated.
+
+### A probe without a model is blind to a gateway that routes on one
+
+A request has to name a model, and on a settings screen no model has been chosen
+yet, so the probe sends a placeholder. Against an endpoint that ignores the model
+field that works. Against a gateway that dispatches on it, it is blind: the
+answer for "no such model" is the same `404 page not found` the same gateway
+gives for a path it never had, so the walk comes back ambiguous and the runtime
+can honestly say only that it could not tell.
+
+Honest is not the same as useful. A screen that reports "we could not tell" about
+an endpoint that works is a screen that cannot help anybody, so when the model
+listing — which runs first and independently — already returned a model the user
+could have picked, **the probe asks again with that model**. It is one extra
+request, spent only on the path that learned nothing: `negotiate_asking` retries
+exactly when the first walk came back `undetermined` *and* the listing produced
+something to ask with. The second attempt logs `probe_retry` and `probe_retry_end`
+so a log shows both questions and both answers.
+
+The retry is honest about its own limits. A listing whose models are all
+unservable still comes back inconclusive, and that is the truthful answer rather
+than a guess. The live endpoint is a real instance: its listing returns 81 models,
+most of which 404 for a given account, so the retry names the first one, is told
+"no such function", and reports that it still could not tell.
+
+That first name is chosen without knowing which models are servable, so a retry
+can pick a dead one. What makes this recoverable is that the question is asked
+again the moment it can be answered: once a model is chosen, the probe names it,
+and the same endpoint that answered `undetermined` now returns `asked=2,
+selected=openai_chat_completions` off a `404 page not found` and a `200`. A
+**turn** therefore never needs the retry, because a turn already has a model and
+names it. The retry exists for the settings screen's first visit — the one
+moment the runtime is asked about an endpoint it has never spoken to and has
+nothing to go on.
+
 ### The cache is an optimisation, not a fact
 
 Results are cached by endpoint id plus a normalized base URL (scheme and host lowercased, one trailing slash removed, the path left alone because `/v1` and `/v2` are different APIs). A cached answer is reused, a transient or inconclusive answer is never cached, and reconfiguring an endpoint forgets the whole cache: an endpoint id may have been re-pointed at a different address under the same name, and a stale answer about an endpoint we no longer talk to is worse than no answer.
@@ -401,6 +470,87 @@ A manual override still exists for a gateway the probe cannot reason about, but 
 Listing models is a settings-screen convenience and never a step in a conversation. It is a real fallback chain rather than one request: the OpenAI-compatible listing, then the Anthropic-compatible shape (`x-api-key` plus a version header, because some gateways that speak only Anthropic reject `Authorization` outright and answer 401 to a request that should have been asked more politely), then a versioned host-root route for a base that is not already versioned. A response body is read as a list in whichever of the usual shapes it arrives, and the chain moves on only when a route is missing — a rejected key or a rate limit is an answer about this request, and trying the next strategy would spend the user's key again and still report the wrong reason.
 
 Every outcome — no listing endpoint, a key without permission, a rate limit, an unreachable host — still leaves manual model entry available. Not having a listing endpoint says nothing about whether the endpoint can chat, and the discovered list never influences which protocol the transcript uses.
+
+### One outcome, one status
+
+A settings screen that says "探测失败" for every failure is a screen that cannot help anybody, and the user cannot act on it. `Negotiation::status()` therefore returns one of a fixed set:
+
+| status | meaning |
+| --- | --- |
+| `supported` | a protocol answered |
+| `no_usable_protocol` | every protocol was asked and every answer said the route is not there |
+| `credentials_rejected` | the key was refused |
+| `no_such_endpoint` | the service named a route it does not have |
+| `rate_limited` | try again later |
+| `server_unavailable` | the service answered 5xx, or refused a model |
+| `network_error` | nothing answered at all |
+| `unreadable` | something answered in a shape the runtime cannot parse |
+| `undetermined` | the runtime declined to conclude — not an error. A settings screen retries once with a listed model first |
+
+`server_unavailable` and `network_error` come out of the same `ProbeFailure::Unavailable` and are separated by whether any attempt got an HTTP status at all. Same verdict, opposite fix: one is the service's problem, the other is the address, the network or the key.
+
+`undetermined` is not a failure and must never be drawn as one. A probe that stopped early because the model was unavailable is the runtime refusing to guess, and rendering that as an error teaches the user to distrust a screen that is being careful.
+
+The same discipline applies to the listing, which reports `available` / `unavailable` / `permission_denied` / `rate_limited` / `unreachable` / `unknown` separately from the protocol status. A gateway that chats fine and lists nothing is a working configuration, and the screen has to be able to say so.
+
+## Diagnostics
+
+Negotiation and discovery are hard to debug by hand, because the interesting question is never "did it work" but "which of the six things failed": a typo in the address, a rejected key, a missing route, a rate limit, an endpoint that lists nothing, or a service that says something the runtime cannot read. Guessing from a blank model list is not debugging. So the runtime keeps a log of what it asked, what came back, and what it concluded.
+
+`DiagnosticLog` is a bounded ring of `DiagnosticEntry` records. Each entry is a timestamp, a `DiagnosticKind`, a stage, a message and a set of named fields. The ring holds 400 entries and drops the oldest past that, because an unbounded log in a chat app is a file that grows forever and eventually gets deleted by the thing it was written to help.
+
+### Two halves, and why they are separated
+
+`DiagnosticKind` is `Discovery` or `Chat`, and that split is load-bearing rather than cosmetic. A settings screen's probing and a conversation's tool-calling both speak HTTP, and a user reporting "the model list looks wrong" or "it stopped calling tools" is asking about entirely different halves. Mixed together, a question about continuous tool calls has to be answered by reading past a run of listing attempts. Filtered, each is a few lines.
+
+`discovery_diagnostics` returns the first half alone; `diagnostics` returns everything.
+
+### A credential is never in the log
+
+This is the hard requirement, because the most useful things to log — a request URL, an auth header, a response body — are exactly the places a key lives. So no message and no field value is stored before passing through `redact`.
+
+The redaction is not a regular expression over `"sk-"` and it is not "truncate the body". A credential appears in several shapes, and each needs a different answer:
+
+| shape | what it looks like | what the log keeps |
+| --- | --- | --- |
+| a bare key | `sk-proj-1234567890abcdef` | `sk-****cdef` — enough to tell two keys apart, not enough to use one |
+| a named field | `"api_key": "sk-..."`, `x-api-key: ...` | the field name, and `****` for the value |
+| an auth header | `Authorization: Bearer eyJhbG...` | the header name, and nothing after it |
+
+The header case is why an unquoted value runs to the end of the line rather than to the next space: `Bearer eyJ...` is **one** credential written as two words, and stopping at the space would leave the token sitting in the log in plaintext while appearing to have redacted it.
+
+Redaction removes a secret rather than truncating around it, and it keeps the prose around the removal. A log line that reads `bearer **** rejected` is still a diagnosis; a line reduced to nothing is not. `text_without_a_secret_is_left_exactly_as_it_was` and `nothing_written_to_a_log_can_contain_a_credential` are the two tests that hold this, and they are the ones to re-read before changing any of it.
+
+Response bodies are collapsed to a single line and capped at 512 characters. A body is worth a truncated excerpt — often the error message is the whole answer — and is never worth an unbounded copy.
+
+### The stages
+
+Stages are named so a log reads as a sequence rather than a pile:
+
+```text
+discovery
+  discovery_request      address, masked key
+  probe_start            which protocols are about to be asked
+  probe_request          POST url, model used
+  protocol_result        protocol, HTTP status or "no answer", body excerpt
+  probe_end              what was selected, what was asked, why
+  model_listing_request  strategy name and url
+  model_listing_result   listing outcome, count, up to 20 model ids
+chat
+  endpoint_configured    address, chosen model
+  chat_request           protocol actually used, model, message count
+  turn_completed         steps, tool calls
+  turn_cancelled
+  turn_failed            the stage it failed in
+```
+
+`turn_failed` carries the stage rather than only a message, because "it stopped working" and "the model returned something unreadable" are different bugs and the same user report.
+
+### Persistence is separate from the conversation
+
+The log is stored under its own key, `sujiu-diagnostics.json`, and saved by its own path. That is not tidiness: the conversation document has a version and a migration and a protection rule for documents this build cannot read. A log written by a newer build is not a conversation, and a log this build cannot parse must not put the conversation store into a protected state where the next save is refused. The two never block each other.
+
+`clear_diagnostics` touches the log and nothing else. Endpoint, key reference and conversations survive it, because a user clearing a log is asking to start a fresh trace, not to reconfigure their account.
 
 ## The Responses adapter
 

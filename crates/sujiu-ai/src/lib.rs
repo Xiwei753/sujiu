@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod builtin;
 pub mod context;
+pub mod diagnostics;
 pub mod negotiate;
 pub mod openai_compat;
 pub mod provider;
@@ -14,8 +15,13 @@ pub use context::{
     ContextStoreError, InMemoryContextStore, ListContextSourcesTool, ReadContextTool,
     SearchContextTool,
 };
+pub use diagnostics::{
+    mask_secret, record as record_diagnostic, truncate, DiagnosticEntry, DiagnosticKind,
+    DiagnosticLog,
+};
 pub use negotiate::{
-    list_models, negotiate as negotiate_protocol, CapabilityCache, Negotiation, ProtocolAttempt,
+    list_models, negotiate as negotiate_protocol, negotiate_asking, CapabilityCache, Negotiation,
+    ProtocolAttempt,
 };
 pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 pub use provider::{http_client, AiProvider, NullStreamSink, ProviderError, StreamSink};

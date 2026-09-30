@@ -34,6 +34,24 @@ export class AppTheme {
   /** Translucent danger fill for inline error blocks. */
   dangerSurface: string = '';
   dangerAccent: string = '';
+  /**
+   * Text for a confirmed success.
+   *
+   * Distinct from `accent` on purpose: accent means "this is selected", and
+   * reusing it for "this worked" makes a passing check look like a chosen
+   * option. A user reading a status line should be able to tell the two apart
+   * without knowing what the colour is for.
+   */
+  successText: string = '';
+  /**
+   * The dim over content that a drawer or sheet is covering.
+   *
+   * Alpha rather than a flat colour, because it has to work over both the page
+   * background and whatever is inside the covered area. Kept light enough that
+   * the covered content stays legible — the user is looking at the drawer, and
+   * the content behind it is context, not the subject.
+   */
+  scrim: string = '';
 
   constructor(dark: boolean) {
     this.apply(dark);
@@ -55,6 +73,8 @@ export class AppTheme {
       this.danger = '#FF6B6B';
       this.dangerSurface = '#33B3261E';
       this.dangerAccent = '#B3261E';
+      this.successText = '#7BD88F';
+      this.scrim = '#66000000';
     } else {
       this.pageBackground = '#F7F7FA';
       this.surface = '#FFFFFF';
@@ -68,6 +88,8 @@ export class AppTheme {
       this.danger = '#B3261E';
       this.dangerSurface = '#14B3261E';
       this.dangerAccent = '#FF8A80';
+      this.successText = '#1E7A3C';
+      this.scrim = '#40000000';
     }
   }
 }

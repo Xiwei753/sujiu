@@ -7,7 +7,7 @@ use crate::types::{AssistantTurn, ProviderRequest, ToolCall, ToolResult};
 
 /// How long to wait for a connection, and how long to wait for the next byte.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const READ_TIMEOUT: Duration = Duration::from_secs(60);
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// The HTTP client every provider call goes through.
 ///
@@ -19,6 +19,15 @@ const READ_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// The read timeout is the gap between reads, not the length of the response,
 /// so a long answer that keeps streaming is never cut off. Only silence counts.
+///
+/// The figure is a compromise between two failures that look identical on the
+/// wire. A free-tier endpoint that queues a request for 60-80 seconds before
+/// emitting its first byte sends exactly the same bytes as a socket that died,
+/// and the runtime cannot tell them apart. 60 seconds cut off a working endpoint
+/// that needed 62; 120 seconds is the measured compromise for it, paid for with
+/// a dead endpoint taking twice as long to admit it. Raising it further trades
+/// more of the second failure for less of the first, and the point where that
+/// trade stops being worth it is a judgement call rather than a measurement.
 pub fn http_client() -> reqwest::Client {
     http_client_with(READ_TIMEOUT)
 }

@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { AppearanceMode } from '../platform/PlatformServices';
 import {
+  EndpointState,
   GenerationState,
   SessionGroupKey,
   ToolCallStatus
@@ -90,6 +91,86 @@ export class Copy {
   }
 
   /**
+   * Where an endpoint setup stands, in words.
+   *
+   * Each of these points at a different next action, which is the whole reason
+   * they are separate. A wrong key and a wrong address are both "probe failed"
+   * if the message is generic, and the user then edits whichever field they
+   * happen to think of — usually the one that was not wrong.
+   *
+   * The three that read as success are not decoration. An endpoint with a
+   * working protocol and no model list still chats, and telling the user that
+   * is a problem would push them to abandon a configuration that works.
+   */
+  static endpointState(state: EndpointState, modelCount: number): ResourceStr {
+    switch (state) {
+      case EndpointState.NeedAddress:
+        return $r('app.string.provider_need_address');
+      case EndpointState.NeedKey:
+        return $r('app.string.provider_need_key');
+      case EndpointState.Ready:
+        return $r('app.string.provider_ready');
+      case EndpointState.Probing:
+        return $r('app.string.provider_probing');
+      case EndpointState.Usable:
+        return $r('app.string.provider_probe_ok');
+      case EndpointState.ModelsFound:
+        // The count is the user's evidence that the list is the whole list. A
+        // status that only said "models found" cannot be told apart from one
+        // that quietly showed the first page of a longer list.
+        return $r('app.string.provider_models_count', modelCount);
+      case EndpointState.ListingUnavailable:
+        return $r('app.string.provider_listing_unavailable');
+      case EndpointState.AuthFailed:
+        return $r('app.string.provider_auth_failed');
+      case EndpointState.NoSuchEndpoint:
+        return $r('app.string.provider_no_such_endpoint');
+      case EndpointState.NetworkError:
+        return $r('app.string.provider_network_error');
+      case EndpointState.ServerError:
+        return $r('app.string.provider_server_error');
+      case EndpointState.RateLimited:
+        return $r('app.string.provider_rate_limited');
+      case EndpointState.NoUsableProtocol:
+        return $r('app.string.provider_no_usable_protocol');
+      case EndpointState.Undetermined:
+        return $r('app.string.provider_undetermined');
+      default:
+        return $r('app.string.provider_unreadable');
+    }
+  }
+
+  /**
+   * The listing outcome in the platform's own language.
+   *
+   * The runtime sends a code here on purpose. It also sends an English
+   * sentence, and that sentence is for the diagnostic log — printing it inside
+   * a translated form produced exactly the failure this method exists to
+   * remove: an untranslated clause sitting in the middle of a Chinese
+   * sentence, which reads worse than either language alone and tells a Chinese
+   * reader nothing about what to do next.
+   *
+   * Every non-`available` outcome ends by saying a model can still be typed,
+   * because that is the part that decides whether the screen is a dead end.
+   */
+  static listingNote(listing: string): ResourceStr {
+    switch (listing) {
+      case 'available':
+        return $r('app.string.provider_listing_available');
+      case 'unavailable':
+        return $r('app.string.provider_listing_absent');
+      case 'permission_denied':
+        return $r('app.string.provider_listing_permission_denied');
+      case 'rate_limited':
+        return $r('app.string.provider_listing_rate_limited');
+      case 'unreachable':
+        return $r('app.string.provider_listing_unreachable');
+      default:
+        return $r('app.string.provider_listing_unknown');
+    }
+  }
+
+  /**
    * Failure codes come from presentation and the bridge, never from a
    * hardcoded sentence. An unrecognised code keeps the runtime's own text,
    * because an unexpected provider error is more useful raw than hidden.
@@ -108,6 +189,8 @@ export class Copy {
         return $r('app.string.error_provider_not_saved');
       case 'provider_no_models':
         return $r('app.string.provider_no_models');
+      case 'provider_need_address':
+        return $r('app.string.provider_need_address');
       case 'turn_busy':
         return $r('app.string.error_turn_busy');
       default:

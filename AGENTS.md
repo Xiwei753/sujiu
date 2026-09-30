@@ -328,17 +328,27 @@ DevEco CLI is an orchestration layer over the HarmonyOS toolchain. On Linux, ins
 
 ### 15.1 Linux environment
 
-Keep the Command Line Tools outside the repository, for example:
+Keep the Command Line Tools outside the repository. On this machine they are at:
 
 ```text
-~/harmony/command-line-tools/
+~/.harmony-cli/
+```
+
+which contains `arktsdoc`, `bin`, `codelinter`, `emulator`, `hstack`, `hvigor`, `ohpm`, `sdk` and `tool`. The NDK the Rust cross build needs is at
+`$DEVECO_CLI_CLT_PATH/sdk/default/openharmony/native/llvm/bin`.
+
+`devecocli` itself is a separate npm global and is **not on the default `PATH`**:
+
+```bash
+export PATH="$HOME/.local/npm-global/bin:$PATH"
+devecocli --version   # 1.3.4
 ```
 
 Set the toolchain root explicitly. Do not assume Linux can auto-discover a DevEco Studio installation.
 
 ```bash
-export DEVECO_CLI_CLT_PATH="$HOME/harmony/command-line-tools"
-export PATH="$DEVECO_CLI_CLT_PATH/bin:$PATH"
+export DEVECO_CLI_CLT_PATH="$HOME/.harmony-cli"
+export PATH="$HOME/.local/npm-global/bin:$DEVECO_CLI_CLT_PATH/bin:$PATH"
 ```
 
 If the local Command Line Tools layout exposes Node or hdc outside `bin`, add the corresponding installed directories to `PATH` rather than copying binaries into the repository.
@@ -351,6 +361,11 @@ devecocli --help
 ```
 
 If those fail, fix the local toolchain first. Do not edit project source to compensate for a broken CLI installation.
+
+`devecocli check lint` currently reports `Files checked: 0` on this machine, with or
+without a path argument. It inspects nothing, so it is **not** a verification step
+here and must not be reported as one. `devecocli build` is the real arbiter: it
+compiles the ArkTS and fails on a real type error.
 
 ### 15.2 Project root
 
@@ -424,6 +439,39 @@ List devices first:
 devecocli device list
 ```
 
+#### A real device needs a signature, and the signature must not be committed
+
+`apps/harmony/build-profile.json5` is git-tracked and ships with
+`signingConfigs: []`. That is correct: the entry is empty precisely so no
+machine's paths or passwords are in the repository. It is also why
+`devecocli run` against a real device fails with:
+
+> Target device is a real device, but the artifact for 'entry' is not signed.
+> Real devices cannot install unsigned packages.
+
+Generate the signing material once per machine:
+
+```bash
+cd apps/harmony
+devecocli signature generate --product default
+```
+
+**This writes machine-local paths and encrypted passwords straight into
+`apps/harmony/build-profile.json5`, which is a tracked file.** It must never be
+committed. Before committing anything in this repository, restore it:
+
+```bash
+git checkout -- apps/harmony/build-profile.json5
+```
+
+Restoring it also re-breaks device installs, so the order is: generate, test on
+the device, restore, commit. Do not "fix" the file by committing it, and do not
+add it to a commit that was meant to be about something else.
+
+An emulator accepts an unsigned package, so a missing signature only shows up
+once a real device is involved — which makes it look like a device problem when
+it is a build-configuration one.
+
 For a single connected device, the normal flow is:
 
 ```bash
@@ -437,9 +485,12 @@ With multiple devices, specify the target returned by `device list`:
 devecocli run --module entry --device <device-or-serial>
 ```
 
-If wireless HDC must be connected manually, use the `hdc` shipped with the HarmonyOS toolchain, for example:
+If wireless HDC must be connected manually, use the `hdc` shipped with the
+HarmonyOS toolchain. Note that it is **not** in `$DEVECO_CLI_CLT_PATH/bin`; it is
+inside the SDK:
 
 ```bash
+export PATH="$DEVECO_CLI_CLT_PATH/sdk/default/openharmony/toolchains:$PATH"
 hdc tconn <ip>:<port>
 devecocli device list
 ```
@@ -490,8 +541,8 @@ For HarmonyOS changes, use this order:
 ```text
 read issue / AGENTS.md
   -> inspect apps/harmony project metadata
-  -> devecocli check lint
   -> devecocli build --modules entry --build-mode debug
+  -> scripts/check-harmony-runtime.sh     # only when Rust changed
   -> devecocli device list
   -> devecocli run --module entry [--device ...]
   -> exercise the changed UI/flow
@@ -499,7 +550,19 @@ read issue / AGENTS.md
   -> only then report the HarmonyOS path verified
 ```
 
-If a physical device is unavailable, still perform lint + build and state clearly that install/runtime behavior was not verified.
+The build is the step that proves the ArkTS compiles. `devecocli check lint` is
+listed here for completeness but currently inspects nothing on this machine (see
+§15.1), so a green lint is not evidence and must not be cited as one.
+
+`scripts/check-harmony-runtime.sh` belongs in the order whenever Rust changed,
+and the fix it asks for is `scripts/build-harmony-runtime.sh`. The staged
+`libsujiu_napi.so` is a committed build output, so a Rust change that was never
+rebuilt reaches a device as an old runtime behind a new bridge. A new NAPI method
+the ArkTS calls but the committed `.so` does not export is exactly that failure,
+and it compiles cleanly until the call is made at runtime.
+
+If a physical device is unavailable, still perform the build and state clearly
+that install/runtime behavior was not verified.
 
 ## 16. Error handling
 

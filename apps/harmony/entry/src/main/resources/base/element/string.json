@@ -286,7 +286,31 @@
     },
     {
       "name": "provider_models_more",
-      "value": "and more — type a name to pick one of the rest"
+      "value": "%d in all — type a name to pick any of them"
+    },
+    {
+      "name": "provider_listing_available",
+      "value": "This endpoint listed its models."
+    },
+    {
+      "name": "provider_listing_absent",
+      "value": "This endpoint has no model list. That is normal for a gateway and does not mean it cannot chat, so you can still type a model name."
+    },
+    {
+      "name": "provider_listing_permission_denied",
+      "value": "This key is not allowed to list models. It may still be allowed to chat, so you can still type a model name."
+    },
+    {
+      "name": "provider_listing_rate_limited",
+      "value": "This endpoint is rate limiting the lookup right now. You can still type a model name."
+    },
+    {
+      "name": "provider_listing_unreachable",
+      "value": "This endpoint could not be reached to list models. You can still type a model name."
+    },
+    {
+      "name": "provider_listing_unknown",
+      "value": "The model list has not been looked up yet. You can type a model name."
     },
     {
       "name": "provider_no_models",
@@ -303,6 +327,110 @@
     {
       "name": "provider_key_stored",
       "value": "An api key is stored on this device."
+    },
+    {
+      "name": "provider_need_address",
+      "value": "Type the endpoint address first."
+    },
+    {
+      "name": "provider_need_key",
+      "value": "Now add an API key. Nothing can be checked without one."
+    },
+    {
+      "name": "provider_ready",
+      "value": "Address and key are set. Ask what this endpoint supports."
+    },
+    {
+      "name": "provider_probing",
+      "value": "Asking the endpoint what it supports…"
+    },
+    {
+      "name": "provider_probe_ok",
+      "value": "Connected. This endpoint answered."
+    },
+    {
+      "name": "provider_models_count",
+      "value": "Found %d models. Choose one, or type a name."
+    },
+    {
+      "name": "provider_listing_unavailable",
+      "value": "Connected, but this endpoint does not list models. Type a model name — chatting still works."
+    },
+    {
+      "name": "provider_auth_failed",
+      "value": "The API key was rejected. Check the key and try again."
+    },
+    {
+      "name": "provider_no_such_endpoint",
+      "value": "Something answered that address, but not that path. Check the address and the path."
+    },
+    {
+      "name": "provider_network_error",
+      "value": "The endpoint could not be reached. Check the network and the address."
+    },
+    {
+      "name": "provider_server_error",
+      "value": "The endpoint answered with an error. It may be busy; try again shortly."
+    },
+    {
+      "name": "provider_rate_limited",
+      "value": "Too many requests right now. Wait a moment and try again."
+    },
+    {
+      "name": "provider_no_usable_protocol",
+      "value": "This endpoint answered, but speaks none of the protocols Sujiu knows."
+    },
+    {
+      "name": "provider_undetermined",
+      "value": "Sujiu could not tell which protocols this endpoint speaks. It may still work."
+    },
+    {
+      "name": "provider_unreadable",
+      "value": "The endpoint answered with something Sujiu cannot read."
+    },
+    {
+      "name": "provider_model_choose",
+      "value": "Choose a model"
+    },
+    {
+      "name": "provider_model_hint",
+      "value": "This one is yours to choose. Sujiu will not pick it for you."
+    },
+    {
+      "name": "provider_reprobe",
+      "value": "Ask again"
+    },
+    {
+      "name": "settings_section_diagnostics",
+      "value": "DIAGNOSTICS"
+    },
+    {
+      "name": "provider_diagnostics_show",
+      "value": "Show diagnostics"
+    },
+    {
+      "name": "provider_diagnostics_hide",
+      "value": "Hide diagnostics"
+    },
+    {
+      "name": "provider_diagnostics_empty",
+      "value": "Nothing recorded yet."
+    },
+    {
+      "name": "provider_diagnostics_copy",
+      "value": "Copy log"
+    },
+    {
+      "name": "provider_diagnostics_copied",
+      "value": "Log copied. It is safe to paste: keys never appear in it."
+    },
+    {
+      "name": "provider_diagnostics_clear",
+      "value": "Clear log"
+    },
+    {
+      "name": "provider_diagnostics_note",
+      "value": "API keys are never written here — a key appears only as a masked fragment."
     },
     {
       "name": "error_provider_not_saved",

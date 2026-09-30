@@ -239,6 +239,27 @@ registry with minimal translation.
 External MCP metadata that cannot be represented by a provider should remain
 in the Rust tool layer rather than leak into platform UI code.
 
+## The diagnostic log is not a model-visible tool
+
+`DiagnosticLog` records what the runtime asked an endpoint, what came back and
+what it concluded, and it is readable by the user through the settings screen.
+It is deliberately **not** exposed to the model.
+
+The two are not the same kind of thing, and conflating them would be a mistake in
+both directions. A model-visible tool would put the endpoint's own error bodies
+into the context window on every call, invite the model to reason about its own
+transport, and make a debugging aid a part of the bill for every ordinary turn.
+Meanwhile the people who need it — the user reporting that something is broken,
+and whoever reads their report — need it to be a *record of what happened*, not
+an opinion from the model about what happened.
+
+It also crosses the same trust boundary as the credential. The log is redacted in
+Rust before it is stored, and a platform receives lines that are already safe to
+render or paste. A tool result would instead hand the same material to a prompt
+the model composes into, which is a much wider place for a secret to end up.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the stages and the redaction rules.
+
 ## Stability rule
 
 Adding a new database, plugin, lore format or memory algorithm should first ask:

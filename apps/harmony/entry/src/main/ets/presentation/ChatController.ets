@@ -1,6 +1,7 @@
 import {
   CharacterSummary,
   ContextSourceSummary,
+  DiagnosticEntry,
   EndpointExploration,
   MessageRole,
   MessageSummary,
@@ -17,6 +18,12 @@ import { AppearanceMode, CredentialService, PlatformServices } from '../platform
 
 /** Where the api key is filed in the platform credential store. */
 const CREDENTIAL_NAME: string = 'provider_api_key';
+
+/**
+ * How many discovered models a chooser offers before it defers to the text
+ * field. Twelve fills two rows on a phone and leaves the save button in reach.
+ */
+const MODEL_CHOICE_LIMIT: number = 12;
 
 /**
  * Turn lifecycle a chat surface renders. Sujiu states, not provider states.
@@ -54,6 +61,58 @@ export enum SessionGroupKey {
   Today = 'today',
   Yesterday = 'yesterday',
   Earlier = 'earlier'
+}
+
+/**
+ * Where a settings screen is in the one flow that matters: type an address, give
+ * a key, find out what is there, pick a model.
+ *
+ * These are states rather than sentences because each one tells the user which
+ * field to edit next, and a single "probe failed" message cannot: a wrong key
+ * and a wrong address are both failures and share no remedy. Anything that
+ * collapses them leaves the user guessing which of the two fields they got
+ * wrong, which is the same as having no diagnostic at all.
+ *
+ * The three pre-probe states come first in the flow and are not errors. Not
+ * having typed an address yet is how the screen starts.
+ */
+export enum EndpointState {
+  /** No address yet. The first thing to ask for, and not a fault. */
+  NeedAddress = 'NeedAddress',
+  /** Address given, no key. Nothing can be learned without one. */
+  NeedKey = 'NeedKey',
+  /** Address and key given, nothing asked yet. */
+  Ready = 'Ready',
+  /** Asking the endpoint now. */
+  Probing = 'Probing',
+  /** A protocol was settled on. The endpoint can be used. */
+  Usable = 'Usable',
+  /** Settled on, and a model list came back. */
+  ModelsFound = 'ModelsFound',
+  /**
+   * A protocol was settled on but the model list did not come back.
+   *
+   * Not a failure. A gateway with no listing route still holds a conversation,
+   * so this state keeps the endpoint configurable and only changes the
+   * advice: type the model name instead of choosing one.
+   */
+  ListingUnavailable = 'ListingUnavailable',
+  /** 401/403. The key is the thing to change. */
+  AuthFailed = 'AuthFailed',
+  /** The address names a route the endpoint does not have. The address is wrong. */
+  NoSuchEndpoint = 'NoSuchEndpoint',
+  /** The request never landed. The network, not the configuration. */
+  NetworkError = 'NetworkError',
+  /** The endpoint answered and is unwell. Waiting is the only fix. */
+  ServerError = 'ServerError',
+  /** Rate limited right now. Also a wait. */
+  RateLimited = 'RateLimited',
+  /** Every protocol answered and none of them work here. */
+  NoUsableProtocol = 'NoUsableProtocol',
+  /** The walk could not tell. Deliberately not reported as a failure. */
+  Undetermined = 'Undetermined',
+  /** The endpoint answered something this build cannot read. */
+  Unreadable = 'Unreadable'
 }
 
 @Observed
@@ -155,6 +214,138 @@ export class ChatController {
   endpointNote: string = '';
 
   /**
+   * How the address and the key currently stand, for a settings screen.
+   *
+   * Recomputed on demand rather than stored, because it is a function of the
+   * form, the probe and the answer — and a cached copy of that is stale the
+   * moment the user types, which is exactly when it would be read.
+   */
+  endpointState(baseUrl: string, secret: string): EndpointState {
+    const address: string = baseUrl.trim();
+    const key: string = secret.trim();
+    if (address.length === 0) {
+      return EndpointState.NeedAddress;
+    }
+    // A stored key counts. Otherwise a user who configured an endpoint and
+    // reopened settings to change the model would be told to type a key they
+    // had already given, which is both false and unhelpful.
+    if (key.length === 0 && !this.hasCredential) {
+      return EndpointState.NeedKey;
+    }
+    if (this.exploringEndpoint) {
+      return EndpointState.Probing;
+    }
+    if (!this.explored || this.exploration === null) {
+      return EndpointState.Ready;
+    }
+
+    const status: string = this.exploration.status;
+    const settled: boolean = status === 'supported';
+    if (!settled) {
+      switch (status) {
+        case 'credentials_rejected':
+          return EndpointState.AuthFailed;
+        case 'no_such_endpoint':
+          return EndpointState.NoSuchEndpoint;
+        case 'rate_limited':
+          return EndpointState.RateLimited;
+        case 'server_unavailable':
+          return EndpointState.ServerError;
+        case 'network_error':
+          return EndpointState.NetworkError;
+        case 'no_usable_protocol':
+          return EndpointState.NoUsableProtocol;
+        case 'undetermined':
+          return EndpointState.Undetermined;
+        default:
+          return EndpointState.Unreadable;
+      }
+    }
+
+    // A protocol settled. The model list is a separate question with a
+    // separate answer, and its absence is not a failure of the endpoint.
+    if (this.exploration.models.listing === 'available' && this.models.length > 0) {
+      return EndpointState.ModelsFound;
+    }
+    return EndpointState.ListingUnavailable;
+  }
+
+  /**
+   * How many models discovery found, for a count in the status line.
+   *
+   * Reported rather than assumed: "found 3" and "found 0" are different facts,
+   * and a screen that only says "no models" when there are none cannot tell a
+   * user that the list it is showing is the whole list.
+   */
+  get discoveredModelCount(): number {
+    return this.exploration === null ? 0 : this.exploration.models.models.length;
+  }
+
+  /**
+   * The models this endpoint actually listed, in the order it listed them.
+   *
+   * Deliberately not `this.models`. That is the chat model list — what has been
+   * configured, filtered for the conversation header — and it stays at one entry
+   * when exactly one model is saved. Reading it as "the models you can choose
+   * from" shows the already-configured model and nothing else, which looks
+   * like a probe that found one model and is the difference between a settings
+   * screen that offers the endpoint's choice and one that cannot.
+   *
+   * Probing deliberately does not write into `this.models` either. An unconfigured
+   * endpoint's catalogue is not a conversation's model list, and merging the two
+   * makes an unrelated conversation start offering models from an address the
+   * user has not finished configuring.
+   */
+  get discoveredModels(): ModelSummary[] {
+    return this.exploration === null ? [] : this.exploration.models.models;
+  }
+
+  /**
+   * The models a chooser shows, capped.
+   *
+   * The cap is a layout decision, not a claim about how many there are. A
+   * gateway listing eighty-one models would push the save button off the
+   * bottom of the screen otherwise, and a form whose commit action is a scroll
+   * away is a form people abandon. Nothing is hidden by it: the model field
+   * stays editable right below, so the cap costs a convenience and not an
+   * option.
+   */
+  get offeredModels(): ModelSummary[] {
+    return this.discoveredModels.slice(0, MODEL_CHOICE_LIMIT);
+  }
+
+  /**
+   * Whether a model may be typed instead of chosen.
+   *
+   * Always true, and deliberately not derived from the outcome. A gateway with
+   * no listing route is still perfectly able to chat, so failing to enumerate
+   * models must never take away the only door the user has left. The runtime
+   * reports the same thing and the two agreeing is the point: neither side gets
+   * to close it on its own.
+   */
+  get manualModelEntryAllowed(): boolean {
+    if (this.exploration === null) {
+      return true;
+    }
+    return this.exploration.models.manualEntryAllowed;
+  }
+
+  /**
+   * The listing outcome as a code, so a screen can say it in its own language.
+   *
+   * The runtime also sends an English sentence about it, and that sentence is
+   * for the diagnostic log and for a developer reading one. Printing it inside
+   * a localised form produces the worst of both: an untranslated clause in the
+   * middle of a translated sentence, which is harder to read than either
+   * language alone. A code is the part the runtime owns; the wording is the
+   * platform's, and a platform that ships three languages has to be the one
+   * choosing.
+   */
+  get listingCode(): string {
+    return this.exploration === null ? 'unknown' : this.exploration.models.listing;
+  }
+
+  /**
    * What is already configured, so a form can open on it.
    *
    * The address and the chosen model are configuration, and a person opening
@@ -164,6 +355,17 @@ export class ChatController {
    * turn, so that a secret is never something a view could print.
    */
   storedEndpoint: StoredEndpoint | null = null;
+
+  /**
+   * The diagnostic log, newest last.
+   *
+   * Every line is already redacted in the runtime, so a settings screen can
+   * render these directly and a bug report can quote them. The two halves are
+   * kept distinguishable by `kind`, because a protocol switch during a turn
+   * and a probe result read as the same event unless something says which is
+   * which.
+   */
+  diagnostics: DiagnosticEntry[] = [];
 
   /**
    * Raised when the appearance mode changes. Presentation does not decide what
@@ -239,24 +441,31 @@ export class ChatController {
    * guessed the very answer the runtime could have looked up.
    */
   async exploreEndpoint(baseUrl: string, secret: string): Promise<void> {
-    if (this.exploringEndpoint || baseUrl.length === 0) {
+    if (this.exploringEndpoint || baseUrl.trim().length === 0) {
       return;
     }
     this.exploringEndpoint = true;
     this.providerNoticeCode = '';
     this.explored = false;
     try {
-      const found: EndpointExploration = await this.bridge.discoverEndpoint(baseUrl, secret);
+      // A stored key is used when the field is empty, so a user who configured
+      // an endpoint and came back to change the model can re-probe without
+      // retyping a secret they cannot see. The typed one always wins: it is
+      // what the user is trying right now.
+      const key: string = secret.trim().length > 0
+        ? secret.trim()
+        : this.credentials.loadSecret(CREDENTIAL_NAME);
+      const found: EndpointExploration = await this.bridge.discoverEndpoint(baseUrl.trim(), key);
       this.exploration = found;
-      this.models = found.models.models;
       this.endpointNote = found.models.note;
       // A typed model is the user's own words, so it is kept whatever the
       // listing said. Losing it because a gateway has no listing route would
       // punish the user for the gateway's shortcoming.
-      if (this.models.length === 0 && !found.models.manualEntryAllowed) {
+      if (found.models.models.length === 0 && !found.models.manualEntryAllowed) {
         this.providerNoticeCode = 'provider_no_models';
       }
       this.explored = true;
+      await this.loadDiagnostics();
     } catch (error) {
       hilog.error(0x0000, 'Sujiu', 'discoverEndpoint failed: %{public}s', (error as Error).message);
       this.fail('provider_not_saved', (error as Error).message);
@@ -266,21 +475,100 @@ export class ChatController {
   }
 
   /**
+   * Reads the diagnostic log, newest last.
+   *
+   * Loaded after every probe and every turn rather than on demand, because a
+   * log nobody has to ask for is the only kind anyone reads when something goes
+   * wrong. It is not shown until a settings screen asks to see it; the cost is
+   * a few hundred small strings that the runtime already had in memory.
+   */
+  async loadDiagnostics(limit: number = 0): Promise<void> {
+    try {
+      this.diagnostics = await this.bridge.diagnostics(limit);
+    } catch (error) {
+      hilog.error(0x0000, 'Sujiu', 'diagnostics failed: %{public}s', (error as Error).message);
+      this.diagnostics = [];
+    }
+  }
+
+  /** Only the capability and model probing half, for a settings screen. */
+  async loadDiscoveryDiagnostics(limit: number = 0): Promise<void> {
+    try {
+      this.diagnostics = await this.bridge.discoveryDiagnostics(limit);
+    } catch (error) {
+      hilog.error(0x0000, 'Sujiu', 'discovery diagnostics failed: %{public}s', (error as Error).message);
+      this.diagnostics = [];
+    }
+  }
+
+  /** The whole log as text, for pasting into a bug report. Already redacted. */
+  async diagnosticsText(): Promise<string> {
+    try {
+      return await this.bridge.diagnosticsText();
+    } catch (error) {
+      hilog.error(0x0000, 'Sujiu', 'diagnostics text failed: %{public}s', (error as Error).message);
+      return '';
+    }
+  }
+
+  /**
+   * Puts the whole log on the clipboard, for a bug report.
+   *
+   * Goes through the platform clipboard rather than being handed to a view,
+   * because the text is exactly the thing a view should not be holding: it is
+   * unbounded, it is only useful somewhere else, and a view that held it could
+   * render it in a screenshot by accident.
+   *
+   * Resolves false when there is nothing to copy, so the caller can decline to
+   * claim success it did not have.
+   */
+  async copyDiagnostics(): Promise<boolean> {
+    const text: string = await this.diagnosticsText();
+    if (text.length === 0) {
+      return false;
+    }
+    this.platform.clipboard.copyText('Sujiu', text);
+    return true;
+  }
+
+  /** Empties the log. Configuration and conversations are untouched. */
+  clearDiagnostics(): void {
+    this.bridge.clearDiagnostics().then(() => {
+      this.diagnostics = [];
+    }).catch((error: Error): void => {
+      hilog.error(0x0000, 'Sujiu', 'clear diagnostics failed: %{public}s', error.message);
+    });
+  }
+
+  /**
    * Turns the three fields a settings form actually collects into a provider
    * description. Everything else is decided here rather than by the view: no
    * vendor is named, and sampling parameters are provider semantics the runtime
    * already defaults, so the form cannot set values that disagree with how a
    * turn really runs.
+   *
+   * The address is the only required field. A model is not, because the flow
+   * is: probe, find out what is there, then choose. Making the model a
+   * precondition here put the choice in front of the question it is chosen from
+   * and made the endpoint un-saveable until the user had guessed the very
+   * answer the runtime could look up. An endpoint with no model saved is a
+   * normal state — it cannot chat yet, and the user is told so — not a refusal.
    */
   async saveProviderFromForm(baseUrl: string, model: string, secret: string): Promise<void> {
-    if (baseUrl.length === 0 || model.length === 0) {
+    const address: string = baseUrl.trim();
+    if (address.length === 0) {
+      this.fail('provider_need_address');
       return;
     }
+    const chosen: string = model.trim();
     await this.saveProvider({
       id: 'endpoint-default',
-      name: model,
-      baseUrl: baseUrl,
-      selectedModel: model
+      // The name is for display and defaults to the address when no model has
+      // been chosen yet, so an endpoint saved before the model step still has
+      // something to show in a list.
+      name: chosen.length > 0 ? chosen : address,
+      baseUrl: address,
+      selectedModel: chosen.length > 0 ? chosen : undefined
     } as ProviderDraft, secret);
   }
 
@@ -563,6 +851,11 @@ export class ChatController {
         this.assistantOpen = false;
         this.generationState = GenerationState.Failed;
         this.fail(event.message ?? '', event.text ?? '');
+        // The runtime recorded which stage the turn stopped at. Reading the log
+        // here is what makes that answer reachable: without it, "the turn
+        // failed" is all a screen can say, and a failure during negotiation is
+        // fixed in settings while a failure mid-request is not.
+        this.loadDiagnostics();
         this.settleTurn();
         break;
       case TurnEventKind.Cancelled:

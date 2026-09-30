@@ -306,6 +306,70 @@ The user chooses no vendor and no protocol. The runtime advertises the protocols
 it can speak, in the order it prefers them, and negotiation settles which one an
 endpoint actually gets. A hostname may produce a display label and nothing else.
 
+**The field order is the order the work happens in.** The settings form is
+address, then key, then model — not address, model, key. A model in the middle of
+that form was a model the user had to know before anybody had asked the endpoint,
+which is the same problem the previous "ask this endpoint" button was created to
+remove. Putting the key second is deliberate too: it is the last thing the
+runtime needs before it can start working, and the field the user is most likely
+to reach for once the address is entered.
+
+The model field stays editable in **every** state, including after a failed probe.
+It is not a field that unlocks on success. A server that chats perfectly well and
+lists nothing is a server the user must still be able to configure, and a field
+that greys out on a listing failure turns a cosmetic problem into a dead end.
+
+#### What the settings screen has to be able to say
+
+A screen that reports every problem as "探测失败" cannot be acted on. The runtime
+returns a `status` from negotiation and a `listing` from discovery, and the
+presentation layer turns those into an `EndpointState` the UI renders one line
+for:
+
+| state | the user is told |
+| --- | --- |
+| `NeedAddress` | no address yet |
+| `NeedKey` | no key yet |
+| `Ready` | address and key are in, ask when ready |
+| `Probing` | asking now |
+| `Usable` | a protocol answered |
+| `ModelsFound` | N models found, pick one or type a name |
+| `ListingUnavailable` | the protocol works, the model list could not be read |
+| `AuthFailed` | the key was refused |
+| `NoSuchEndpoint` | the address or path is wrong |
+| `NetworkError` | nothing answered |
+| `ServerError` | the service returned something wrong |
+| `RateLimited` | try again later |
+| `NoUsableProtocol` | this build speaks none of what the endpoint has |
+| `Undetermined` | the runtime declined to conclude — not an error |
+| `Unreadable` | the answer could not be read |
+
+Two of these are load-bearing and easy to get wrong. `ListingUnavailable` is a
+**success** state, not a failure: the endpoint can chat, it just will not list, and
+presenting it as an error sends the user to fix something that is not broken.
+`Undetermined` is not a failure at all and must not be coloured as one.
+
+The state is **computed live from the form, not cached**. A cached copy is stale
+the moment the user types, and a settings screen that lags its own input is worse
+than one that shows nothing.
+
+#### Reading the diagnostic log
+
+The settings screen carries a collapsible diagnostics section showing
+`controller.diagnostics`, newest last, with discovery lines and chat lines in
+different weights so the two halves are separable by eye as well as by filter. It
+offers copy — so a user can paste a trace into a bug report without a
+screenshot — and clear.
+
+That section is the reason the log is worth having. A user who says "it does not
+work" cannot be asked to reproduce anything; they can only be asked to press
+"ask again" and paste what came out. The copy of a trace is the diagnostic.
+
+The log is rendered, not re-derived. Each `DiagnosticEntry` arrives from the
+runtime already redacted and already formatted into a single `detail` line, so a
+platform cannot leak a key by being careless with what it was handed, and cannot
+produce a different reading of the same trace from another one.
+
 #### Persistence
 
 Session, history and catalog semantics belong to the runtime, so the persisted
@@ -523,7 +587,25 @@ sujiu_create_session_json(runtime, character_id)
 sujiu_send_turn_json(runtime, request_json)
 sujiu_send_turn_streaming(runtime, request_json, callback, user_data)
 sujiu_cancel_turn(runtime)
+
+sujiu_endpoint_json(runtime)
+sujiu_runtime_use_directory_json(runtime, path)
+sujiu_runtime_data_dir_json(runtime)
+
+sujiu_diagnostics_json(runtime, limit)
+sujiu_discovery_diagnostics_json(runtime, limit)
+sujiu_diagnostics_text_json(runtime)
+sujiu_diagnostics_clear(runtime)
 ```
+
+The `limit` argument is a pointer that may be null, and null means the whole
+log. Refusing a request over a malformed limit helps nobody, and a diagnostic
+surface that can itself fail is a diagnostic surface nobody will use.
+
+The three read entry points exist because they answer different questions. A
+structured list is what a screen renders; a filtered list is how a user separates
+probing from chatting; one text blob is what a user pastes into a bug report and
+what has to survive a platform that cannot render a list at all.
 
 Every `*_json` entry point returns the same envelope, `{"ok":…,"data":…,"error":…}`,
 and a null pointer becomes an error envelope rather than a crash, so a frontend

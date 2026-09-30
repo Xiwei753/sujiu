@@ -36,6 +36,12 @@ enum Route {
     /// with when it cannot route a request — and, identically, when the path
     /// does not exist. The status and the body together prove nothing.
     PlainNotFound,
+    /// Answers the real body unless the request named the probe placeholder, in
+    /// which case it answers `PlainNotFound` — the same 404, for the same
+    /// reason, that it gives for a path it never had. This is a gateway that
+    /// dispatches on model, and it is why a probe sent before any model was
+    /// chosen cannot see the endpoint at all.
+    RoutesByModel(Value),
 }
 
 /// A loopback endpoint that answers three routes and records every request.
@@ -65,8 +71,8 @@ impl EndpointServer {
                 } else {
                     &chat
                 };
-                let _ = tx.send((request.path, request.body));
-                write_route(&stream, route);
+                let _ = tx.send((request.path, request.body.clone()));
+                write_route(&stream, &route_for(&route, &request.body));
             }
         });
 
@@ -138,6 +144,24 @@ fn read_request(stream: &TcpStream) -> Option<Request> {
     Some(Request { path, body })
 }
 
+/// Resolve a route against the model the request actually named.
+///
+/// A `RoutesByModel` route is the only one that reads the body, because it is
+/// the only one whose answer depends on it.
+fn route_for<'a>(route: &'a Route, body: &Value) -> Route {
+    match route {
+        Route::RoutesByModel(real) => {
+            let named = body.get("model").and_then(Value::as_str).unwrap_or("");
+            if named == "probe" {
+                Route::PlainNotFound
+            } else {
+                Route::Ok(real.clone())
+            }
+        }
+        other => other.clone(),
+    }
+}
+
 fn write_route(mut stream: &TcpStream, route: &Route) {
     let (status, content_type, body) = match route {
         Route::Absent => (
@@ -153,6 +177,9 @@ fn write_route(mut stream: &TcpStream, route: &Route) {
         Route::Ok(body) => (200, "application/json", body.to_string()),
         Route::Status(status, body) => (*status, "application/json", body.to_string()),
         Route::Stream(body) => (200, "text/event-stream", body.clone()),
+        // Resolved by `route_for` before it gets here; kept exhaustive so a new
+        // variant cannot be added without deciding what a direct write means.
+        Route::RoutesByModel(body) => (200, "application/json", body.to_string()),
     };
 
     let _ = write!(
@@ -374,6 +401,80 @@ fn an_endpoint_that_only_says_nothing_is_reported_as_unknown_not_as_unsupported(
     assert!(
         !reason.contains("none of the protocols"),
         "absence may only be claimed from evidence, and there was none: {reason}"
+    );
+}
+
+/// The same endpoint, except that it dispatches on model.
+///
+/// This is the shape that made the finding worth acting on. A gateway that
+/// routes by model answers a model it cannot resolve with the *same* plain-text
+/// 404 it gives for a path it never had, so the probe — which runs before any
+/// model is chosen and therefore has to send a placeholder — gets an
+/// inconclusive answer from every protocol and learns nothing. The endpoint
+/// works perfectly; it is simply invisible to a question it cannot route.
+///
+/// The listing already returned a model the user could pick, so the probe asks
+/// again with that one. This test fails without the retry, and it is the reason
+/// the retry exists rather than a guess.
+#[test]
+fn a_gateway_that_dispatches_on_model_is_found_once_the_probe_names_a_real_one() {
+    let server = EndpointServer::start(
+        Route::Ok(models(&["google/gemma-3-4b-it"])),
+        // No Responses route, and this is a plain 404 rather than a model
+        // rejection, so it is still only allowed to move the walk onward.
+        Route::PlainNotFound,
+        // Chat Completions is real, but only for a model this endpoint serves.
+        Route::RoutesByModel(json!({ "choices": [{ "message": { "content": "pong" } }] })),
+    );
+    let runtime = runtime();
+
+    let exploration = runtime
+        .tokio
+        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+
+    assert_eq!(
+        exploration.protocol, "openai_chat_completions",
+        "a working endpoint that is invisible to a placeholder must still be found by a real one"
+    );
+    assert_eq!(exploration.status, "supported");
+
+    // The retry has to be visible, or a user reading the log sees three
+    // inconclusive probes and a bare "we could not tell" with no explanation of
+    // what happened next.
+    let log = runtime.diagnostics_text();
+    assert!(
+        log.contains("probe_retry"),
+        "the second attempt has to be recorded: {log}"
+    );
+    assert!(
+        log.contains("google/gemma-3-4b-it"),
+        "and it has to name the model it asked with: {log}"
+    );
+}
+
+/// A retry with no model to retry with is not a retry.
+///
+/// The listing has to come first for the fallback to have anything to name. When
+/// it returned nothing, asking again with a different placeholder would just
+/// repeat the same inconclusive question and double the wait, so the walk ends
+/// after one round and says honestly that it could not tell.
+#[test]
+fn nothing_is_retried_when_the_endpoint_listed_no_model_to_ask_with() {
+    let server = EndpointServer::start(
+        Route::Ok(json!({ "data": [] })),
+        Route::PlainNotFound,
+        Route::PlainNotFound,
+    );
+    let runtime = runtime();
+
+    let exploration = runtime
+        .tokio
+        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+
+    assert_eq!(exploration.status, "undetermined");
+    assert!(
+        !runtime.diagnostics_text().contains("probe_retry"),
+        "there was no model to ask with, so there must be no second round"
     );
 }
 

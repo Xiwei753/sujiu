@@ -273,6 +273,166 @@
       "value": "本机已保存 api key。"
     },
     {
+      "name": "provider_need_address",
+      "value": "请先填写接口地址。"
+    },
+    {
+      "name": "provider_need_key",
+      "value": "接着填写 API 密钥，没有它无法探测。"
+    },
+    {
+      "name": "provider_ready",
+      "value": "地址和密钥已就绪，可以探测这个接口。"
+    },
+    {
+      "name": "provider_probing",
+      "value": "正在探测接口能力…"
+    },
+    {
+      "name": "provider_probe_ok",
+      "value": "已连接，这个接口有响应。"
+    },
+    {
+      "name": "provider_models_count",
+      "value": "找到 %d 个模型，请选择一个，或手动输入。"
+    },
+    {
+      "name": "provider_listing_unavailable",
+      "value": "已连接，但该接口不提供模型列表。可以手动输入模型名，对话不受影响。"
+    },
+    {
+      "name": "provider_auth_failed",
+      "value": "API 密钥被拒绝。请检查密钥后重试。"
+    },
+    {
+      "name": "provider_no_such_endpoint",
+      "value": "该地址有响应，但这个路径不存在。请检查地址与路径。"
+    },
+    {
+      "name": "provider_network_error",
+      "value": "无法连接到该接口。请检查网络与地址。"
+    },
+    {
+      "name": "provider_server_error",
+      "value": "接口返回了错误信息，可能正忙，请稍后重试。"
+    },
+    {
+      "name": "provider_rate_limited",
+      "value": "请求过于频繁，请稍等片刻再试。"
+    },
+    {
+      "name": "provider_no_usable_protocol",
+      "value": "该接口有响应，但不支持 Sujiu 已知的任何协议。"
+    },
+    {
+      "name": "provider_undetermined",
+      "value": "Sujiu 无法判断该接口支持哪种协议，它仍可能可用。"
+    },
+    {
+      "name": "provider_unreadable",
+      "value": "接口返回了 Sujiu 无法解析的内容。"
+    },
+    {
+      "name": "provider_model_choose",
+      "value": "选择模型"
+    },
+    {
+      "name": "provider_model_hint",
+      "value": "这一步由你来定，Sujiu 不会替你选择。"
+    },
+    {
+      "name": "provider_models_more",
+      "value": "共 %d 个 —— 直接填写名字即可选择其中任意一个"
+    },
+    {
+      "name": "provider_listing_available",
+      "value": "该接口列出了它的模型。"
+    },
+    {
+      "name": "provider_listing_absent",
+      "value": "该接口没有模型列表。网关常常如此，并不代表它不能对话，你仍然可以手动填写模型名。"
+    },
+    {
+      "name": "provider_listing_permission_denied",
+      "value": "当前密钥没有列出模型的权限，但它可能仍然可以对话，你仍然可以手动填写模型名。"
+    },
+    {
+      "name": "provider_listing_rate_limited",
+      "value": "该接口正在限流，暂时拿不到列表。你仍然可以手动填写模型名。"
+    },
+    {
+      "name": "provider_listing_unreachable",
+      "value": "联系不上该接口，无法获取模型列表。你仍然可以手动填写模型名。"
+    },
+    {
+      "name": "provider_listing_unknown",
+      "value": "还没有查询过模型列表。你可以直接填写模型名。"
+    },
+    {
+      "name": "provider_explore",
+      "value": "询问这个接口"
+    },
+    {
+      "name": "provider_exploring",
+      "value": "正在询问…"
+    },
+    {
+      "name": "provider_explore_hint",
+      "value": "填好地址和密钥，再问一次它支持什么。模型只需要你来选。"
+    },
+    {
+      "name": "provider_protocol_found",
+      "value": "它支持"
+    },
+    {
+      "name": "provider_protocol_none",
+      "value": "没能确定协议。"
+    },
+    {
+      "name": "provider_models_found",
+      "value": "它列出的模型"
+    },
+    {
+      "name": "provider_no_models",
+      "value": "请在上方填写模型名；这个接口地址仍然可用。"
+    },
+    {
+      "name": "provider_reprobe",
+      "value": "重新探测"
+    },
+    {
+      "name": "settings_section_diagnostics",
+      "value": "诊断日志"
+    },
+    {
+      "name": "provider_diagnostics_show",
+      "value": "查看诊断日志"
+    },
+    {
+      "name": "provider_diagnostics_hide",
+      "value": "收起诊断日志"
+    },
+    {
+      "name": "provider_diagnostics_empty",
+      "value": "暂无记录。"
+    },
+    {
+      "name": "provider_diagnostics_copy",
+      "value": "复制日志"
+    },
+    {
+      "name": "provider_diagnostics_copied",
+      "value": "日志已复制，可以放心粘贴：其中不会出现密钥。"
+    },
+    {
+      "name": "provider_diagnostics_clear",
+      "value": "清空日志"
+    },
+    {
+      "name": "provider_diagnostics_note",
+      "value": "此处绝不写入 API 密钥，密钥只会以打码片段出现。"
+    },
+    {
       "name": "error_provider_not_saved",
       "value": "服务商保存失败。"
     }

@@ -96,6 +96,23 @@ export interface EndpointExploration {
   protocol: string;
   /** The protocols confirmed to answer, best first. Normally a single entry. */
   protocols: string[];
+  /**
+   * How the protocol probe came out, as a code to branch on.
+   *
+   * One of: `supported`, `no_usable_protocol`, `credentials_rejected`,
+   * `no_such_endpoint`, `rate_limited`, `server_unavailable`, `network_error`,
+   * `unreadable`, `undetermined`.
+   *
+   * This exists because `reason` is a sentence and a sentence cannot be
+   * switched on. "Probe failed" as a single outcome is the state this replaces:
+   * a wrong key, a wrong path and a switched-off router read identically, and
+   * each of them sends the user to edit a different field.
+   *
+   * `undetermined` matters most of these. It means the walk could not tell, not
+   * that it found nothing, and a screen that renders it as a failure is
+   * inventing a conclusion the runtime declined to reach.
+   */
+  status: string;
   /** Why negotiation stopped, when it stopped without settling on anything. */
   reason: string;
   models: ModelDiscovery;
@@ -176,6 +193,32 @@ export interface ProviderDraft {
   replaysAssistantReasoning?: boolean;
 }
 
+/**
+ * One line of the diagnostic log.
+ *
+ * The runtime writes this log before anything else in the configuration flow,
+ * because without it a failure is only observable as a failure: there is no way
+ * to tell an address problem from a key problem from a protocol the endpoint
+ * does not speak from a model list that is merely empty. The log is what makes
+ * those four questions separable after the fact.
+ *
+ * Every entry is already redacted on the runtime side. A key never reaches this
+ * type, so a platform that renders a line, or copies it into a bug report,
+ * cannot leak one by being careless — there is nothing to leak.
+ */
+export interface DiagnosticEntry {
+  /** `discovery` for capability and model probing, `chat` for a real turn. */
+  kind: string;
+  /** Which step this was, e.g. `probe_start`, `protocol_result`, `turn_failed`. */
+  stage: string;
+  /** A sentence describing the step. */
+  message: string;
+  /** When it happened, in milliseconds since the epoch. */
+  atMs: number;
+  /** The whole line as one already-formatted, already-redacted string. */
+  detail: string;
+}
+
 export interface SujiuBridge {
   listSessions(): Promise<SessionSummary[]>;
   listCharacters(query?: string): Promise<CharacterSummary[]>;
@@ -210,6 +253,31 @@ export interface SujiuBridge {
    * conversation behind it.
    */
   storedEndpoint(): Promise<StoredEndpoint | null>;
+  /**
+   * The diagnostic log, newest last.
+   *
+   * `limit` takes the most recent N lines; leave it off for everything held.
+   * Refusing a request because no limit was given would be perverse: the whole
+   * log is what a user needs when they are about to report a problem.
+   *
+   * The two halves — `discovery` and `chat` — are kept apart on purpose and can
+   * be asked for separately. Mixing them makes a protocol switch during a turn
+   * look like a probe result, which is exactly the confusion the log exists to
+   * remove.
+   */
+  diagnostics(limit?: number): Promise<DiagnosticEntry[]>;
+  /** Only the capability and model probing half of the log. */
+  discoveryDiagnostics(limit?: number): Promise<DiagnosticEntry[]>;
+  /** The whole log as plain text, for pasting into a bug report. */
+  diagnosticsText(): Promise<string>;
+  /**
+   * Empties the log.
+   *
+   * Only the log. Configuration, conversations and the stored endpoint are
+   * untouched, because a user clearing a log to start a fresh investigation is
+   * not asking to lose their setup.
+   */
+  clearDiagnostics(): Promise<void>;
   /**
    * Runs the next turn against `draft` instead of the saved provider, without
    * saving it.

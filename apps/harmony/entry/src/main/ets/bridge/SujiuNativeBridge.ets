@@ -13,7 +13,7 @@ import sujiu from 'libsujiu_napi.so';
 import { SujiuBridge, SessionSummary, CharacterSummary, ModelSummary, ContextSourceSummary,
   ConversationSnapshot, MessageSummary, MessageRole, TurnEvent, TurnEventKind,
   TurnEventListener, ProviderDraft, EndpointExploration, ModelDiscovery,
-  StoredEndpoint } from './SujiuBridge';
+  StoredEndpoint, DiagnosticEntry } from './SujiuBridge';
 
 interface NativeSession {
   id: string;
@@ -93,8 +93,25 @@ interface NativeModelDiscovery {
 interface NativeEndpointExploration {
   protocol: string;
   protocols: string[];
+  /** How the protocol probe came out, as a code. See `EndpointExploration.status`. */
+  status: string;
   reason?: string;
   models: NativeModelDiscovery;
+}
+
+/**
+ * The native shape of one diagnostic line.
+ *
+ * `detail` arrives fully rendered and fully redacted. Nothing here can contain
+ * a key, which is what lets a platform show a line or paste it into a bug
+ * report without a second filtering pass that could be got wrong.
+ */
+interface NativeDiagnosticEntry {
+  kind: string;
+  stage: string;
+  message: string;
+  atMs: number;
+  detail: string;
 }
 
 /**
@@ -154,6 +171,17 @@ interface NativeRuntime {
   discoverEndpoint(baseUrl: string, apiKey: string): NativeEndpointExploration;
   /** The endpoint already configured, or null. Never carries a credential. */
   storedEndpoint(): NativeStoredEndpoint | null;
+  /**
+   * The diagnostic log, newest last. `limit` is optional and takes the most
+   * recent N lines; omitted means everything held.
+   */
+  diagnostics(limit?: number): NativeDiagnosticEntry[];
+  /** Only the `discovery` half, which is what a settings screen usually wants. */
+  discoveryDiagnostics(limit?: number): NativeDiagnosticEntry[];
+  /** The whole log as text, already redacted. */
+  diagnosticsText(): string;
+  /** Empties the log. Configuration and conversations are untouched. */
+  clearDiagnostics(): void;
   /**
    * Runs a turn and reports each event as JSON.
    *
@@ -254,9 +282,20 @@ function toEndpointExploration(value: NativeEndpointExploration): EndpointExplor
   return {
     protocol: value.protocol,
     protocols: value.protocols,
+    status: value.status,
     reason: value.reason === undefined ? '' : value.reason,
     models: toModelDiscovery(value.models)
   } as EndpointExploration;
+}
+
+function toDiagnosticEntry(value: NativeDiagnosticEntry): DiagnosticEntry {
+  return {
+    kind: value.kind,
+    stage: value.stage,
+    message: value.message,
+    atMs: value.atMs,
+    detail: value.detail
+  } as DiagnosticEntry;
 }
 
 function toStoredEndpoint(value: NativeStoredEndpoint): StoredEndpoint {
@@ -608,6 +647,76 @@ export class SujiuNativeBridge implements SujiuBridge {
       return Promise.resolve(stored === null ? null : toStoredEndpoint(stored));
     } catch (error) {
       return Promise.reject(new Error(`stored_endpoint failed: ${(error as Error).message}`));
+    }
+  }
+
+  /**
+   * The diagnostic log, newest last.
+   *
+   * The runtime caps what it holds, so a limit is a request for fewer lines
+   * rather than a way to get more. Omitted means everything, which is the right
+   * default when someone is about to read a failure back to themselves.
+   */
+  diagnostics(limit?: number): Promise<DiagnosticEntry[]> {
+    try {
+      const rows: NativeDiagnosticEntry[] = this.runtime.diagnostics(limit);
+      const result: DiagnosticEntry[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        result.push(toDiagnosticEntry(rows[i]));
+      }
+      return Promise.resolve(result);
+    } catch (error) {
+      return Promise.reject(new Error(`diagnostics failed: ${(error as Error).message}`));
+    }
+  }
+
+  /**
+   * Only the capability and model probing half.
+   *
+   * A settings screen asks for this rather than the whole log so a protocol
+   * switch during a chat turn is not read as part of the answer to the question
+   * the user is currently looking at.
+   */
+  discoveryDiagnostics(limit?: number): Promise<DiagnosticEntry[]> {
+    try {
+      const rows: NativeDiagnosticEntry[] = this.runtime.discoveryDiagnostics(limit);
+      const result: DiagnosticEntry[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        result.push(toDiagnosticEntry(rows[i]));
+      }
+      return Promise.resolve(result);
+    } catch (error) {
+      return Promise.reject(
+        new Error(`discovery_diagnostics failed: ${(error as Error).message}`)
+      );
+    }
+  }
+
+  /**
+   * The whole log as one block of text, already redacted.
+   *
+   * This is what a user pastes into a bug report, so it is the entire log and
+   * not a summary: the line that explains a failure is rarely the last one.
+   */
+  diagnosticsText(): Promise<string> {
+    try {
+      return Promise.resolve(this.runtime.diagnosticsText());
+    } catch (error) {
+      return Promise.reject(new Error(`diagnostics_text failed: ${(error as Error).message}`));
+    }
+  }
+
+  /**
+   * Empties the log and nothing else. Someone clearing a log to investigate
+   * afresh has not asked to lose their endpoint or their conversations, and a
+   * clear that did that would be a trap rather than a convenience.
+   */
+  clearDiagnostics(): Promise<void> {
+    try {
+      this.runtime.clearDiagnostics();
+      return Promise.resolve();
+    } catch (error) {
+      return Promise.reject(new Error(`clear_diagnostics failed: ${(error as Error).message}`));
     }
   }
 

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use napi::bindgen_prelude::{AsyncTask, Result, Task};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
+use sujiu_ai::DiagnosticEntry;
 use sujiu_core::EndpointConfig;
 use sujiu_ffi::events::{TurnEvent, TurnEventReporter};
 use sujiu_ffi::runtime::{
@@ -94,7 +95,15 @@ impl From<ModelDiscovery> for ModelDiscoveryDto {
 pub struct EndpointExplorationDto {
     pub protocol: String,
     pub protocols: Vec<String>,
-    /// Why no protocol was settled, when none was.
+    /// How the protocol probe came out, as a code to branch on.
+    ///
+    /// A settings screen shows a different message per code. "Probe failed" as a
+    /// single message is the state this replaces: a wrong key, a wrong path and
+    /// a switched-off router all read the same, and each of them sends the user
+    /// to edit a different field.
+    pub status: String,
+    /// Why no protocol was settled, when none was. A sentence to read; `status`
+    /// is what to switch on.
     pub reason: Option<String>,
     pub models: ModelDiscoveryDto,
 }
@@ -104,8 +113,41 @@ impl From<EndpointExploration> for EndpointExplorationDto {
         Self {
             protocol: exploration.protocol,
             protocols: exploration.protocols,
+            status: exploration.status,
             reason: exploration.reason,
             models: ModelDiscoveryDto::from(exploration.models),
+        }
+    }
+}
+
+/// One line of the diagnostic log, as a settings screen or a bug report needs it.
+///
+/// The text arrived already redacted. Nothing here is a raw body, and nothing
+/// here is a credential: the runtime removes those before a line is ever
+/// recorded, so a platform can render or share this without a second pass.
+#[napi(object)]
+pub struct DiagnosticEntryDto {
+    /// `discovery` for capability and model probing, `chat` for a conversation.
+    /// The two are separate investigations and a reader must be able to tell
+    /// which one a line belongs to.
+    pub kind: String,
+    /// Where in that investigation this line sits: `probe_start`,
+    /// `protocol_result`, `chat_request`, `turn_failed`, and so on.
+    pub stage: String,
+    pub message: String,
+    pub at_ms: f64,
+    /// The detail as a rendered `key=value` line, ready to show.
+    pub detail: String,
+}
+
+impl From<&DiagnosticEntry> for DiagnosticEntryDto {
+    fn from(entry: &DiagnosticEntry) -> Self {
+        Self {
+            kind: entry.kind.label().to_string(),
+            stage: entry.stage.clone(),
+            message: entry.message.clone(),
+            at_ms: entry.at_ms as f64,
+            detail: entry.render(),
         }
     }
 }
@@ -589,12 +631,55 @@ impl SujiuRuntimeBridge {
     pub fn cancel_turn(&self) {
         self.runtime.cancel();
     }
+
+    /// The diagnostic log, oldest entry first.
+    ///
+    /// This is what makes a failure debuggable instead of guessable: it names the
+    /// endpoint, every protocol that was tried, what each one answered, whether
+    /// the model list worked, which protocol and model the turn actually used,
+    /// and which stage a failure happened in. `limit` is a number of most
+    /// recent entries; zero means everything the log still holds.
+    #[napi]
+    pub fn diagnostics(&self, limit: Option<u32>) -> Vec<DiagnosticEntryDto> {
+        self.runtime
+            .diagnostics(limit.unwrap_or(0) as usize)
+            .iter()
+            .map(DiagnosticEntryDto::from)
+            .collect()
+    }
+
+    /// Only the capability and model probing half of the log.
+    ///
+    /// Someone deciding which key to type wants the endpoint's behaviour, not
+    /// the last conversation's traffic.
+    #[napi]
+    pub fn discovery_diagnostics(&self, limit: Option<u32>) -> Vec<DiagnosticEntryDto> {
+        self.runtime
+            .discovery_diagnostics(limit.unwrap_or(0) as usize)
+            .iter()
+            .map(DiagnosticEntryDto::from)
+            .collect()
+    }
+
+    /// The whole log as text, for the "copy this into a bug report" case.
+    #[napi]
+    pub fn diagnostics_text(&self) -> String {
+        self.runtime.diagnostics_text()
+    }
+
+    /// Start a fresh investigation. The stored endpoint and key are untouched:
+    /// the log is evidence, not configuration.
+    #[napi]
+    pub fn clear_diagnostics(&self) {
+        self.runtime.clear_diagnostics();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::ProviderConfigDto;
     use sujiu_core::{apply_reasoning_override, EndpointCapabilities, Protocol};
+    use sujiu_ffi::events::TurnEventReporter;
 
     fn form_fields(replays_assistant_reasoning: Option<bool>) -> ProviderConfigDto {
         ProviderConfigDto {
@@ -798,5 +883,114 @@ mod tests {
         assert_eq!(chosen.base_url, "https://gateway.example/v1");
         assert_eq!(chosen.selected_model.as_deref(), Some("picked-model"));
         assert_eq!(chosen.label, "Gateway");
+    }
+
+    /// The log is only useful if a platform can render it, and it is only safe if
+    /// a platform can never be the thing that leaks the key. The redaction has
+    /// already happened by the time a DTO exists, so what crosses is a finished
+    /// line and there is no second pass to forget.
+    ///
+    /// The NAPI methods themselves need a live runtime binding and cannot run in
+    /// a test binary, so this drives the mapping and the log the mapping reads.
+    #[test]
+    fn a_diagnostic_line_crosses_the_bridge_ready_to_show_and_without_the_key() {
+        let runtime =
+            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let key = "sk-sujiu-bridge-1234567890abcdef";
+
+        runtime.tokio.block_on(runtime.discover_endpoint(
+            "https://sujiu-does-not-resolve.invalid/v1".into(),
+            key.into(),
+        ));
+
+        let entries: Vec<super::DiagnosticEntryDto> = runtime
+            .diagnostics(0)
+            .iter()
+            .map(super::DiagnosticEntryDto::from)
+            .collect();
+
+        assert!(!entries.is_empty(), "the probe has to have said something");
+
+        for entry in &entries {
+            assert!(
+                !entry.message.contains(key) && !entry.detail.contains(key),
+                "a credential reached the platform: {}",
+                entry.detail
+            );
+            assert!(
+                !entry.stage.is_empty(),
+                "a line with no stage cannot be read"
+            );
+            assert!(entry.at_ms > 0.0, "a line with no time cannot be ordered");
+        }
+
+        let requested = entries
+            .iter()
+            .find(|entry| entry.stage == "discovery_request")
+            .expect("the request that started it all");
+        assert_eq!(requested.kind, "discovery");
+        assert!(
+            requested.detail.contains("sujiu-does-not-resolve.invalid"),
+            "the line has to name the endpoint, or it is not diagnosable: {}",
+            requested.detail
+        );
+        assert!(
+            !requested.message.contains("sk-sujiu-bridge"),
+            "the masked form must not be the raw one"
+        );
+    }
+
+    /// Asking for one half of the log has to return one half. A settings screen
+    /// showing the endpoint's behaviour should not have the last conversation
+    /// interleaved into it, or the relevant line is impossible to pick out.
+    #[test]
+    fn a_platform_reading_only_the_discovery_half_gets_only_the_discovery_half() {
+        let runtime =
+            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        runtime
+            .set_endpoint(Some(
+                ProviderConfigDto {
+                    id: "endpoint-default".into(),
+                    name: "Gateway".into(),
+                    base_url: "https://gateway.example/v1".into(),
+                    selected_model: Some("picked-model".into()),
+                    max_tokens: None,
+                    temperature: None,
+                    replays_assistant_reasoning: None,
+                }
+                .to_domain(),
+            ))
+            .expect("provider");
+
+        let mut reporter = sujiu_ffi::runtime::CollectingReporter::default();
+        runtime.tokio.block_on(runtime.send_turn(
+            sujiu_ffi::runtime::SendTurnRequest {
+                session_id: runtime.sessions()[0].id.clone(),
+                user_text: "hello".into(),
+                provider: None,
+                api_key: Some("sk-a-key-1234567890abcdef".into()),
+            },
+            &mut reporter,
+        ));
+
+        let everything: Vec<super::DiagnosticEntryDto> = runtime
+            .diagnostics(0)
+            .iter()
+            .map(super::DiagnosticEntryDto::from)
+            .collect();
+        let discovery: Vec<super::DiagnosticEntryDto> = runtime
+            .discovery_diagnostics(0)
+            .iter()
+            .map(super::DiagnosticEntryDto::from)
+            .collect();
+
+        assert!(
+            everything.len() > discovery.len(),
+            "the turn produced lines the discovery filter should have removed"
+        );
+        assert!(
+            discovery.iter().all(|entry| entry.kind == "discovery"),
+            "the filtered read leaked the conversation half"
+        );
     }
 }

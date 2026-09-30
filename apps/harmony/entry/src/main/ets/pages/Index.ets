@@ -1,13 +1,19 @@
 import { common } from '@kit.AbilityKit';
 import { KeyboardAvoidMode } from '@kit.ArkUI';
-import { CharacterSummary, ModelSummary, ProviderDraft, StoredEndpoint } from '../bridge/SujiuBridge';
+import {
+  CharacterSummary,
+  DiagnosticEntry,
+  ModelSummary,
+  ProviderDraft,
+  StoredEndpoint
+} from '../bridge/SujiuBridge';
 import { AppGraph } from '../app/Controller';
 import { Composer } from '../components/Composer';
 import { ConversationView } from '../components/ConversationView';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { CharacterSelectorSheet, ContextSheet, ModelSelectorSheet } from '../components/SelectorSheets';
 import { AppearanceMode } from '../platform/PlatformServices';
-import { ChatController } from '../presentation/ChatController';
+import { ChatController, EndpointState } from '../presentation/ChatController';
 import { Copy } from '../ui/Copy';
 import { AppTheme } from '../ui/theme/Theme';
 
@@ -65,6 +71,17 @@ struct Index {
    * field can be rebuilt to show it. See providerField.
    */
   @State private providerFieldEpoch: number = 0;
+  /**
+   * Whether the diagnostic log is expanded.
+   *
+   * View state, not controller state: the log belongs to the runtime and stays
+   * loaded whether or not anyone is looking at it. Collapsing it hides lines,
+   * and hiding is the point — a hundred log lines above the save button would
+   * bury the one control that commits the configuration.
+   */
+  @State private showDiagnostics: boolean = false;
+  /** True right after a successful copy, so the user knows the paste is safe. */
+  @State private diagnosticsCopied: boolean = false;
   private pathStack: NavPathStack = new NavPathStack();
 
   aboutToAppear(): void {
@@ -201,17 +218,59 @@ struct Index {
     .backgroundColor(this.theme.pageBackground);
   }
 
+  /**
+   * The dim that sits over the conversation while the narrow-layout drawer is
+   * open, and the tap target that closes it.
+   *
+   * `SideBarContainer` provides no overlay of its own. Its whole attribute set
+   * is `showSideBar`, `showSideBarWithGesture`, `autoHide`, `sideBarPosition`,
+   * `divider` and the width bounds — there is no scrim, no mask and no dim, so
+   * "the overlay scrim stays platform provided" is not something the platform
+   * offers.
+   *
+   * That leaves a real trap on a narrow window. The sidebar is 300vp, which is
+   * about 938px on this panel, so it covers x 0-938 — including the top bar's
+   * own toggle at x 25-150. Once the drawer is open there is no button left to
+   * close it, and a tap aimed at the conversation lands on the conversation
+   * instead of dismissing anything. Edge swipe and the system back gesture both
+   * work, but neither is discoverable and one of them is a system-level
+   * shortcut rather than this app's.
+   *
+   * So the app draws the overlay it needs. Tapping the covered conversation
+   * closes the drawer, which is what a drawer over content is expected to do,
+   * and the content stops responding while it is covered, because it is not
+   * what the user is looking at.
+   */
+  @Builder
+  private drawerScrim() {
+    if (this.drawerOpen && !this.wideLayout) {
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.theme.scrim)
+        .onClick(() => {
+          this.drawerOpen = false;
+        });
+    }
+  }
+
   @Builder
   private conversationColumn(weight: number = 0) {
-    Column() {
-      this.topBar();
-      ConversationView({ controller: this.controller, theme: this.theme });
-      Composer({ controller: this.controller, theme: this.theme });
+    Stack({ alignContent: Alignment.TopStart }) {
+      Column() {
+        this.topBar();
+        ConversationView({ controller: this.controller, theme: this.theme });
+        Composer({ controller: this.controller, theme: this.theme });
+      }
+      .width('100%')
+      .height('100%')
+      .backgroundColor(this.theme.pageBackground);
+
+      this.drawerScrim();
     }
     .width('100%')
     .height('100%')
-    .layoutWeight(weight)
-    .backgroundColor(this.theme.pageBackground);
+    .layoutWeight(weight);
   }
 
   /**
@@ -314,9 +373,10 @@ struct Index {
       .height('100%')
       .sideBarWidth(300)
       .showSideBar(this.drawerOpen)
-      // The platform control button floats over the content area, which
-      // would sit below the top bar. The top bar owns the toggle instead;
-      // edge-swipe and the overlay scrim stay platform provided.
+      // The platform control button floats over the content area, which would
+      // sit below the top bar, and it is hidden anyway. The top bar owns the
+      // toggle and `drawerScrim` owns the dismissal; the edge swipe stays
+      // platform provided because the platform genuinely does provide it.
       .showControlButton(false)
       .showSideBarWithGesture(true)
       .autoHide(!this.wideLayout)
@@ -457,6 +517,40 @@ struct Index {
     this.providerFieldEpoch += 1;
   }
 
+  /**
+   * Expands or collapses the log, loading it the first time.
+   *
+   * Loading on expand rather than on every render is deliberate: a settings
+   * screen that reads the whole log on each keystroke would be doing work for a
+   * panel nobody opened.
+   */
+  private toggleDiagnostics(): void {
+    this.showDiagnostics = !this.showDiagnostics;
+    this.diagnosticsCopied = false;
+    if (this.showDiagnostics) {
+      this.controller.loadDiagnostics();
+    }
+  }
+
+  /**
+   * Copies the whole log for a bug report.
+   *
+   * The text comes from the runtime already redacted, so this path has nothing
+   * to strip and no way to be the thing that leaks a key. The notice says the
+   * paste is safe, because a user told only "copied" will not paste a log they
+   * suspect contains their key.
+   */
+  private copyDiagnostics(): void {
+    this.controller.copyDiagnostics().then((copied: boolean) => {
+      this.diagnosticsCopied = copied;
+    });
+  }
+
+  private clearDiagnostics(): void {
+    this.controller.clearDiagnostics();
+    this.diagnosticsCopied = false;
+  }
+
   private clearProvider(): void {
     this.controller.clearProvider();
     this.providerBaseUrl = '';
@@ -487,36 +581,40 @@ struct Index {
           .fontSize(12)
           .fontColor(this.theme.textPrimary);
       }
-      if (this.controller.endpointNote.length > 0) {
-        Text(this.controller.endpointNote)
+      // The listing sentence comes from a code, in this app's language. The
+      // runtime's own English sentence about it is kept for the diagnostic log,
+      // where a developer is the reader; on this screen it would be an
+      // untranslated clause inside a translated paragraph.
+      if (this.controller.exploration !== null) {
+        Text(Copy.listingNote(this.controller.listingCode))
           .fontSize(12)
           .fontColor(this.theme.textSecondary)
           .width('100%');
       }
-      if (this.controller.exploration !== null &&
-        this.controller.exploration.reason.length > 0) {
-        Text(this.controller.exploration.reason)
+      if (this.controller.discoveredModels.length > 0) {
+        Text($r('app.string.provider_model_choose'))
           .fontSize(12)
           .fontColor(this.theme.textSecondary)
           .width('100%');
-      }
-      if (this.controller.models.length > 0) {
-        Text($r('app.string.provider_models_found'))
-          .fontSize(12)
-          .fontColor(this.theme.textSecondary)
-          .width('100%');
-        // Capped, and the reason is the save button. A gateway that lists
-        // eighty-one models would push the one control that commits the whole
-        // configuration off the bottom of the screen, and a form whose save
-        // button is a scroll away is a form people give up on. Everything is
-        // still reachable by typing, and nothing is hidden: the field above is
-        // the way to name a model the cap leaves out.
+        // Capped by the controller, and the reason is the model field below and
+        // the save button. A gateway that lists eighty-one models would push
+        // the one control that commits the configuration off the bottom of the
+        // screen, and a form whose save button is a scroll away is a form people
+        // give up on. Nothing is hidden: the field below is the way to name a
+        // model the cap leaves out, and the status line says how many there
+        // really are.
         Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
-          ForEach(this.controller.models.slice(0, 12), (model: ModelSummary) => {
+          ForEach(this.controller.offeredModels, (model: ModelSummary) => {
             Text(model.name)
               .fontSize(12)
               .padding({ left: 10, right: 10, top: 6, bottom: 6 })
               .borderRadius(14)
+              // A chip is coloured only when it is what the field already says.
+              // The colour reflects the user's own text, it is not the program
+              // proposing a model — which is why an untouched list is entirely
+              // uncoloured. A probe that highlighted its first result would be
+              // choosing for the user, and a chip list with one blue entry
+              // among eighty reads exactly like that.
               .backgroundColor(
                 this.providerModel === model.id ? this.theme.accent : this.theme.surfaceMuted
               )
@@ -528,8 +626,8 @@ struct Index {
           }, (model: ModelSummary) => model.id);
         }
         .width('100%');
-        if (this.controller.models.length > 12) {
-          Text($r('app.string.provider_models_more'))
+        if (this.controller.discoveredModelCount > this.controller.offeredModels.length) {
+          Text($r('app.string.provider_models_more', this.controller.discoveredModelCount))
             .fontSize(12)
             .fontColor(this.theme.textSecondary)
             .width('100%');
@@ -540,6 +638,98 @@ struct Index {
           .fontSize(12)
           .fontColor(this.theme.dangerAccent)
           .width('100%');
+      }
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%');
+  }
+
+  /**
+   * Green for the states that mean it worked, red for the ones that need a
+   * field changed, muted for everything in between.
+   *
+   * The distinction that matters is success versus not. A working protocol with
+   * no model list is a success — the endpoint chats — and colouring it as a
+   * failure pushes the user to abandon a configuration that is fine.
+   */
+  private endpointStateColor(): string {
+    const state: EndpointState =
+      this.controller.endpointState(this.providerBaseUrl, this.providerKey);
+    if (state === EndpointState.Usable || state === EndpointState.ModelsFound) {
+      return this.theme.successText;
+    }
+    if (state === EndpointState.AuthFailed || state === EndpointState.NoSuchEndpoint ||
+      state === EndpointState.NetworkError || state === EndpointState.ServerError ||
+      state === EndpointState.RateLimited || state === EndpointState.NoUsableProtocol) {
+      return this.theme.dangerAccent;
+    }
+    return this.theme.textSecondary;
+  }
+
+  /**
+   * The diagnostic log.
+   *
+   * This is the answer to "why did that not work", and it is the reason the log
+   * was written before the rest of this flow: a failed probe with no record is
+   * a failure the user can only describe and not diagnose. Every line arrives
+   * already redacted, so this can be read on screen or copied into a bug report
+   * without a filtering pass that could be got wrong.
+   */
+  @Builder
+  private diagnosticsView() {
+    Column({ space: 6 }) {
+      Row({ space: 8 }) {
+        Button(this.showDiagnostics
+          ? $r('app.string.provider_diagnostics_hide')
+          : $r('app.string.provider_diagnostics_show'))
+          .fontSize(13)
+          .backgroundColor(this.theme.surfaceMuted)
+          .fontColor(this.theme.textPrimary)
+          .layoutWeight(1)
+          .onClick(() => this.toggleDiagnostics());
+        if (this.showDiagnostics && this.controller.diagnostics.length > 0) {
+          Button($r('app.string.provider_diagnostics_copy'))
+            .fontSize(13)
+            .backgroundColor(this.theme.surfaceMuted)
+            .fontColor(this.theme.textPrimary)
+            .onClick(() => this.copyDiagnostics());
+          Button($r('app.string.provider_diagnostics_clear'))
+            .fontSize(13)
+            .backgroundColor(this.theme.surfaceMuted)
+            .fontColor(this.theme.textPrimary)
+            .onClick(() => this.clearDiagnostics());
+        }
+      }
+      .width('100%');
+      if (this.showDiagnostics) {
+        if (this.diagnosticsCopied) {
+          Text($r('app.string.provider_diagnostics_copied'))
+            .fontSize(12)
+            .fontColor(this.theme.textSecondary)
+            .width('100%');
+        } else if (this.controller.diagnostics.length === 0) {
+          Text($r('app.string.provider_diagnostics_empty'))
+            .fontSize(12)
+            .fontColor(this.theme.textSecondary)
+            .width('100%');
+        } else {
+          // Newest last, so the end of the list is where the answer is. The
+          // whole log is shown rather than a tail: the line that explains a
+          // failure is rarely the last one, and a log that only shows the end
+          // hides the request that caused it.
+          ForEach(this.controller.diagnostics, (entry: DiagnosticEntry) => {
+            Text(entry.detail)
+              .fontSize(11)
+              .fontColor(
+                entry.kind === 'discovery' ? this.theme.textSecondary : this.theme.textPrimary
+              )
+              .width('100%');
+          }, (entry: DiagnosticEntry) => `${entry.atMs}-${entry.stage}-${entry.message}`);
+          Text($r('app.string.provider_diagnostics_note'))
+            .fontSize(11)
+            .fontColor(this.theme.textSecondary)
+            .width('100%');
+        }
       }
     }
     .alignItems(HorizontalAlign.Start)
@@ -655,8 +845,12 @@ struct Index {
               .fontSize(12)
               .fontColor(this.theme.textSecondary)
               .width('100%');
+            // The order is the order the work happens in, and it is not
+            // cosmetic: address, then key, then ask, then model. A model field
+            // placed before the probe asks the user for the one thing they
+            // cannot know yet, and makes the endpoint un-saveable until they
+            // have guessed the answer the runtime could have looked up.
             this.providerField('baseUrl', $r('app.string.provider_base_url'));
-            this.providerField('model', $r('app.string.provider_model'));
             this.providerField('apiKey', $r('app.string.provider_api_key'));
             if (this.controller.hasCredential) {
               Text($r('app.string.provider_key_stored'))
@@ -670,6 +864,9 @@ struct Index {
               .fontSize(13)
               .backgroundColor(this.theme.surfaceMuted)
               .fontColor(this.theme.textPrimary)
+              // An address alone is enough to ask. Refusing the button without a
+              // key would also be a way of saying "not configured yet" before
+              // anything has been typed, which is not the same message.
               .enabled(!this.controller.exploringEndpoint && this.providerBaseUrl.trim().length > 0)
               .width('100%')
               .onClick(() => this.exploreProvider());
@@ -677,8 +874,40 @@ struct Index {
               .fontSize(12)
               .fontColor(this.theme.textSecondary)
               .width('100%');
+            // The status line, always. Which state this is tells the user what
+            // to do next, and a form that only shows one when it fails leaves
+            // them unable to tell a working endpoint from an untested one.
+            Text(Copy.endpointState(
+              this.controller.endpointState(this.providerBaseUrl, this.providerKey),
+              this.controller.discoveredModelCount
+            ))
+              .fontSize(12)
+              .fontColor(this.endpointStateColor())
+              .width('100%');
             if (this.controller.explored) {
               this.exploredProvider()
+            }
+            // The model comes last, because it is the outcome of the probe. It
+            // stays editable in every state: a gateway with no listing route
+            // still chats, and taking the text field away there would close the
+            // only door the user has left.
+            this.providerField('model', $r('app.string.provider_model'));
+            Text($r('app.string.provider_model_hint'))
+              .fontSize(12)
+              .fontColor(this.theme.textSecondary)
+              .width('100%');
+            if (this.controller.hasProvider) {
+              // Re-probing is separate from saving. A user who suspects the
+              // stored key is wrong needs to ask again without committing
+              // anything, and folding that into the save button would make
+              // every re-check a configuration change.
+              Button($r('app.string.provider_reprobe'))
+                .fontSize(13)
+                .backgroundColor(this.theme.surfaceMuted)
+                .fontColor(this.theme.textPrimary)
+                .enabled(!this.controller.exploringEndpoint && this.providerBaseUrl.trim().length > 0)
+                .width('100%')
+                .onClick(() => this.exploreProvider());
             }
             Row({ space: 8 }) {
               Button($r('app.string.provider_save'))
@@ -704,6 +933,15 @@ struct Index {
           }
           .alignItems(HorizontalAlign.Start)
           .width('100%');
+        }
+        ListItem() {
+          Text($r('app.string.settings_section_diagnostics'))
+            .fontSize(11)
+            .fontColor(this.theme.textSecondary)
+            .width('100%');
+        }
+        ListItem() {
+          this.diagnosticsView()
         }
         ListItem() {
           Text($r('app.string.settings_section_appearance'))

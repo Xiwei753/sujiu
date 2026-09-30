@@ -25,7 +25,7 @@ fi
 if [ -z "${DEVECO_CLI_CLT_PATH:-}" ]; then
   echo "DEVECO_CLI_CLT_PATH is not set." >&2
   echo "Point it at the HarmonyOS Command Line Tools, for example:" >&2
-  echo "  export DEVECO_CLI_CLT_PATH=\$HOME/harmony/command-line-tools" >&2
+  echo "  export DEVECO_CLI_CLT_PATH=\$HOME/.harmony-cli" >&2
   exit 1
 fi
 
