@@ -548,11 +548,18 @@ export class SujiuNativeBridge implements SujiuBridge {
    * the real configuration. A blank address surfaces as a rejected promise.
    */
   configureProvider(draft: ProviderDraft): Promise<void> {
-    return this.runtime
-      .configureProvider(toNativeProvider(draft))
-      .then(() => {
-        this.draft = draft;
-      });
+    try {
+      // The native call is synchronous and returns nothing, so this must not
+      // chain onto it. Reading `.then` off the result made every save report
+      // a failure while the endpoint had in fact been written, which is the
+      // worst shape a bug can take: the user is told their work was lost and
+      // it was not.
+      this.runtime.configureProvider(toNativeProvider(draft));
+      this.draft = draft;
+      return Promise.resolve();
+    } catch (error) {
+      return Promise.reject(new Error(`configure_provider failed: ${(error as Error).message}`));
+    }
   }
 
   /**

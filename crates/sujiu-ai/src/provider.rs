@@ -1,7 +1,39 @@
+use std::time::Duration;
+
 use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::types::{AssistantTurn, ProviderRequest, ToolCall, ToolResult};
+
+/// How long to wait for a connection, and how long to wait for the next byte.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const READ_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The HTTP client every provider call goes through.
+///
+/// A default client has no timeout at all, which turns a service that accepts a
+/// connection and then says nothing into a turn that never ends: the user
+/// watches a stop button they have to find and press themselves, and nothing in
+/// the logs says why. An endpoint that has gone quiet is a fact about the
+/// endpoint, and the runtime should be the one to notice it.
+///
+/// The read timeout is the gap between reads, not the length of the response,
+/// so a long answer that keeps streaming is never cut off. Only silence counts.
+pub fn http_client() -> reqwest::Client {
+    http_client_with(READ_TIMEOUT)
+}
+
+/// The same client with a chosen read timeout.
+///
+/// Separated from [`http_client`] so the silence-is-bounded behaviour can be
+/// proven in a test without waiting out the production figure.
+pub fn http_client_with(read_timeout: Duration) -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(read_timeout)
+        .build()
+        .unwrap_or_default()
+}
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
@@ -87,5 +119,52 @@ pub trait AiProvider: Send + Sync {
         // An adapter that can still be interrupted mid-answer reports that as
         // `Cancelled` instead, because there is no complete turn to return.
         Ok(turn)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Read;
+
+    use super::*;
+
+    /// A listener that accepts the connection and then never says anything.
+    ///
+    /// This is what a model endpoint does when it has accepted a request it is
+    /// never going to answer, which is not a hypothetical: it is what a real
+    /// gateway did when asked for a model its account could not reach.
+    fn silent_endpoint() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        std::thread::spawn(move || {
+            // Hold the connection open and read nothing into it, so the client
+            // is waiting on a response rather than on a connection.
+            if let Ok((stream, _)) = listener.accept() {
+                let mut stream = stream;
+                let mut buffer = [0u8; 1024];
+                loop {
+                    match stream.read(&mut buffer) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                    }
+                }
+            }
+        });
+        base
+    }
+
+    #[tokio::test]
+    async fn an_endpoint_that_stops_answering_becomes_an_error_rather_than_a_hang() {
+        let base = silent_endpoint();
+        let client = http_client_with(Duration::from_millis(300));
+        let error = client
+            .get(format!("{base}/v1/models"))
+            .send()
+            .await
+            .expect_err("a silent endpoint must not return a response");
+
+        // This is the shape the rest of the runtime already knows how to read:
+        // a timeout is a transport problem, not a protocol the endpoint lacks.
+        assert!(error.is_timeout(), "expected a timeout, got: {error}");
     }
 }

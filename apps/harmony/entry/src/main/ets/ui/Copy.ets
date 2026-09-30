@@ -106,6 +106,8 @@ export class Copy {
         return $r('app.string.error_session_not_found');
       case 'provider_not_saved':
         return $r('app.string.error_provider_not_saved');
+      case 'provider_no_models':
+        return $r('app.string.provider_no_models');
       case 'turn_busy':
         return $r('app.string.error_turn_busy');
       default:

@@ -95,7 +95,7 @@ pub struct OpenAiResponsesProvider {
 impl OpenAiResponsesProvider {
     pub fn new(config: ResponsesConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::http_client(),
             config,
         }
     }

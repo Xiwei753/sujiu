@@ -261,6 +261,38 @@
       "value": "API key"
     },
     {
+      "name": "provider_explore",
+      "value": "Ask this endpoint"
+    },
+    {
+      "name": "provider_exploring",
+      "value": "Asking…"
+    },
+    {
+      "name": "provider_explore_hint",
+      "value": "Type an address and a key, then ask what is there. You only have to choose a model."
+    },
+    {
+      "name": "provider_protocol_found",
+      "value": "It speaks"
+    },
+    {
+      "name": "provider_protocol_none",
+      "value": "No protocol could be established."
+    },
+    {
+      "name": "provider_models_found",
+      "value": "Models it lists"
+    },
+    {
+      "name": "provider_models_more",
+      "value": "and more — type a name to pick one of the rest"
+    },
+    {
+      "name": "provider_no_models",
+      "value": "Type a model name above; the address still works."
+    },
+    {
       "name": "provider_save",
       "value": "Save provider"
     },

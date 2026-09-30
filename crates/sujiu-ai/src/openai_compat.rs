@@ -80,7 +80,7 @@ pub struct OpenAiCompatProvider {
 impl OpenAiCompatProvider {
     pub fn new(config: OpenAiCompatConfig) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: crate::provider::http_client(),
             config,
         }
     }

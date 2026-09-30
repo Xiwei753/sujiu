@@ -258,20 +258,34 @@ The test for a new capability: **rewriting a page layout must not require
 touching credentials, files, permissions, sharing, notifications or lifecycle
 code.**
 
-#### Provider configuration and credentials
+#### Endpoint configuration and credentials
 
-A provider entry is application data, so it crosses the bridge:
+An endpoint entry is application data, so it crosses the bridge:
 
 ```text
-UI settings form
+UI settings form (base URL + key, no model yet)
+  -> presentation.exploreEndpoint(baseUrl, key)
+      -> bridge.discoverEndpoint(baseUrl, key)   // writes nothing
+  -> user picks a listed model, or types one
   -> presentation.saveProvider(draft, secret)
-      -> bridge.configureProvider(draft)      // runtime validates the kind
-      -> CredentialService.saveSecret(secret) // platform storage
-      -> bridge.listModels()                  // now non-empty
+      -> bridge.configureProvider(draft)         // runtime validates the address
+      -> CredentialService.saveSecret(secret)    // platform storage
+      -> bridge.listModels()                     // now non-empty
 ```
 
-A credential is not page state, not presentation state and not a field on a
-provider entry. It is a secret that:
+**Asking comes before saving.** The model is the one choice a machine cannot
+make for the user, and it is also the one thing nobody can know before the
+endpoint has been asked. So the settings screen offers "ask this endpoint" from
+a form that holds nothing but an address and a key, and discovery writes nothing
+to disk. Saving a model is a separate, later act.
+
+A listing failure never blocks that act: every outcome of discovery — no listing
+route, no permission, rate limited, unreachable — leaves manual model entry
+available, and the screen says which one happened rather than showing an empty
+list.
+
+A credential is not page state, not presentation state and not a field on an
+endpoint entry. It is a secret that:
 
 - is written through `CredentialService` and nowhere else;
 - is read immediately before a turn and handed to the bridge per turn, so the
@@ -279,9 +293,9 @@ provider entry. It is a secret that:
 - never appears in a `ProviderDraft`, a UI state object, a log line, or a
   bridge event.
 
-The runtime advertises the provider kinds it can actually drive, and the
-configuration UI offers only those. A kind the runtime cannot drive is rejected
-at configuration time rather than at the first turn.
+The user chooses no vendor and no protocol. The runtime advertises the protocols
+it can speak, in the order it prefers them, and negotiation settles which one an
+endpoint actually gets. A hostname may produce a display label and nothing else.
 
 #### Persistence
 
@@ -327,12 +341,17 @@ Copy is a **UI-layer** concern, and it is the only layer that produces sentences
   "Search Context" and English casing in the runtime cannot be localized.
 
 The same rule runs the other way. **A platform supplies values, not semantics.**
-A settings form that types a base URL, a model and a key hands those three
-fields to presentation; it does not also decide the provider kind, a sampling
-`max_tokens` or a `temperature`. Those are provider semantics, so they live in
-the runtime as defaults that a platform may override through `extra` but never
+A settings form that types a base URL, a key and a model hands those three
+fields to presentation; it does not also decide a vendor, a protocol, a sampling
+`max_tokens` or a `temperature`. Those are endpoint semantics, so they live in
+the runtime as defaults that a platform may override through `overrides` but never
 has to restate. Otherwise two platforms can configure the same endpoint into two
 different conversations.
+
+It also does not decide the model by guessing at it. The form asks the endpoint
+what it offers and shows the answer, and the person picks. A form that filled the
+model field in from a hostname would be making a protocol decision by name, which
+is the same mistake one layer up.
 
 Passing content through unshortened is the same discipline. The runtime hands a
 character's description as its author wrote it and does not cut it into a

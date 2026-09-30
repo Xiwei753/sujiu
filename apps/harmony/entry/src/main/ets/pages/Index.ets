@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { KeyboardAvoidMode } from '@kit.ArkUI';
-import { CharacterSummary, ProviderDraft } from '../bridge/SujiuBridge';
+import { CharacterSummary, ModelSummary, ProviderDraft } from '../bridge/SujiuBridge';
 import { AppGraph } from '../app/Controller';
 import { Composer } from '../components/Composer';
 import { ConversationView } from '../components/ConversationView';
@@ -60,6 +60,11 @@ struct Index {
   @State private providerBaseUrl: string = '';
   @State private providerModel: string = '';
   @State private providerKey: string = '';
+  /**
+   * Bumped only when something other than a keystroke changes a field, so the
+   * field can be rebuilt to show it. See providerField.
+   */
+  @State private providerFieldEpoch: number = 0;
   private pathStack: NavPathStack = new NavPathStack();
 
   aboutToAppear(): void {
@@ -320,28 +325,60 @@ struct Index {
     .backgroundColor(this.theme.pageBackground);
   }
 
+  /**
+   * One settings field.
+   *
+   * The `text` parameter is the field's *initial* value. The toolkit this
+   * project builds against offers no two-way binding for it, so a field wired
+   * the obvious one-way way looks right for as long as the user is the one
+   * typing, and quietly lies the moment something else writes to it: choosing a
+   * model out of a discovered list, or clearing the form.
+   *
+   * So the input is wrapped in a ForEach keyed on an epoch, and the two moments
+   * that write to a field from outside a keystroke bump that epoch. The rebuild
+   * is what makes the new value visible. Typing does not bump it, so the field
+   * is never rebuilt out from under the cursor.
+   */
   @Builder
-  private providerField(field: string, label: ResourceStr, value: string, isSecret: boolean) {
+  private providerField(field: string, label: ResourceStr) {
     Column({ space: 2 }) {
       Text(label)
         .fontSize(12)
         .fontColor(this.theme.textSecondary)
         .width('100%');
-      TextInput({ text: value, placeholder: '' })
-        .type(isSecret ? InputType.Password : InputType.Normal)
-        .fontSize(14)
-        .backgroundColor(this.theme.surfaceMuted)
-        .fontColor(this.theme.textPrimary)
-        .onChange((next: string): void => {
-          if (field === 'baseUrl') {
-            this.providerBaseUrl = next;
-          } else if (field === 'model') {
-            this.providerModel = next;
-          } else {
-            this.providerKey = next;
-          }
-        })
-        .width('100%');
+      ForEach([this.providerFieldEpoch], (): void => {
+        if (field === 'baseUrl') {
+          TextInput({ text: this.providerBaseUrl, placeholder: '' })
+            .type(InputType.Normal)
+            .fontSize(14)
+            .backgroundColor(this.theme.surfaceMuted)
+            .fontColor(this.theme.textPrimary)
+            .width('100%')
+            .onChange((next: string): void => {
+              this.providerBaseUrl = next;
+            })
+        } else if (field === 'model') {
+          TextInput({ text: this.providerModel, placeholder: '' })
+            .type(InputType.Normal)
+            .fontSize(14)
+            .backgroundColor(this.theme.surfaceMuted)
+            .fontColor(this.theme.textPrimary)
+            .width('100%')
+            .onChange((next: string): void => {
+              this.providerModel = next;
+            })
+        } else {
+          TextInput({ text: this.providerKey, placeholder: '' })
+            .type(InputType.Password)
+            .fontSize(14)
+            .backgroundColor(this.theme.surfaceMuted)
+            .fontColor(this.theme.textPrimary)
+            .width('100%')
+            .onChange((next: string): void => {
+              this.providerKey = next;
+            })
+        }
+      }, (): string => this.providerFieldEpoch.toString())
     }
     .alignItems(HorizontalAlign.Start)
     .width('100%');
@@ -362,11 +399,111 @@ struct Index {
     this.providerKey = '';
   }
 
+  /**
+   * Asks an address what it can do, before anything is saved.
+   *
+   * The button sits above the save button on purpose. Saving demands a model,
+   * and the model is the one thing the user cannot be expected to know before
+   * asking, so an endpoint that has to be saved before it can be explored asks
+   * for its own answer in advance. This is the order the work actually happens
+   * in: type an address, ask, then choose.
+   */
+  private exploreProvider(): void {
+    this.controller.exploreEndpoint(this.providerBaseUrl.trim(), this.providerKey.trim());
+  }
+
+  private chooseModel(id: string): void {
+    this.providerModel = id;
+    this.providerFieldEpoch += 1;
+  }
+
   private clearProvider(): void {
     this.controller.clearProvider();
     this.providerBaseUrl = '';
     this.providerModel = '';
     this.providerKey = '';
+    this.providerFieldEpoch += 1;
+  }
+
+  /**
+   * What asking an address told us.
+   *
+   * The protocol and the model list are shown as two separate answers because
+   * they are two separate questions. A gateway can list nothing and still speak,
+   * and it can list eighty models and speak only the oldest protocol, so
+   * reporting one as if it settled the other would be a lie the user then
+   * configures around.
+   */
+  @Builder
+  private exploredProvider() {
+    Column({ space: 6 }) {
+      Row({ space: 6 }) {
+        Text($r('app.string.provider_protocol_found'))
+          .fontSize(12)
+          .fontColor(this.theme.textSecondary);
+        Text(this.controller.exploration !== null && this.controller.exploration.protocol.length > 0
+          ? this.controller.exploration.protocol
+          : $r('app.string.provider_protocol_none'))
+          .fontSize(12)
+          .fontColor(this.theme.textPrimary);
+      }
+      if (this.controller.endpointNote.length > 0) {
+        Text(this.controller.endpointNote)
+          .fontSize(12)
+          .fontColor(this.theme.textSecondary)
+          .width('100%');
+      }
+      if (this.controller.exploration !== null &&
+        this.controller.exploration.reason.length > 0) {
+        Text(this.controller.exploration.reason)
+          .fontSize(12)
+          .fontColor(this.theme.textSecondary)
+          .width('100%');
+      }
+      if (this.controller.models.length > 0) {
+        Text($r('app.string.provider_models_found'))
+          .fontSize(12)
+          .fontColor(this.theme.textSecondary)
+          .width('100%');
+        // Capped, and the reason is the save button. A gateway that lists
+        // eighty-one models would push the one control that commits the whole
+        // configuration off the bottom of the screen, and a form whose save
+        // button is a scroll away is a form people give up on. Everything is
+        // still reachable by typing, and nothing is hidden: the field above is
+        // the way to name a model the cap leaves out.
+        Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap }) {
+          ForEach(this.controller.models.slice(0, 12), (model: ModelSummary) => {
+            Text(model.name)
+              .fontSize(12)
+              .padding({ left: 10, right: 10, top: 6, bottom: 6 })
+              .borderRadius(14)
+              .backgroundColor(
+                this.providerModel === model.id ? this.theme.accent : this.theme.surfaceMuted
+              )
+              .fontColor(
+                this.providerModel === model.id ? this.theme.textOnAccent : this.theme.textPrimary
+              )
+              .margin({ right: 6, bottom: 6 })
+              .onClick(() => this.chooseModel(model.id));
+          }, (model: ModelSummary) => model.id);
+        }
+        .width('100%');
+        if (this.controller.models.length > 12) {
+          Text($r('app.string.provider_models_more'))
+            .fontSize(12)
+            .fontColor(this.theme.textSecondary)
+            .width('100%');
+        }
+      }
+      if (this.controller.providerNoticeCode.length > 0) {
+        Text(Copy.errorText(this.controller.providerNoticeCode, ''))
+          .fontSize(12)
+          .fontColor(this.theme.dangerAccent)
+          .width('100%');
+      }
+    }
+    .alignItems(HorizontalAlign.Start)
+    .width('100%');
   }
 
   @Builder
@@ -478,14 +615,30 @@ struct Index {
               .fontSize(12)
               .fontColor(this.theme.textSecondary)
               .width('100%');
-            this.providerField('baseUrl', $r('app.string.provider_base_url'), this.providerBaseUrl, false);
-            this.providerField('model', $r('app.string.provider_model'), this.providerModel, false);
-            this.providerField('apiKey', $r('app.string.provider_api_key'), this.providerKey, true);
+            this.providerField('baseUrl', $r('app.string.provider_base_url'));
+            this.providerField('model', $r('app.string.provider_model'));
+            this.providerField('apiKey', $r('app.string.provider_api_key'));
             if (this.controller.hasCredential) {
               Text($r('app.string.provider_key_stored'))
                 .fontSize(12)
                 .fontColor(this.theme.textSecondary)
                 .width('100%');
+            }
+            Button(this.controller.exploringEndpoint
+              ? $r('app.string.provider_exploring')
+              : $r('app.string.provider_explore'))
+              .fontSize(13)
+              .backgroundColor(this.theme.surfaceMuted)
+              .fontColor(this.theme.textPrimary)
+              .enabled(!this.controller.exploringEndpoint && this.providerBaseUrl.trim().length > 0)
+              .width('100%')
+              .onClick(() => this.exploreProvider());
+            Text($r('app.string.provider_explore_hint'))
+              .fontSize(12)
+              .fontColor(this.theme.textSecondary)
+              .width('100%');
+            if (this.controller.explored) {
+              this.exploredProvider()
             }
             Row({ space: 8 }) {
               Button($r('app.string.provider_save'))

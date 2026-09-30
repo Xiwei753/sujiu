@@ -384,6 +384,12 @@ It follows that the final message differs too. When every attempt came back ambi
 
 A probe must still name a model, and before a model is chosen there is none to name. The placeholder that stands in for it is safe *because* of the rule above rather than in spite of it: a service that answers a request at all has still proved the protocol is served, and a service that does not produces an inconclusive verdict instead of a false one. The fix belongs in how the answer is read, not in what we ask.
 
+### A service that goes quiet is a fact about the service
+
+Every provider call goes through one client with a connect timeout and a read timeout. A default client has neither, and a request to an endpoint that accepts the connection and then says nothing never returns: the turn sits on "sending" until the user finds the stop button, and nothing anywhere says why.
+
+The read timeout measures the **gap between reads**, not the length of the response, so a long answer that keeps streaming is never cut off. Only silence counts, and silence is bounded. When it fires, the failure is a transport failure, which is the shape the rest of the runtime already knows how to report: not a protocol the endpoint lacks, and not a completed turn.
+
 ### The cache is an optimisation, not a fact
 
 Results are cached by endpoint id plus a normalized base URL (scheme and host lowercased, one trailing slash removed, the path left alone because `/v1` and `/v2` are different APIs). A cached answer is reused, a transient or inconclusive answer is never cached, and reconfiguring an endpoint forgets the whole cache: an endpoint id may have been re-pointed at a different address under the same name, and a stale answer about an endpoint we no longer talk to is worse than no answer.

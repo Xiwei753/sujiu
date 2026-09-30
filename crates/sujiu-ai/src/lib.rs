@@ -18,7 +18,7 @@ pub use negotiate::{
     list_models, negotiate as negotiate_protocol, CapabilityCache, Negotiation, ProtocolAttempt,
 };
 pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
-pub use provider::{AiProvider, NullStreamSink, ProviderError, StreamSink};
+pub use provider::{http_client, AiProvider, NullStreamSink, ProviderError, StreamSink};
 pub use responses::{OpenAiResponsesProvider, ResponsesConfig};
 pub use tool::{Tool, ToolError, ToolRegistry};
 pub use types::{

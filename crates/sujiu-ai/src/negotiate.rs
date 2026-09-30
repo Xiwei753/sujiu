@@ -129,7 +129,7 @@ pub async fn negotiate(
     let client = match client {
         Some(client) => client,
         None => {
-            owned = reqwest::Client::new();
+            owned = crate::provider::http_client();
             &owned
         }
     };
@@ -442,7 +442,7 @@ pub async fn list_models(
     let client = match client {
         Some(client) => client,
         None => {
-            owned = reqwest::Client::new();
+            owned = crate::provider::http_client();
             &owned
         }
     };
