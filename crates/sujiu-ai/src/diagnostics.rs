@@ -51,6 +51,12 @@ pub enum DiagnosticKind {
     Discovery,
     /// An ordinary conversation request.
     Chat,
+    /// Writing the store, or refusing to.
+    ///
+    /// Its own kind because it is the one failure a user cannot see coming: a
+    /// turn that worked and a store that saved look identical from inside the
+    /// app, and only the log says which happened.
+    Storage,
 }
 
 impl DiagnosticKind {
@@ -58,6 +64,7 @@ impl DiagnosticKind {
         match self {
             Self::Discovery => "discovery",
             Self::Chat => "chat",
+            Self::Storage => "storage",
         }
     }
 }

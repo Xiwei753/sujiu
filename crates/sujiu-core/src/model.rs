@@ -61,6 +61,23 @@ pub enum ModelMessage {
         /// Visible text. Absent when the assistant only asked for tools.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<String>,
+        /// Which participant this answer spoke for.
+        ///
+        /// A conversation can hold several characters, so "assistant" is not
+        /// an identity: two answers from two participants stored as two
+        /// anonymous assistant messages cannot be told apart afterwards. The id
+        /// therefore travels with the step instead of being guessed from the
+        /// turn, and a stored step is reloaded with the speaker it had.
+        ///
+        /// `None` means nobody was picked, which is a real answer rather than
+        /// a missing field: choosing between participants is a scheduling
+        /// policy, and inventing one here would put a guess in the transcript.
+        ///
+        /// Whether a protocol can carry it is the adapter's call. Chat
+        /// Completions has a `name` field, Responses does not, and this is not
+        /// a field Sujiu invents for a protocol that has none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        speaker: Option<String>,
         /// The reasoning the model produced alongside this message, with the
         /// provider that produced it.
         ///
@@ -104,8 +121,31 @@ impl ModelMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::Assistant {
             content: Some(content.into()),
+            speaker: None,
             reasoning: None,
             calls: Vec::new(),
+        }
+    }
+
+    /// The same message, attributed to a participant.
+    ///
+    /// `None` leaves the message unattributed rather than clearing an
+    /// attribution it already had, so this can be applied to a message that
+    /// arrived named.
+    pub fn with_speaker(mut self, speaker: Option<String>) -> Self {
+        if let Some(speaker) = speaker {
+            if let Self::Assistant { speaker: slot, .. } = &mut self {
+                *slot = Some(speaker);
+            }
+        }
+        self
+    }
+
+    /// Which participant this answer spoke for, if anyone.
+    pub fn speaker(&self) -> Option<&str> {
+        match self {
+            Self::Assistant { speaker, .. } => speaker.as_deref(),
+            _ => None,
         }
     }
 

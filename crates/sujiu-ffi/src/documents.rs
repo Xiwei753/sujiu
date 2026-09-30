@@ -1,14 +1,15 @@
 //! How domain entities are written to a platform's storage.
 //!
-//! The layout is by domain, and a conversation owns its own directory:
+//! The layout is by domain, and a conversation owns its own directory — inside
+//! the generation that is currently live:
 //!
 //! ```text
-//! sujiu-library.json                      manifest + endpoint + context store
-//! conversations/<conversation-id>/conversation.json
-//! characters/<character-id>.json
-//! personas/<persona-id>.json
-//! worldbooks/<world-book-id>.json
-//! prompt_profiles/<profile-id>.json
+//! sujiu-library.json                              manifest, names one generation
+//! generations/gen-00000007/conversations/<conversation-id>/conversation.json
+//! generations/gen-00000007/characters/<character-id>.json
+//! generations/gen-00000007/personas/<persona-id>.json
+//! generations/gen-00000007/worldbooks/<world-book-id>.json
+//! generations/gen-00000007/prompt_profiles/<profile-id>.json
 //! ```
 //!
 //! The direction matters. It used to be `characters/<id>/chats/...`, which made
@@ -16,6 +17,14 @@
 //! prompt profiles are independent resources that a conversation *binds* by id,
 //! so nothing is stored under a character's directory, and a conversation is the
 //! unit a transcript is filed under.
+//!
+//! A generation is what makes the switch atomic. The manifest is the only
+//! document a load starts from, so it is written last and it names one
+//! generation: a save that fails half way leaves the previous generation
+//! complete and still named, and the next save simply writes over the
+//! half-written one. Writing the entity documents in place would instead leave
+//! the old manifest pointing at a mixture of new and old documents, which is a
+//! store that parses and is wrong.
 //!
 //! Two things live outside the five domain collections and are said so here:
 //! the endpoint configuration and the context store. Neither is a domain
@@ -40,6 +49,13 @@ pub struct LibraryIndex {
     /// Bumped when the document shape changes incompatibly.
     #[serde(default)]
     pub version: u32,
+    /// Which generation the entity documents live in.
+    ///
+    /// `0` means the documents sit at the top level, which is how the first
+    /// library build wrote them. It is still readable, because a store someone
+    /// already has is not a store this build may refuse.
+    #[serde(default)]
+    pub generation: u64,
     #[serde(default)]
     pub endpoint: Option<EndpointConfig>,
     #[serde(default)]
@@ -62,7 +78,7 @@ pub struct LibraryIndex {
 }
 
 /// The version this build writes.
-pub const LIBRARY_VERSION: u32 = 1;
+pub const LIBRARY_VERSION: u32 = 2;
 
 /// The manifest's name.
 pub const LIBRARY_FILE: &str = "sujiu-library.json";
@@ -76,6 +92,29 @@ pub const LEGACY_SNAPSHOT_FILE: &str = "sujiu-runtime.json";
 
 /// Source-id namespaces owned by the projection rather than by stored data.
 const PROJECTED_PREFIXES: [&str; 2] = ["worldbook:", "persona:"];
+
+/// The directory every generation is written under.
+pub const GENERATION_PREFIX: &str = "generations";
+
+/// One generation's directory, as a storage key.
+///
+/// Zero-padded so a directory listing sorts in write order, which matters to
+/// whoever is reading this store with `ls` at three in the morning.
+pub fn generation_key(generation: u64) -> String {
+    format!("{GENERATION_PREFIX}/gen-{generation:08}")
+}
+
+/// An entity document's key inside a generation.
+///
+/// Generation `0` is the top-level layout the first library build wrote, and it
+/// is read from where it was written rather than migrated on sight.
+fn entity_key(generation: u64, key: &str) -> String {
+    if generation == 0 {
+        key.to_owned()
+    } else {
+        format!("{}/{key}", generation_key(generation))
+    }
+}
 
 pub fn conversation_key(id: &str) -> String {
     format!("conversations/{id}/conversation.json")
@@ -131,29 +170,34 @@ pub fn load(storage: &dyn AppStorage) -> Option<LoadedLibrary> {
     };
 
     for id in &index.conversation_ids {
-        library
-            .conversations
-            .push(read_entity(storage, &conversation_key(id))?);
+        library.conversations.push(read_entity(
+            storage,
+            &entity_key(index.generation, &conversation_key(id)),
+        )?);
     }
     for id in &index.character_ids {
-        library
-            .characters
-            .push(read_entity(storage, &character_key(id))?);
+        library.characters.push(read_entity(
+            storage,
+            &entity_key(index.generation, &character_key(id)),
+        )?);
     }
     for id in &index.persona_ids {
-        library
-            .personas
-            .push(read_entity(storage, &persona_key(id))?);
+        library.personas.push(read_entity(
+            storage,
+            &entity_key(index.generation, &persona_key(id)),
+        )?);
     }
     for id in &index.world_book_ids {
-        library
-            .world_books
-            .push(read_entity(storage, &world_book_key(id))?);
+        library.world_books.push(read_entity(
+            storage,
+            &entity_key(index.generation, &world_book_key(id)),
+        )?);
     }
     for id in &index.prompt_profile_ids {
-        library
-            .prompt_profiles
-            .push(read_entity(storage, &prompt_profile_key(id))?);
+        library.prompt_profiles.push(read_entity(
+            storage,
+            &entity_key(index.generation, &prompt_profile_key(id)),
+        )?);
     }
 
     Some(LoadedLibrary { library, index })
@@ -164,19 +208,32 @@ fn read_entity<T: serde::de::DeserializeOwned>(storage: &dyn AppStorage, key: &s
     serde_json::from_str(&document).ok()
 }
 
-/// Write every entity as its own document, then the manifest that names them.
+/// Write every entity into a new generation, then the manifest that names it.
 ///
-/// The manifest is written last on purpose. It is the only document a load
-/// starts from, so a run interrupted part way through leaves a store that still
-/// reads exactly what it read before, instead of a manifest naming documents
-/// that were never written.
+/// The order is the whole point. Every entity document is written into a
+/// generation the manifest does not mention yet, and the manifest is written
+/// last, so the store is only ever switched by one atomic document write. A
+/// failure before that point leaves the previous generation complete and still
+/// named: the next load reads exactly what it read before, rather than a mixture
+/// of new and old documents. A failure is returned, because a save that cannot
+/// finish must not be followed by a manifest claiming that it did.
+///
+/// The generation that was live is retired only after the new manifest is safely
+/// in place, and a failure to retire it is ignored: an extra directory costs
+/// disk, while a retired generation the manifest still names costs data.
 pub fn save(
     storage: &dyn AppStorage,
     library: &Library,
     index: &LibraryIndex,
-) -> std::io::Result<()> {
+) -> std::io::Result<u64> {
+    let previous = read_generation(storage);
+
     let mut index = index.clone();
     index.version = LIBRARY_VERSION;
+    // The next generation is one past the live one. A half-written generation
+    // from an interrupted save is written over rather than skipped, so an
+    // interrupted save does not leak a directory per attempt.
+    index.generation = previous + 1;
     index.global_worldbook_ids = library.global_worldbook_ids.clone();
     index.conversation_ids = library
         .conversations
@@ -208,25 +265,65 @@ pub fn save(
         .records
         .retain(|record| !is_projected(&record.source_id));
 
+    let generation = index.generation;
+
     for item in &library.conversations {
-        write_entity(storage, &conversation_key(&item.id), item)?;
+        write_entity(
+            storage,
+            &entity_key(generation, &conversation_key(&item.id)),
+            item,
+        )?;
     }
     for item in &library.characters {
-        write_entity(storage, &character_key(&item.id), item)?;
+        write_entity(
+            storage,
+            &entity_key(generation, &character_key(&item.id)),
+            item,
+        )?;
     }
     for item in &library.personas {
-        write_entity(storage, &persona_key(&item.id), item)?;
+        write_entity(
+            storage,
+            &entity_key(generation, &persona_key(&item.id)),
+            item,
+        )?;
     }
     for item in &library.world_books {
-        write_entity(storage, &world_book_key(&item.id), item)?;
+        write_entity(
+            storage,
+            &entity_key(generation, &world_book_key(&item.id)),
+            item,
+        )?;
     }
     for item in &library.prompt_profiles {
-        write_entity(storage, &prompt_profile_key(&item.id), item)?;
+        write_entity(
+            storage,
+            &entity_key(generation, &prompt_profile_key(&item.id)),
+            item,
+        )?;
     }
 
     let document = serde_json::to_string(&index).map_err(invalid_data)?;
-    storage.save(LIBRARY_FILE, &document);
-    Ok(())
+    storage.save(LIBRARY_FILE, &document)?;
+
+    if previous > 0 {
+        let _ = storage.remove(&generation_key(previous));
+    }
+
+    Ok(generation)
+}
+
+/// The generation the manifest currently names, or zero when there is none.
+///
+/// A manifest that cannot be parsed counts as no generation: the next save then
+/// starts at one and writes a complete store beside whatever is there, and the
+/// unreadable manifest keeps the store protected until the user resolves it.
+fn read_generation(storage: &dyn AppStorage) -> u64 {
+    storage
+        .load(LIBRARY_FILE)
+        .and_then(|manifest| serde_json::from_str::<LibraryIndex>(&manifest).ok())
+        .map(|index| index.generation)
+        .unwrap_or(0)
 }
 
 fn write_entity<T: Serialize>(
@@ -235,8 +332,7 @@ fn write_entity<T: Serialize>(
     entity: &T,
 ) -> std::io::Result<()> {
     let document = serde_json::to_string(entity).map_err(invalid_data)?;
-    storage.save(key, &document);
-    Ok(())
+    storage.save(key, &document)
 }
 
 fn invalid_data(error: serde_json::Error) -> std::io::Error {
@@ -592,19 +688,174 @@ mod tests {
         }
     }
 
+    /// The generation the manifest currently names, so a test reads the layout
+    /// instead of assuming a number. Hard-coding `gen-00000001` would make the
+    /// test pass only while nothing else in the runtime had ever saved.
+    fn live_generation(storage: &MemoryStorage) -> String {
+        let document = storage.load(LIBRARY_FILE).expect("a manifest");
+        let index: LibraryIndex = serde_json::from_str(&document).expect("a readable manifest");
+        generation_key(index.generation)
+    }
+
+    /// Storage that keeps every document in a map and fails on demand.
+    ///
+    /// The failure is what this test is about, so it is injected rather than
+    /// produced by filling a disk, which is neither portable nor deterministic.
+    struct FailingStorage {
+        inner: MemoryStorage,
+        /// 1-based ordinal of the next `save` that fails; `0` never fails.
+        fail_on: std::sync::atomic::AtomicUsize,
+        saves: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailingStorage {
+        fn new() -> Self {
+            Self {
+                inner: MemoryStorage::new(),
+                fail_on: std::sync::atomic::AtomicUsize::new(0),
+                saves: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        /// Fail the `nth` save from now, counting the ones in between.
+        fn arm(&self, nth: usize) {
+            self.fail_on.store(nth, std::sync::atomic::Ordering::SeqCst);
+            self.saves.store(0, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl AppStorage for FailingStorage {
+        fn load(&self, key: &str) -> Option<String> {
+            self.inner.load(key)
+        }
+
+        fn save(&self, key: &str, contents: &str) -> std::io::Result<()> {
+            let ordinal = self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if self.fail_on.load(std::sync::atomic::Ordering::SeqCst) == ordinal {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("injected failure writing {key}"),
+                ));
+            }
+            self.inner.save(key, contents)
+        }
+
+        fn remove(&self, key: &str) -> std::io::Result<()> {
+            self.inner.remove(key)
+        }
+
+        fn location(&self) -> Option<String> {
+            Some("in-memory".to_string())
+        }
+    }
+
     #[test]
     fn every_entity_is_stored_under_its_own_kind_and_a_conversation_owns_a_directory() {
         let storage = MemoryStorage::new();
         save(&storage, &sample_library(), &LibraryIndex::default()).unwrap();
+        let generation = live_generation(&storage);
 
         assert!(storage.load(LIBRARY_FILE).is_some());
         assert!(storage
-            .load("conversations/conversation-1/conversation.json")
+            .load(&format!(
+                "{generation}/conversations/conversation-1/conversation.json"
+            ))
             .is_some());
-        assert!(storage.load("characters/character-lin.json").is_some());
-        assert!(storage.load("personas/persona-me.json").is_some());
-        assert!(storage.load("worldbooks/lore.json").is_some());
-        assert!(storage.load("prompt_profiles/profile-1.json").is_some());
+        assert!(storage
+            .load(&format!("{generation}/characters/character-lin.json"))
+            .is_some());
+        assert!(storage
+            .load(&format!("{generation}/personas/persona-me.json"))
+            .is_some());
+        assert!(storage
+            .load(&format!("{generation}/worldbooks/lore.json"))
+            .is_some());
+        assert!(storage
+            .load(&format!("{generation}/prompt_profiles/profile-1.json"))
+            .is_some());
+    }
+
+    /// A save that fails half way must leave the *previous* complete version
+    /// readable, not a mixture of two. Overwriting entity files in place and
+    /// only then switching the manifest cannot promise that: the manifest would
+    /// name documents that are half of one save and half of another.
+    ///
+    /// The test fails the save at every step in turn — including the manifest
+    /// write itself — and requires the same thing each time: the library that
+    /// comes back is the one that was complete before.
+    #[test]
+    fn a_save_that_fails_at_any_step_leaves_the_previous_library_readable() {
+        let first = sample_library();
+        // Enough saves that the failure ordinal covers the manifest write, not
+        // just the entity writes: one generation writes 5 entities + manifest.
+        let steps_per_save = first.conversations.len()
+            + first.characters.len()
+            + first.personas.len()
+            + first.world_books.len()
+            + first.prompt_profiles.len()
+            + 1;
+
+        for fail_on in 1..=steps_per_save {
+            let storage = FailingStorage::new();
+            save(&storage, &first, &LibraryIndex::default())
+                .expect("the first save is the whole library");
+            storage.arm(fail_on);
+
+            // A second conversation, so the failing save has something to lose.
+            let mut second = first.clone();
+            second
+                .conversations
+                .push(Conversation::new("conversation-2"));
+
+            let error = save(&storage, &second, &LibraryIndex::default())
+                .expect_err("this save is supposed to fail");
+            assert!(
+                error.to_string().contains("injected failure"),
+                "the failure must reach the caller, not be swallowed: {error}"
+            );
+
+            let loaded = load(&storage).expect("the previous library is still readable");
+            assert_eq!(
+                loaded.library.conversations.len(),
+                1,
+                "a failed save (step {fail_on}) must not leave a half-written library behind"
+            );
+            assert_eq!(loaded.library.conversations[0].id, "conversation-1");
+        }
+    }
+
+    /// A second save moves to a new generation directory and lets go of the old
+    /// one only once the new manifest names the new generation.
+    #[test]
+    fn each_save_moves_the_library_to_a_new_generation() {
+        let storage = MemoryStorage::new();
+        assert_eq!(
+            save(&storage, &sample_library(), &LibraryIndex::default()).unwrap(),
+            1
+        );
+
+        let mut grown = sample_library();
+        grown
+            .conversations
+            .push(Conversation::new("conversation-2"));
+        assert_eq!(save(&storage, &grown, &LibraryIndex::default()).unwrap(), 2);
+
+        assert!(storage
+            .load("conversations/conversation-2/conversation.json")
+            .is_none());
+        assert!(storage
+            .load("generations/gen-00000002/conversations/conversation-2/conversation.json")
+            .is_some());
+        // The previous generation is only dropped once the new manifest is live.
+        assert!(storage.load("generations/gen-00000001").is_none());
+        assert_eq!(
+            load(&storage)
+                .expect("the live generation")
+                .library
+                .conversations
+                .len(),
+            2
+        );
     }
 
     #[test]

@@ -223,6 +223,13 @@ pub struct ToolCallDto {
 pub struct MessageDto {
     pub id: String,
     pub role: String,
+    /// Which participant spoke, when the transcript says.
+    ///
+    /// A conversation can hold several characters, so `role: "assistant"` alone
+    /// does not say who is talking. Undefined means the step carries no
+    /// attribution: choosing who speaks next is a speaking-order policy, and the
+    /// runtime does not invent one.
+    pub speaker_id: Option<String>,
     pub text: String,
     pub tool_calls: Vec<ToolCallDto>,
 }
@@ -388,6 +395,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDto {
                         .ok()
                         .and_then(|role| role.as_str().map(str::to_string))
                         .unwrap_or_else(|| "assistant".to_string()),
+                    speaker_id: message.speaker_id,
                     text: message.text,
                     tool_calls: message
                         .tool_calls

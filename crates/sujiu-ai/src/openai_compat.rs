@@ -155,6 +155,7 @@ impl OpenAiCompatProvider {
                 content,
                 calls,
                 reasoning,
+                speaker,
             } => {
                 let calls = calls
                     .into_iter()
@@ -175,6 +176,16 @@ impl OpenAiCompatProvider {
                     "content": content,
                     "tool_calls": calls,
                 });
+
+                // This transport has a field for the speaker: `name`. It is
+                // sent only when the id is one the field can actually carry,
+                // because an endpoint that rejects the request over a character
+                // id gets a broken turn rather than a missing label. A protocol
+                // without the field sends nothing, and the transcript still
+                // knows who spoke.
+                if let Some(name) = speaker.as_deref().and_then(wire_name) {
+                    message["name"] = json!(name);
+                }
 
                 // Two conditions, and both are needed.
                 //
@@ -232,6 +243,22 @@ impl OpenAiCompatProvider {
             ModelRole::Assistant => "assistant",
         }
     }
+}
+
+/// Whether a participant id can be sent as this transport's `name` field.
+///
+/// The field is documented as letters, digits, underscores and dashes, up to 64
+/// characters. An id that breaks that is not worth sending: an endpoint may
+/// reject the whole request over it, and a rejected turn costs far more than an
+/// unlabelled one. The speaker is still in the transcript either way.
+fn wire_name(speaker: &str) -> Option<&str> {
+    let usable = !speaker.is_empty()
+        && speaker.len() <= 64
+        && speaker
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+
+    usable.then_some(speaker)
 }
 
 /// Read token accounting out of an OpenAI-compatible `usage` object.
@@ -868,6 +895,7 @@ mod tests {
             ..OpenAiCompatConfig::new("https://example.invalid/v1", "secret", "deepseek-chat")
         };
         let assistant = ModelMessage::Assistant {
+            speaker: None,
             content: Some("looking it up".into()),
             calls: vec![ToolCall {
                 id: "call-1".into(),
@@ -932,6 +960,7 @@ mod tests {
 
         let request = ProviderRequest {
             messages: vec![ModelMessage::Assistant {
+                speaker: None,
                 content: Some("looking it up".into()),
                 calls: vec![ToolCall {
                     id: "call-1".into(),
@@ -981,6 +1010,7 @@ mod tests {
 
         let request = ProviderRequest {
             messages: vec![ModelMessage::Assistant {
+                speaker: None,
                 content: None,
                 calls: vec![ToolCall {
                     id: "call-1".into(),

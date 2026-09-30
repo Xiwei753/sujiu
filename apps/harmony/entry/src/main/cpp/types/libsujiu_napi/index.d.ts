@@ -101,6 +101,15 @@ export interface ToolCall {
 export interface Message {
   id: string;
   role: string;
+  /**
+   * Which participant spoke, when the transcript says.
+   *
+   * A conversation can hold several characters, so `role: "assistant"` alone
+   * does not say who is talking. Undefined means the step carries no
+   * attribution: choosing who speaks next is a speaking-order policy, and the
+   * runtime does not invent one.
+   */
+  speakerId?: string;
   text: string;
   toolCalls: ToolCall[];
 }

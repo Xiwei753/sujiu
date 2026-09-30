@@ -1181,10 +1181,19 @@ mod tests {
             dir.join(documents::LIBRARY_FILE).exists(),
             "a new store is a manifest, not one blob"
         );
+        // The generation is read out of the manifest rather than assumed: the
+        // number depends on how many saves have already happened, and a test
+        // that hard-codes it is really testing the save counter.
+        let manifest = std::fs::read_to_string(dir.join(documents::LIBRARY_FILE))
+            .expect("a readable manifest");
+        let index: documents::LibraryIndex =
+            serde_json::from_str(&manifest).expect("a manifest this build wrote");
+        assert_eq!(index.conversation_ids.len(), 3);
         assert!(
-            dir.join("conversations/session-1/conversation.json")
+            dir.join(documents::generation_key(index.generation))
+                .join("conversations/session-1/conversation.json")
                 .exists(),
-            "a conversation owns its own directory"
+            "a conversation owns its own directory inside the live generation"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

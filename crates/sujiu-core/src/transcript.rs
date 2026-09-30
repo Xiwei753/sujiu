@@ -215,6 +215,18 @@ pub struct AssistantStep {
     /// Visible assistant text. Empty for a step that only requested tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The participant this step spoke for.
+    ///
+    /// A conversation can hold several characters, and this is the only place
+    /// that says which one produced which line. It is stored per step rather
+    /// than per turn because a turn may answer as one character in one round
+    /// and as another in the next, and a turn-level label could only be right
+    /// for the first of them.
+    ///
+    /// A stored step keeps the speaker it had, so a group chat does not need a
+    /// transcript migration the first time two participants both speak.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
     /// Reasoning content, kept apart from visible text because it is not part
     /// of the conversation the user reads. It remembers which provider
     /// produced it, because that decides whether it may be replayed.
@@ -278,6 +290,7 @@ impl AssistantStep {
         if content.is_some() || self.has_tool_calls() {
             messages.push(ModelMessage::Assistant {
                 content,
+                speaker: self.speaker.clone(),
                 calls: self
                     .tool_calls
                     .iter()
@@ -340,6 +353,41 @@ impl Turn {
             .filter(|text| !text.trim().is_empty())
     }
 
+    /// The participant that produced the answer the user reads.
+    ///
+    /// The answer is the last step with visible text, so the speaker is that
+    /// step's speaker and not the first one. A step that named nobody returns
+    /// `None`, which is not the same as "the first participant": reading a
+    /// guess off the conversation would put a character in the transcript that
+    /// the turn never claimed.
+    pub fn final_speaker(&self) -> Option<&str> {
+        let step = self.steps.iter().rev().find(|step| {
+            step.text
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+        })?;
+
+        step.speaker.as_deref()
+    }
+
+    /// Every distinct participant that spoke in this turn, in the order they
+    /// first spoke.
+    ///
+    /// A turn that is answered as two different characters is a real thing a
+    /// conversation has to be able to show, and a caller that only reads
+    /// `final_speaker` would hide the first of them.
+    pub fn speakers(&self) -> Vec<&str> {
+        let mut speakers: Vec<&str> = Vec::new();
+        for step in &self.steps {
+            if let Some(speaker) = step.speaker.as_deref() {
+                if !speakers.contains(&speaker) {
+                    speakers.push(speaker);
+                }
+            }
+        }
+        speakers
+    }
+
     /// Every tool call in this turn, in call order.
     pub fn tool_calls(&self) -> impl Iterator<Item = &ToolCallRecord> {
         self.steps.iter().flat_map(|step| step.tool_calls.iter())
@@ -358,6 +406,66 @@ impl Turn {
                 crate::model::ContinuationUpdate::Unchanged => None,
                 _ => Some(&step.continuation),
             })
+    }
+
+    /// The assistant bubbles this turn folds into.
+    ///
+    /// A run of consecutive steps that agree on the speaker becomes one bubble
+    /// carrying that speaker, the text of the last step in the run, and every
+    /// tool call the run made. A step with neither text nor a call makes no
+    /// bubble, so a turn that did nothing produces nothing — the same thing it
+    /// did before speakers existed.
+    fn bubbles(&self) -> Vec<UiBubble> {
+        let mut bubbles: Vec<UiBubble> = Vec::new();
+
+        for step in &self.steps {
+            let same_speaker = bubbles
+                .last()
+                .is_some_and(|bubble| bubble.speaker == step.speaker);
+
+            let tool_calls = step.tool_calls.iter().map(|call| UiToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                title: call.title.clone().unwrap_or_else(|| call.name.clone()),
+                state: call.result.state,
+                is_error: call.result.is_error(),
+                result_text: call.result.model_text(),
+            });
+
+            if same_speaker {
+                let bubble = bubbles.last_mut().expect("a bubble was just found");
+                if let Some(text) = step.text.as_deref().filter(|t| !t.trim().is_empty()) {
+                    bubble.text = text.to_owned();
+                }
+                bubble.tool_calls.extend(tool_calls);
+                continue;
+            }
+
+            let text = step
+                .text
+                .clone()
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_default();
+            let tool_calls: Vec<UiToolCall> = tool_calls.collect();
+
+            if text.is_empty() && tool_calls.is_empty() {
+                // A step that said nothing and called nothing. It is kept in
+                // the transcript, but it has no shape in a bubble, and giving
+                // it one would put an empty assistant message on the screen.
+                // It also does not break the current run: a step that said
+                // nothing did not take the floor away from anybody.
+                continue;
+            }
+
+            bubbles.push(UiBubble {
+                index: bubbles.len(),
+                text,
+                speaker: step.speaker.clone(),
+                tool_calls,
+            });
+        }
+
+        bubbles
     }
 
     /// This turn as provider-neutral model messages, in wire order.
@@ -387,6 +495,12 @@ pub struct UiMessage {
     pub id: String,
     pub role: ChatRole,
     pub text: String,
+    /// The participant this message speaks for, when one is known.
+    ///
+    /// Folding a turn into bubbles must not fold the identity away, so the
+    /// speaker is carried on the projection too. A user message has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<String>,
     #[serde(default)]
     pub tool_calls: Vec<UiToolCall>,
 }
@@ -652,39 +766,56 @@ impl Transcript {
                 id: format!("{}-user", turn.id),
                 role: ChatRole::User,
                 text: turn.user.clone(),
+                speaker: None,
                 tool_calls: Vec::new(),
             });
 
             // The tool steps are folded into the assistant bubble. A platform
             // may hide or collapse them; the transcript above still holds
             // every one of them.
-            let text = turn.final_text().unwrap_or_default().to_owned();
-            let tool_calls: Vec<UiToolCall> = turn
-                .tool_calls()
-                .map(|call| UiToolCall {
-                    id: call.id.clone(),
-                    name: call.name.clone(),
-                    title: call.title.clone().unwrap_or_else(|| call.name.clone()),
-                    state: call.result.state,
-                    is_error: call.result.is_error(),
-                    result_text: call.result.model_text(),
-                })
-                .collect();
+            //
+            // A turn is one bubble per speaker, not one per turn. Folding a
+            // two-character answer into a single anonymous bubble would lose
+            // the one thing that tells the lines apart, and the folding rule
+            // stays the same when there is only one speaker: consecutive steps
+            // that agree on the speaker are one bubble, so a turn with nobody
+            // named still folds exactly as it did before.
+            let bubbles = turn.bubbles();
 
-            if text.is_empty() && tool_calls.is_empty() {
-                continue;
+            for bubble in &bubbles {
+                // A lone bubble keeps the id it has always had, because ids a
+                // platform may already have stored are not renamed to fit a
+                // case that did not exist before.
+                let id = if bubbles.len() == 1 {
+                    format!("{}-assistant", turn.id)
+                } else {
+                    format!("{}-assistant-{}", turn.id, bubble.index)
+                };
+
+                messages.push(UiMessage {
+                    id,
+                    role: ChatRole::Assistant,
+                    text: bubble.text.clone(),
+                    speaker: bubble.speaker.clone(),
+                    tool_calls: bubble.tool_calls.clone(),
+                });
             }
-
-            messages.push(UiMessage {
-                id: format!("{}-assistant", turn.id),
-                role: ChatRole::Assistant,
-                text,
-                tool_calls,
-            });
         }
 
         messages
     }
+}
+
+/// One assistant bubble in the UI projection.
+///
+/// It is a run of consecutive steps that agree on who is speaking, with the
+/// text of the last step in the run and every tool call the run made.
+struct UiBubble {
+    /// Where this bubble sits in its turn, so two bubbles get distinct ids.
+    index: usize,
+    text: String,
+    speaker: Option<String>,
+    tool_calls: Vec<UiToolCall>,
 }
 
 /// The transcript as provider-neutral model messages, in wire order.
@@ -832,10 +963,14 @@ mod tests {
         match &messages[0] {
             ModelMessage::Assistant {
                 content,
+                speaker,
                 reasoning,
                 calls,
             } => {
                 assert_eq!(content.as_deref(), Some("The light stopped blinking."));
+                // A step nobody attributed is a real answer, not a missing
+                // field.
+                assert_eq!(speaker.as_deref(), None);
                 // The sidecar used to be dropped here, because only the
                 // tool-calling shape had a place for it.
                 assert!(reasoning.is_some());
@@ -1188,5 +1323,115 @@ mod tests {
         let messages = transcript.ui_messages();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].role, ChatRole::User);
+    }
+
+    /// A turn where the model answered as two different characters.
+    fn table_turn() -> Turn {
+        let mut turn = Turn::new("turn-1", "where is everyone?");
+        turn.steps.push(AssistantStep {
+            text: Some("The harbour master takes the north pier.".into()),
+            speaker: Some("character-lin".into()),
+            ..AssistantStep::default()
+        });
+        turn.steps.push(AssistantStep {
+            text: None,
+            tool_calls: vec![call("call-1", "search_context")],
+            speaker: Some("character-wen".into()),
+            ..AssistantStep::default()
+        });
+        turn.steps.push(AssistantStep {
+            text: Some("The south pier is mine.".into()),
+            speaker: Some("character-wen".into()),
+            ..AssistantStep::default()
+        });
+        turn
+    }
+
+    #[test]
+    fn a_speaker_is_kept_through_storage_and_read_back() {
+        let stored = serde_json::to_value(table_turn()).expect("a turn is storable");
+
+        let turn: Turn = serde_json::from_value(stored).expect("a speaker survives the round trip");
+
+        assert_eq!(turn.steps[0].speaker.as_deref(), Some("character-lin"));
+        assert_eq!(turn.final_speaker(), Some("character-wen"));
+        assert_eq!(turn.speakers(), vec!["character-lin", "character-wen"]);
+    }
+
+    #[test]
+    fn the_ui_projection_keeps_one_bubble_per_voice() {
+        let mut transcript = Transcript::default();
+        transcript.push(table_turn());
+
+        let messages = transcript.ui_messages();
+
+        assert_eq!(messages.len(), 3, "one user message and two voices");
+        let bubbles: Vec<_> = messages
+            .iter()
+            .filter(|message| message.role == ChatRole::Assistant)
+            .collect();
+        assert_eq!(bubbles.len(), 2, "two characters are two bubbles");
+        assert_eq!(bubbles[0].speaker.as_deref(), Some("character-lin"));
+        assert_eq!(bubbles[0].text, "The harbour master takes the north pier.");
+        assert_eq!(bubbles[1].speaker.as_deref(), Some("character-wen"));
+        // The tool call belongs to the second voice, and folding it into that
+        // bubble does not drop it from the transcript.
+        assert_eq!(bubbles[1].tool_calls.len(), 1);
+        assert_eq!(transcript.tool_call_ids(), vec!["call-1"]);
+        // Distinct ids, because two bubbles cannot both be the one message a
+        // platform may already have stored.
+        assert_ne!(bubbles[0].id, bubbles[1].id);
+    }
+
+    #[test]
+    fn a_turn_with_one_voice_folds_exactly_as_it_did_before() {
+        let mut transcript = Transcript::default();
+        transcript.push(tool_turn());
+
+        let messages = transcript.ui_messages();
+
+        let assistant: Vec<_> = messages
+            .iter()
+            .filter(|message| message.role == ChatRole::Assistant)
+            .collect();
+        assert_eq!(assistant.len(), 1);
+        // The id a platform may already have stored is not renamed just because
+        // a speaker field exists.
+        assert_eq!(assistant[0].id, "turn-1-assistant");
+        assert_eq!(assistant[0].speaker, None);
+        assert_eq!(assistant[0].tool_calls.len(), 1);
+    }
+
+    #[test]
+    fn a_speaker_travels_into_the_model_history() {
+        let step = AssistantStep {
+            text: Some("The tide is out.".into()),
+            speaker: Some("character-lin".into()),
+            ..AssistantStep::default()
+        };
+
+        let messages = step.model_messages();
+
+        assert_eq!(messages[0].speaker(), Some("character-lin"));
+        match &messages[0] {
+            ModelMessage::Assistant { speaker, .. } => {
+                assert_eq!(speaker.as_deref(), Some("character-lin"));
+            }
+            other => panic!("expected an assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setting_a_speaker_never_removes_one_the_model_already_sent() {
+        let named = ModelMessage::assistant("A line.").with_speaker(Some("character-wen".into()));
+        let anonymous = ModelMessage::assistant("Another line.");
+
+        assert_eq!(named.with_speaker(None).speaker(), Some("character-wen"));
+        assert_eq!(
+            anonymous
+                .with_speaker(Some("character-lin".into()))
+                .speaker(),
+            Some("character-lin")
+        );
     }
 }

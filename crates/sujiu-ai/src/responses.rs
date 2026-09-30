@@ -185,12 +185,24 @@ impl OpenAiResponsesProvider {
                 "role": self.encode_role(role),
                 "content": content,
             })],
-            ModelMessage::Assistant { content, calls, .. } => {
+            ModelMessage::Assistant {
+                content,
+                calls,
+                speaker: _,
+                ..
+            } => {
                 // `reasoning` is deliberately dropped. On this transport the
                 // reasoning is an output item the endpoint already holds, and
                 // the handle we would have to replay it with is the same handle
                 // covering the rest of this prefix. Re-sending it as text would
                 // mean inventing a field this protocol does not have.
+                //
+                // `speaker` is dropped for the same reason. This protocol has
+                // no field for who an assistant message speaks for, and putting
+                // the id in the content would forge text the model did not
+                // write. A multi-character conversation on this transport
+                // therefore relies on the transcript to say who spoke; the
+                // names are in the prompt's character definitions.
                 let mut items = Vec::new();
 
                 if let Some(content) = content.filter(|text| !text.is_empty()) {
@@ -774,6 +786,7 @@ mod tests {
         let body = body(request(vec![
             ModelMessage::user("find the tide"),
             ModelMessage::Assistant {
+                speaker: None,
                 content: None,
                 reasoning: None,
                 calls: vec![ToolCall {
@@ -805,6 +818,7 @@ mod tests {
     #[test]
     fn an_assistant_turn_that_also_spoke_becomes_two_items() {
         let body = body(request(vec![ModelMessage::Assistant {
+            speaker: None,
             content: Some("let me check".into()),
             reasoning: None,
             calls: vec![ToolCall {
@@ -836,6 +850,7 @@ mod tests {
         let first = request(vec![
             ModelMessage::user("find the tide"),
             ModelMessage::Assistant {
+                speaker: None,
                 content: Some("checking".into()),
                 reasoning: None,
                 calls: vec![],
@@ -851,6 +866,7 @@ mod tests {
 
         let mut second = first.clone();
         second.messages.push(ModelMessage::Assistant {
+            speaker: None,
             content: Some("high at four".into()),
             reasoning: None,
             calls: vec![],

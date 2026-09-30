@@ -27,6 +27,19 @@ pub struct AgentConfig {
     pub initial_tool_limit: usize,
     pub tool_search_limit: usize,
     pub enable_tool_search: bool,
+    /// The participant every step of this turn speaks for.
+    ///
+    /// A conversation can hold several characters, so "assistant" alone does not
+    /// say who answered. The caller sets this when there is exactly one
+    /// attribution it can justify, and leaves it `None` when it cannot: which
+    /// of several characters replies next is a speaking-order policy, and the
+    /// loop does not invent one.
+    ///
+    /// It is set here, on the step as it is born, rather than afterwards on the
+    /// stored turn. A step attributed after it was already sent would change the
+    /// wire shape of history the provider has seen, which breaks the prompt
+    /// cache on the next request for a fact that was never in doubt.
+    pub speaker: Option<String>,
 }
 
 impl Default for AgentConfig {
@@ -36,6 +49,7 @@ impl Default for AgentConfig {
             initial_tool_limit: 8,
             tool_search_limit: 8,
             enable_tool_search: true,
+            speaker: None,
         }
     }
 }
@@ -247,6 +261,10 @@ impl<'a> AgentRuntime<'a> {
 
             let step = AssistantStep {
                 text: produced.text,
+                // The speaker is decided before the step exists, so the message
+                // this round sends and the message the next turn replays are the
+                // same bytes.
+                speaker: self.config.speaker.clone(),
                 reasoning: produced.reasoning,
                 // The event, not the handle it produced. A provider that
                 // dropped the handle has said so, and that answer has to

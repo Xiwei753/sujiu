@@ -15,7 +15,8 @@ use std::sync::mpsc;
 use std::thread;
 
 use serde_json::{json, Value};
-use sujiu_core::EndpointConfig;
+use sujiu_core::{ChatRole, EndpointConfig};
+use sujiu_ffi::documents;
 use sujiu_ffi::events::{TurnEvent, TurnEventKind, TurnEventReporter};
 use sujiu_ffi::runtime::{SendTurnRequest, SujiuRuntime};
 
@@ -1588,12 +1589,109 @@ fn a_conversation_keeps_the_bindings_it_was_created_with() {
         "the participants belong to the conversation document, not to a live session: {state:?}"
     );
     assert_eq!(state.persona_id.as_deref(), Some("persona-insomniac"));
+    // The generation is read from the manifest, so this asserts the shape of the
+    // layout rather than the number of saves that happened to precede it.
+    let manifest = std::fs::read_to_string(directory.join(documents::LIBRARY_FILE))
+        .expect("a readable manifest");
+    let index: documents::LibraryIndex =
+        serde_json::from_str(&manifest).expect("a manifest this build wrote");
     assert!(
         directory
+            .join(documents::generation_key(index.generation))
             .join("conversations")
             .join(&id)
             .join("conversation.json")
             .exists(),
         "a conversation is rooted at its own id, not inside a character"
     );
+}
+
+/// `assistant` is not an identity.
+///
+/// A conversation holds several characters, so a transcript step that only
+/// says "assistant" cannot tell a group chat which of them spoke, and a later
+/// turn of the same conversation would store the same shape. The runtime
+/// stamps a speaker it can actually justify, and says nothing when it cannot.
+#[test]
+fn a_step_records_who_spoke_and_refuses_to_guess() {
+    let provider = ScriptedProvider::start(vec![
+        Step::Text("The north pier is mine."),
+        Step::Text("The south pier is mine."),
+    ]);
+    let runtime = runtime_for(&provider.base_url(), "mock-model");
+
+    // One participant: the only voice there is, so the step carries it.
+    run_turn(&runtime, "session-1", "Where do we go from here?");
+    let solo = last_assistant(&runtime, "session-1");
+    assert_eq!(
+        solo.speaker_id.as_deref(),
+        Some("character-lin"),
+        "a single participant is the only attribution the runtime can justify: {solo:?}"
+    );
+
+    // Two participants: who replies is a speaking-order policy, and inventing
+    // one here would put a fact in the transcript that never existed.
+    run_turn(
+        &runtime,
+        "session-3",
+        "The cable winch has stalled halfway up the pass.",
+    );
+    let table = last_assistant(&runtime, "session-3");
+    assert_eq!(
+        table.speaker_id, None,
+        "with two characters, silence is the honest answer: {table:?}"
+    );
+
+    drop(runtime);
+    drop(provider.server);
+}
+
+/// A stored step reloads with the speaker it had.
+///
+/// The attribution is part of the conversation's record, not something a turn
+/// recomputed on the way out. If it only lived on the wire, reopening a chat
+/// would silently flatten it back to "assistant".
+#[test]
+fn a_speaker_survives_closing_and_reopening_a_conversation() {
+    let provider = ScriptedProvider::start(vec![Step::Text("Take the tunnel, not the bridge.")]);
+    let directory = scratch_dir("speaker-round-trip");
+    let storage = std::sync::Arc::new(
+        sujiu_ffi::storage::FileStorage::new(&directory).expect("a data directory"),
+    );
+    let runtime =
+        SujiuRuntime::new_persistent(sujiu_ffi::seed::seed(), storage.clone()).expect("runtime");
+    configure(&runtime, &provider.base_url(), "mock-model");
+
+    run_turn(&runtime, "session-1", "How do we get out of here?");
+    drop(runtime);
+
+    let reopened = SujiuRuntime::new_persistent(sujiu_ffi::runtime::Seed::default(), storage)
+        .expect("runtime");
+    let answer = last_assistant(&reopened, "session-1");
+    assert_eq!(answer.text, "Take the tunnel, not the bridge.");
+    assert_eq!(
+        answer.speaker_id.as_deref(),
+        Some("character-lin"),
+        "a reopened conversation remembers who spoke, because the attribution \
+         was stored rather than recomputed: {answer:?}"
+    );
+
+    drop(reopened);
+    drop(provider.server);
+}
+
+/// The last thing a character said in a conversation.
+///
+/// Which one that is matters: a seeded conversation already has turns, so a
+/// test about an answer it just produced has to look at the end rather than
+/// count every bubble on the screen.
+fn last_assistant(runtime: &SujiuRuntime, session_id: &str) -> sujiu_ffi::runtime::MessageSummary {
+    let state = runtime.conversation_state(session_id).expect("state");
+    state
+        .messages
+        .iter()
+        .filter(|message| message.role == ChatRole::Assistant)
+        .next_back()
+        .cloned()
+        .expect("a conversation that answered has an assistant message")
 }

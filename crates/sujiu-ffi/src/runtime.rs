@@ -372,11 +372,19 @@ pub struct ToolCallSummary {
     pub result_text: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MessageSummary {
     pub id: String,
     pub role: ChatRole,
+    /// Which participant spoke, when the transcript says.
+    ///
+    /// A conversation can hold several characters, so `assistant` alone does
+    /// not tell a screen who it is looking at. Absent means the step carries no
+    /// attribution, which is a real answer: deciding who speaks next is a
+    /// speaking-order policy, and this layer does not invent one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker_id: Option<String>,
     pub text: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallSummary>,
@@ -422,6 +430,13 @@ pub enum TurnError {
     NoUsableProtocol(String),
     MissingCredential,
     ContextStore(ContextStoreError),
+    /// The store could not be written.
+    ///
+    /// Its own variant because it is not the same failure as any of the others.
+    /// The turn itself may have worked perfectly, the previous generation is
+    /// still the live one, and a caller that only sees "something went wrong"
+    /// will retry the wrong thing.
+    Storage(String),
 }
 
 impl std::fmt::Display for TurnError {
@@ -436,6 +451,7 @@ impl std::fmt::Display for TurnError {
             }
             Self::MissingCredential => write!(formatter, "missing_credential"),
             Self::ContextStore(error) => write!(formatter, "{error}"),
+            Self::Storage(reason) => write!(formatter, "storage: {reason}"),
         }
     }
 }
@@ -677,8 +693,17 @@ impl SujiuRuntime {
         if restore {
             // A first launch writes its seed, so the next launch is a restore
             // and not a reset. A protected document is left alone, and
-            // `persist` is the thing that knows how to leave it alone.
-            runtime.persist();
+            // `persist` is the thing that knows how to leave it alone. A seed
+            // that cannot be written is worth a note rather than a refusal to
+            // start: the store is still usable in memory, and the failure is
+            // already recorded.
+            if let Err(error) = runtime.persist() {
+                runtime.diagnostics.note(
+                    DiagnosticKind::Storage,
+                    "seed_not_written",
+                    &format!("the starting library could not be written: {error}"),
+                );
+            }
         }
 
         Ok(runtime)
@@ -763,7 +788,7 @@ impl SujiuRuntime {
         }
 
         *self.storage.lock().unwrap() = Arc::new(storage);
-        self.persist();
+        self.persist().map_err(|error| error.to_string())?;
         self.persist_diagnostics();
         Ok(())
     }
@@ -798,8 +823,8 @@ impl SujiuRuntime {
         inner.storage_state = StorageState::Writable;
         drop(inner);
 
-        self.persist();
-        Ok(())
+        self.persist()
+            .map_err(|error| TurnError::Storage(error.to_string()))
     }
 
     /// The directory the runtime persists into, or `None` while it is not
@@ -815,9 +840,9 @@ impl SujiuRuntime {
     /// documents and rebuilt into the search view on every launch, so writing
     /// the view here too would store the same lore twice and leave two
     /// documents that could disagree.
-    fn persist(&self) {
+    fn persist(&self) -> std::io::Result<()> {
         if self.storage_protection().is_some() {
-            return;
+            return Ok(());
         }
 
         let (library, index) = {
@@ -838,7 +863,25 @@ impl SujiuRuntime {
         };
 
         let storage = self.storage.lock().unwrap();
-        let _ = documents::save(&**storage, &library, &index);
+        match documents::save(&**storage, &library, &index) {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                // A save that failed leaves the previous generation live and
+                // readable, so nothing is lost — but the user is about to believe
+                // something was saved when it was not, and that is what the log
+                // is for.
+                drop(storage);
+                self.diagnostics.note(
+                    DiagnosticKind::Storage,
+                    "save_failed",
+                    &format!(
+                        "the library could not be written: {error}. The previous \
+                         generation is still the live one"
+                    ),
+                );
+                Err(error)
+            }
+        }
     }
 
     pub fn endpoint(&self) -> Option<EndpointConfig> {
@@ -883,7 +926,9 @@ impl SujiuRuntime {
         let Ok(document) = serde_json::to_string(&self.diagnostics.entries()) else {
             return;
         };
-        self.storage.lock().unwrap().save(LOG_KEY, &document);
+        // Best effort by design: the log is allowed to fail where the store
+        // must not, so a full disk costs the trace and not the conversations.
+        let _ = self.storage.lock().unwrap().save(LOG_KEY, &document);
     }
 
     /// File the endpoint cache, so the next launch starts with the answers this
@@ -896,7 +941,8 @@ impl SujiuRuntime {
         let Ok(document) = serde_json::to_string(&self.capabilities) else {
             return;
         };
-        self.storage
+        let _ = self
+            .storage
             .lock()
             .unwrap()
             .save(CAPABILITIES_KEY, &document);
@@ -955,7 +1001,8 @@ impl SujiuRuntime {
         // A changed endpoint is a different question, so the old answer does
         // not carry over to it.
         self.forget_capabilities_about();
-        self.persist();
+        self.persist()
+            .map_err(|error| TurnError::Storage(error.to_string()))?;
         Ok(())
     }
 
@@ -1351,6 +1398,7 @@ impl SujiuRuntime {
             .map(|message| MessageSummary {
                 id: message.id,
                 role: message.role,
+                speaker_id: message.speaker,
                 text: message.text,
                 tool_calls: message
                     .tool_calls
@@ -1408,7 +1456,10 @@ impl SujiuRuntime {
             id
         };
 
-        self.persist();
+        // The id is returned either way: a conversation that exists only in
+        // memory is still a usable conversation, and the save failure has
+        // already been recorded rather than swallowed.
+        let _ = self.persist();
         id
     }
 
@@ -1466,7 +1517,7 @@ impl SujiuRuntime {
         };
 
         if compacted {
-            self.persist();
+            let _ = self.persist();
         }
 
         Ok(compacted)
@@ -1519,10 +1570,18 @@ impl SujiuRuntime {
             .map_err(|error| TurnFailure(error.to_string()))?;
         let messages = prepared.messages.clone();
         let continuation = prepared.continuation.clone();
+        let speaker = prepared.speaker.clone();
         let provider = self.build_provider(prepared).await?;
         let tools = self.inner.lock().unwrap().tools.clone();
 
-        let runtime = AgentRuntime::new(provider.as_ref(), tools.as_ref(), AgentConfig::default());
+        let runtime = AgentRuntime::new(
+            provider.as_ref(),
+            tools.as_ref(),
+            AgentConfig {
+                speaker,
+                ..AgentConfig::default()
+            },
+        );
         // A turn that stops early is still a turn. Everything the model already
         // produced is committed, so the next request continues from the same
         // transcript instead of replaying a conversation the model has half
@@ -1662,6 +1721,13 @@ impl SujiuRuntime {
 
         Ok(PreparedTurn {
             messages: plan.model_messages(),
+            // One participant, one obvious voice. Zero or several is not a
+            // guess: which character answers is a speaking-order policy, and
+            // attributing a line to the wrong one would be a fact the
+            // transcript never had.
+            speaker: conversation
+                .sole_participant()
+                .map(|participant| participant.character_id.clone()),
             continuation,
             config,
             identity,
@@ -1859,6 +1925,7 @@ impl SujiuRuntime {
         let mut turn = outcome.turn.clone();
         turn.id = next_turn_id(&conversation.transcript);
         turn.created_at_ms = Some(now_ms);
+
         conversation.transcript.push(turn);
         conversation
             .metadata
@@ -1866,7 +1933,10 @@ impl SujiuRuntime {
 
         drop(inner);
 
-        self.persist();
+        // The turn is committed to the transcript first and written after, so a
+        // failed save costs the write and not the answer. The failure is in the
+        // log by now.
+        let _ = self.persist();
     }
 }
 
@@ -1896,6 +1966,9 @@ struct TurnProvider {
 /// Everything one turn needs before a provider exists.
 struct PreparedTurn {
     messages: Vec<sujiu_ai::ModelMessage>,
+    /// The participant this turn's steps speak for, when the conversation has
+    /// exactly one and the attribution needs no policy to make.
+    speaker: Option<String>,
     continuation: Option<ProviderContinuation>,
     config: EndpointConfig,
     identity: ProviderIdentity,
