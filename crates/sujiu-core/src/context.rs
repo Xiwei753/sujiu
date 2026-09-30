@@ -13,12 +13,21 @@ pub enum ContextKind {
     Other,
 }
 
+/// What a context record is about.
+///
+/// A record can be scoped to a character, to a conversation, or to a persona.
+/// The conversation is the primary scope now: a chat belongs to no single
+/// character, so anything recorded *for a chat* records the conversation id.
+///
+/// `session_id` is kept as a read-only alias of `conversation_id`. Stored
+/// documents written before the split carry `sessionId`, and reading them
+/// through a flat reader would otherwise drop the scope silently.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContextScope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub character_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    #[serde(default, alias = "session_id", skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona_id: Option<String>,
 }

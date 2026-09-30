@@ -23,16 +23,55 @@ Pure Rust domain data with no HTTP or platform SDK dependency.
 
 It owns:
 
-- character data
-- world-book data and deterministic keyword matching
+- the conversation, which is the root entity (see [Domain entities](#domain-entities))
+- character, persona, world-book and prompt-profile data as independent entities
+- deterministic world-book keyword matching
 - the conversation transcript (see [Conversation transcript](#conversation-transcript))
-- sessions, which store a transcript rather than a derived text history
+- a transcript stored on the conversation itself, rather than a derived text history
 - the protocol vocabulary: which wire formats exist, in what order they are preferred, and what a failed probe does and does not prove
 - provider-neutral prompt plans
 - prompt compilation
 - provider configuration data
 
 It must not own cursor state, UI animation state, widgets, navigation or platform lifecycle.
+
+## Domain entities
+
+The conversation is the root. A character is a participant in a conversation, not
+the thing a conversation is filed under, and a conversation can have no
+participant, one, or many.
+
+```text
+Conversation
+  id
+  participants: [Participant]   0..N
+       Participant { character_id, role, display_name }
+       role is Character (default) or Narrator (a game master, a table)
+  persona_id:      Option<id>    -> Persona
+  worldbook_ids:   [id]          -> WorldBook
+  prompt_profile_id: Option<id>  -> PromptProfile
+  transcript:      Transcript
+  metadata
+```
+
+| Entity | What it is | What it may not do |
+| --- | --- | --- |
+| `Character` | name, description, personality, scenario, first message, alternate greetings, example dialogue, a character-level system prompt override, extensions | own a world book. It may name default world books by id, and that is a reference, not ownership |
+| `Persona` | who the user is in this conversation: name, description, user prompt, default world-book ids | live inside a `Character` |
+| `WorldBook` | named entries with keys, priority and position, plus the deterministic matcher | have a lifetime that depends on a character being deleted |
+| `PromptProfile` | app/system prompt, user-side persona prompt, post-history instructions, format rules, extra fixed segments | stay scattered across a character card, a provider config and UI state |
+
+A conversation binds a persona, any number of world books and one prompt profile.
+World books additionally bind globally, so a world book can be reachable from
+several conversations at once and survive any of them. Binding order is
+deliberate and stable: the conversation's own bindings first, then the defaults
+named by its participant characters, then the persona's defaults, then the
+global ones — deduplicated by id, so a book bound twice is injected once.
+
+Because the participant list is a list, a group chat is `participants = [a, b, c]`
+and a tabletop is a Narrator plus several characters. Neither is a "main
+character with extra text", so neither needs the storage model changed again when
+those UIs are built.
 
 ### 3. sujiu-ai
 
@@ -122,7 +161,7 @@ This is why the agent loop reports how it stopped rather than returning an error
 
 ### Compaction
 
-Long sessions are not solved by appending forever. `Transcript::compact` moves the oldest turns into a `CompactedTurns` record and replaces them with a summary. Moved turns are kept, not deleted, so exact older detail stays retrievable through the context protocol.
+Long conversations are not solved by appending forever. `Transcript::compact` moves the oldest turns into a `CompactedTurns` record and replaces them with a summary. Moved turns are kept, not deleted, so exact older detail stays retrievable through the context protocol.
 
 Compaction cuts on turn boundaries. Because a call and its result live in the same turn, a cut cannot split a pair. Turn ids stay unique across the archive as well as the live turns, since they key the UI bubbles.
 
@@ -157,7 +196,7 @@ An older snapshot may hold the reasoning as a bare string, written before the si
 
 Matching only on kind and model is not enough: two OpenAI-compatible gateways can both serve a model called `gpt-4o-mini` and have entirely unrelated conversation state. On any mismatch the runtime falls back to the normalized model transcript and lets the adapter convert.
 
-Continuation is also **chained within a turn**. Round 2 continues from round 1's handle, not from the handle the session had before the turn began. What a round says about the handle is a `ContinuationUpdate`, not an `Option`, because "I have nothing to chain" and "that handle is dead" are different answers:
+Continuation is also **chained within a turn**. Round 2 continues from round 1's handle, not from the handle the conversation had before the turn began. What a round says about the handle is a `ContinuationUpdate`, not an `Option`, because "I have nothing to chain" and "that handle is dead" are different answers:
 
 - `Unchanged` — no opinion, keep carrying what was in hand
 - `Clear` — the handle is no longer usable; the next round runs on the transcript alone
@@ -171,7 +210,7 @@ A stored event that cannot be read is an **error**, not an empty handle. Every f
 
 ### A document the runtime cannot read is protected, not overwritten
 
-The same rule governs the snapshot as a whole. A directory holding a document this build cannot parse enters a **protected** state: `persist()` becomes a no-op, `storage_protection()` reports why, and nothing the runtime does — configuring a provider, creating a session, sending a turn, compacting — writes over it. The user leaves that state deliberately, by discarding the document, or a future migration resolves it.
+The same rule governs the snapshot as a whole. A directory holding a document this build cannot parse enters a **protected** state: `persist()` becomes a no-op, `storage_protection()` reports why, and nothing the runtime does — configuring a provider, creating a conversation, sending a turn, compacting — writes over it. The user leaves that state deliberately, by discarding the document, or a future migration resolves it.
 
 Skipping the one write that discovered the problem is not enough. The next save destroys it just as thoroughly, one step later, which is the same data loss with a delay.
 
@@ -183,7 +222,7 @@ A thinking-mode endpoint may reject a request whose previous assistant message r
 
 The identity matters: visible assistant text is portable across providers, provider reasoning is not. Handing one provider's reasoning to another under our own field name would put a foreign protocol's text where the endpoint expects its own. The wire field is only restored when the sidecar's identity matches the endpoint being called, and otherwise the reasoning stays in the transcript for diagnostics while the request replays the normalized transcript alone.
 
-A legacy document that stored the reasoning as a bare string is read and kept, with an unknown identity — which makes it non-replayable on its own, because a real identity always names at least a model, so an empty one can never match. Losing the text entirely would be the worse failure: the session would not even open.
+A legacy document that stored the reasoning as a bare string is read and kept, with an unknown identity — which makes it non-replayable on its own, because a real identity always names at least a model, so an empty one can never match. Losing the text entirely would be the worse failure: the conversation would not even open.
 
 Chat Completions has no continuation concept, so its adapter records the completion id for reference but marks the state `ContinuationSupport::Unsupported`, which makes it permanently ineligible for replay. That is what stops a plain completion label from being mistaken for a chainable handle. The field exists so an adapter that does have one, such as OpenAI Responses with its `previous_response_id`, can use it.
 
@@ -232,15 +271,42 @@ small initial tool set + sujiu_search_tools
 
 This keeps large lore books and large plugin catalogs outside the prompt unless they are relevant.
 
+### The context protocol is a view, not a vault
+
+`ContextSource` / `ContextRecord` is the unified shape the model searches and
+reads. It is **not** where domain data lives. Characters, personas, world books,
+conversations and prompt profiles are stored as themselves, per entity, and are
+projected into context sources for the cases where a model-facing read of them
+is genuinely useful.
+
+```text
+Character / Persona / WorldBook / Conversation / PromptProfile
+  -> independent domain storage (conversations/, characters/, personas/, ...)
+  -> projection into ContextSource / ContextRecord
+  -> search_context / read_context
+```
+
+`project_library` performs that projection. A source it created is marked as
+projected and is **not** written back as stored data, so the projection cannot
+drift into a second source of truth. Persistence and editing are per domain
+entity; only retrieval is unified.
+
+Two things deliberately stay out of the projection: a prompt profile and a
+transcript. Both reach the model through prompt assembly, so making them
+searchable would give the model a second, worse way to read what it is already
+told every turn.
+
 ## Prompt pipeline
 
 ```text
-App system prompt
+App system prompt (or the conversation's PromptProfile system prompt)
   -> BeforeCharacter world book
-  -> character system prompt
-  -> character definition
+  -> each participant's character system prompt
+  -> each participant's character definition
+  -> persona
   -> AfterCharacter world book
   -> example dialogue
+  -> format rules + extra profile segments
   -> prompt block          <- cacheable; each piece at its semantic position
   -> conversation history  <- verbatim transcript, append-only
   -> NearHistory world book
@@ -254,6 +320,40 @@ App system prompt
 ```
 
 `priority` means client-side retention/ordering priority. It is not presented as a magic model attention weight.
+
+### Three layers, and only the third is a tool
+
+The pipeline is layered by how the content gets in, and the layer decides
+whether the model is involved at all.
+
+1. **Injected directly, every turn.** The system prompt, the current persona,
+   every participating character definition and scenario, the format rules, the
+   stable instructions from the character and the prompt profile, and the
+   constant (always-on) world-book entries. The model must never have to call a
+   tool to learn who it is playing.
+2. **Filtered by the runtime, then injected.** Ordinary world-book and lorebook
+   entries. The prompt compiler decides by keyword, scope, priority, position and
+   budget, and the hits go straight into the prompt. World-book triggering is
+   prompt-compilation and context-assembly behaviour, not model behaviour.
+3. **Tool calls only, as a fallback for what is large or on demand.** Old
+   history, large long-term memory, external documents, big databases,
+   unpredictable relevance, heavy resources.
+
+A character card, a system prompt, a persona or a current-conversation world book
+is **never** a tool call. The flow this avoids is the expensive one: the model
+thinks, calls a tool to fetch the card, reasons again, maybe calls a world-book
+tool, and only then answers.
+
+```text
+Core assembles a stable prefix
+  -> runtime filters the world book
+  -> one request
+  -> tools only to supplement what did not fit
+```
+
+That ordering is also what makes prompt caching pay: the stable prefix stays
+byte-identical across turns, and a world-book hit that changes is a declared
+cache break rather than a reordered prompt.
 
 Prompt caching is a design goal: the stable prefix is unchanged between turns, and an ordinary turn only appends. Where a turn genuinely cannot append — a newly triggered world-book entry, an edited character, a tool-discovery reload that changes which tool schemas are sent — that is a cache break and is declared as one, not papered over. See [Conversation transcript](#conversation-transcript).
 
@@ -566,9 +666,53 @@ The differences are concrete:
 
 A native handle does not replace the transcript. It lets a request skip the part the endpoint already holds, so the handle records how many messages it covers and only that many are dropped from the next request. The transcript stays the portable base, and it is fully re-sent whenever the endpoint, protocol or model changes. A handle from a different identity, or a Chat Completions completion id — which is a label, not a handle — is never accepted as one.
 
+### The stored layout is rooted at the conversation
+
+Persistence follows the domain, not a single blob:
+
+```text
+sujiu-library.json                       manifest: ids, endpoint, stored context
+conversations/<conversation-id>/conversation.json
+characters/<character-id>.json
+personas/<persona-id>.json
+worldbooks/<world-book-id>.json
+prompt_profiles/<profile-id>.json
+```
+
+A conversation owns a directory. Everything else is a file per entity, because
+those entities are independent and may be shared between conversations. There is
+no `characters/<id>/chats/…`: a character is not the root, and a world book
+filed under a character could not outlive it.
+
+The manifest is written **last**. An interrupted save therefore leaves a manifest
+that still lists what was actually written, rather than one that points at
+documents which do not exist yet. Projected context sources are filtered out on
+save, so the projection never accumulates in the manifest as if it were stored
+data.
+
 ### What a stored document has to survive
 
-Persisted state is versioned and migrated, and the shape of a session has changed twice: a version 1 document stored conversations as a flat list of text messages, a version 2 document stored real transcripts, and a version 3 document keeps those transcripts and stores an endpoint instead of a provider config. The migration has to know which of those it is reading, because a version 2 document read through the version 1 reader parses without complaint and returns a session with no turns — the file loads, the store is writable, and the conversation is simply gone with nothing saying so.
+Persisted state is versioned and migrated, and the shape of a stored conversation
+has changed three times. A version 1 document stored conversations as a flat
+list of text messages. A version 2 document stored real transcripts. A version 3
+document kept those transcripts and stored an endpoint instead of a provider
+config. A version 4 library stores each domain entity as its own document under
+a conversation-rooted layout.
+
+The migration has to know which of those it is reading, because a version 2
+document read through the version 1 reader parses without complaint and returns a
+conversation with no turns — the file loads, the store is writable, and the
+conversation is simply gone with nothing saying so.
+
+Two migrations carry real data, so neither is allowed to drop anything:
+
+- a stored conversation with a single `characterId` becomes a conversation with
+  one participant, keeping its id. Renaming the id would break any row a
+  platform already stored.
+- a world book embedded in a character card becomes a standalone world book
+  whose id is then listed in that card's `worldbook_ids`. It is read out of the
+  **raw JSON** before the card is parsed, because parsing the typed character
+  first would silently discard the lore with nothing to report.
 
 ## Dependency direction
 

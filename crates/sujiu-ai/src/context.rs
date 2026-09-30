@@ -6,7 +6,9 @@ use std::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use sujiu_core::{ContextKind, ContextRecord, ContextScope, ContextSource, WorldBook};
+use sujiu_core::{
+    ContextKind, ContextRecord, ContextScope, ContextSource, Library, Persona, WorldBook,
+};
 use thiserror::Error;
 
 use crate::{
@@ -172,6 +174,77 @@ impl InMemoryContextStore {
                 metadata: entry.extensions.clone(),
             });
         }
+    }
+
+    pub fn add_persona(
+        &self,
+        source_id: impl Into<String>,
+        persona: &Persona,
+        scope: ContextScope,
+    ) {
+        let source_id = source_id.into();
+        let content = persona.prompt_text();
+
+        self.add_source(ContextSource {
+            id: source_id.clone(),
+            kind: ContextKind::Persona,
+            name: persona.name.clone(),
+            description: "The user persona bound to a conversation.".into(),
+            scope: scope.clone(),
+            mutable: false,
+            record_count: 0,
+            metadata: Default::default(),
+        });
+
+        if content.is_empty() {
+            return;
+        }
+
+        self.add_record(ContextRecord {
+            uri: format!("sujiu://context/{}/persona", source_id),
+            source_id,
+            kind: ContextKind::Persona,
+            title: persona.name.clone(),
+            content,
+            keywords: vec![persona.name.clone()],
+            tags: Vec::new(),
+            priority: 30,
+            timestamp_ms: None,
+            scope,
+            metadata: persona.extensions.clone(),
+        });
+    }
+}
+
+/// Project the independent domain entities into the unified context layer.
+///
+/// Characters, personas, world books, conversations and prompt profiles are
+/// stored as domain documents of their own. The context layer is a *view* of
+/// them, so one search protocol can read a world book, a persona and a story
+/// event the same way, without those entities being kept here as a second
+/// source of truth.
+///
+/// Only the readable kinds are projected: a prompt profile and a conversation
+/// transcript reach the model through prompt assembly, not through a search.
+pub fn project_library(store: &InMemoryContextStore, library: &Library) {
+    for persona in library.personas.iter() {
+        store.add_persona(
+            format!("persona:{}", persona.id),
+            persona,
+            ContextScope {
+                persona_id: Some(persona.id.clone()),
+                ..ContextScope::default()
+            },
+        );
+    }
+
+    for book in library.world_books.iter() {
+        store.add_world_book(
+            format!("worldbook:{}", book.id),
+            book.name.clone(),
+            book,
+            ContextScope::default(),
+        );
     }
 }
 
@@ -719,6 +792,7 @@ mod tests {
                     extensions: Default::default(),
                 }],
                 extensions: Default::default(),
+                ..Default::default()
             },
             ContextScope::default(),
         );
@@ -729,7 +803,7 @@ mod tests {
             name: "Story timeline".into(),
             description: "Important events from this roleplay.".into(),
             scope: ContextScope {
-                session_id: Some("session-1".into()),
+                conversation_id: Some("conversation-1".into()),
                 ..ContextScope::default()
             },
             mutable: true,
@@ -748,7 +822,7 @@ mod tests {
             priority: 20,
             timestamp_ms: Some(1000),
             scope: ContextScope {
-                session_id: Some("session-1".into()),
+                conversation_id: Some("conversation-1".into()),
                 ..ContextScope::default()
             },
             metadata: Default::default(),
@@ -815,5 +889,72 @@ mod tests {
 
         let records = store.read(&[hits[0].uri.clone()]).await.unwrap();
         assert_eq!(records[0].content, "她答应雨停之后一起去旧城门。");
+    }
+
+    fn sample_library() -> Library {
+        Library {
+            personas: vec![Persona {
+                description: "游历北方的行商".into(),
+                ..Persona::new("persona-me", "旅人")
+            }],
+            world_books: vec![WorldBook {
+                id: "world-north".into(),
+                name: "北方风物".into(),
+                entries: vec![WorldBookEntry {
+                    id: "gate".into(),
+                    name: "旧城门".into(),
+                    content: "旧城门每逢霜降闭门三日。".into(),
+                    keys: vec!["旧城门".into()],
+                    enabled: true,
+                    constant: false,
+                    priority: 5,
+                    position: WorldBookPosition::AfterCharacter,
+                    extensions: Default::default(),
+                }],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn domain_entities_are_projected_into_one_search_protocol() {
+        let store = InMemoryContextStore::new();
+        project_library(&store, &sample_library());
+
+        let lore = store
+            .search(&ContextSearchQuery {
+                query: "旧城门".into(),
+                kinds: vec![ContextKind::WorldLore],
+                ..ContextSearchQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(lore.len(), 1);
+        assert_eq!(lore[0].source_id, "worldbook:world-north");
+
+        let persona = store
+            .search(&ContextSearchQuery {
+                query: "行商".into(),
+                kinds: vec![ContextKind::Persona],
+                ..ContextSearchQuery::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(persona.len(), 1);
+        assert_eq!(persona[0].source_id, "persona:persona-me");
+
+        let sources = store.list_sources(&[]).await.unwrap();
+        assert_eq!(sources.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_projected_persona_keeps_its_own_scope() {
+        let store = InMemoryContextStore::new();
+        project_library(&store, &sample_library());
+
+        let sources = store.list_sources(&[ContextKind::Persona]).await.unwrap();
+        assert_eq!(sources[0].scope.persona_id.as_deref(), Some("persona-me"));
+        assert!(sources[0].scope.conversation_id.is_none());
     }
 }

@@ -938,8 +938,13 @@ fn a_compacted_session_still_pairs_every_call_the_model_can_see() {
         roles.first().map(String::as_str) == Some("user"),
         "the summary leads the history: {roles:?}"
     );
+    // Where the summary sits depends on how much fixed context the conversation
+    // injects, so it is looked for rather than indexed: a world book bound to
+    // the card adds prompt segments ahead of the history.
     assert!(
-        text_of(&messages(&after)[3]).contains("holding the line"),
+        messages(&after)
+            .iter()
+            .any(|message| text_of(message).contains("holding the line")),
         "the model is told the earlier turns as a summary: {after:?}"
     );
 
@@ -1404,4 +1409,191 @@ fn a_handle_the_provider_retired_stays_retired_across_a_restart() {
 
     drop(runtime);
     drop(provider.server);
+}
+
+/// The prompt a turn sends, as one string.
+///
+/// Reading the prompt as text is deliberate: the claim under test is that the
+/// content is *in* the request, not which segment object happens to carry it.
+fn prompt_text(request: &Value) -> String {
+    messages(request)
+        .iter()
+        .map(text_of)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What a model must not have to ask for.
+///
+/// A character card, a persona, a prompt profile's format rules and a world book
+/// the runtime can filter itself are all cheap and obvious. The model asking a
+/// tool for them would cost an extra round, spend tokens re-deriving what the
+/// runtime already knows, and — worst — make the character depend on the model
+/// choosing to look.
+#[test]
+fn the_runtime_injects_what_the_model_must_not_have_to_ask_for() {
+    let provider = ScriptedProvider::start(vec![Step::Text("Nobody calls the station at 3am.")]);
+    let runtime = runtime_for(&provider.base_url(), "mock-model");
+    // The seeded conversation with Lin, a persona, a prompt profile that carries
+    // format rules, and a world book bound through the character.
+    let session = "session-1";
+
+    run_turn(&runtime, session, "Who else listens to this frequency?");
+    let request = provider.next_request();
+    let text = prompt_text(&request);
+
+    assert!(
+        text.contains("A night-shift radio operator who answers calls"),
+        "the character's own definition belongs in the prompt, not behind a tool: {text}"
+    );
+    assert!(
+        text.contains("About the user:"),
+        "the persona a conversation is bound to is injected every turn: {text}"
+    );
+    assert!(
+        text.contains("third person for narration"),
+        "format rules are a prompt profile segment and are injected: {text}"
+    );
+    assert!(
+        text.contains("Weather is never small here"),
+        "a constant world-book entry is always relevant, so it is always injected: {text}"
+    );
+    assert!(
+        text.contains("KRS-9 transmits"),
+        "a keyed entry the history and the input matched is filtered by the runtime, \
+         not found by the model: {text}"
+    );
+    assert!(
+        !text.contains("Water reaches the lowest shelves first"),
+        "a keyed entry nothing mentioned stays out, which is what filtering buys: {text}"
+    );
+    assert_eq!(
+        tool_results(&request),
+        Vec::new(),
+        "none of the above may be fetched by a tool call: {request}"
+    );
+
+    drop(runtime);
+    drop(provider.server);
+}
+
+/// A conversation holds whoever it holds, and the prompt says so.
+///
+/// The old model could not express this at all: a session had one
+/// `character_id`, so a table top had to be faked by pretending one of the
+/// players was the character and describing the rest in prose.
+#[test]
+fn a_table_top_sends_every_participant_without_inventing_a_main_character() {
+    let provider = ScriptedProvider::start(vec![Step::Text("The winch holds, for now.")]);
+    let runtime = runtime_for(&provider.base_url(), "mock-model");
+    // The seeded conversation with a narrator and a second character.
+    let session = "session-3";
+
+    run_turn(
+        &runtime,
+        session,
+        "The cable winch has stalled halfway up the pass.",
+    );
+    let request = provider.next_request();
+    let text = prompt_text(&request);
+
+    assert!(
+        text.contains("A travelling engineer who repairs machines"),
+        "every participant's definition is injected: {text}"
+    );
+    assert!(
+        text.contains("A night-shift radio operator who answers calls"),
+        "a second participant is not a mention inside the first one's card: {text}"
+    );
+    assert!(
+        text.contains("game master"),
+        "the narrator seat is described as what it is: {text}"
+    );
+
+    drop(runtime);
+    drop(provider.server);
+}
+
+/// A conversation created at runtime binds what it was given.
+///
+/// The bindings are stored, not merely applied: a conversation that was handed
+/// a persona and a world book has to reopen carrying them, or the prompt a user
+/// configures would quietly differ after a restart.
+#[test]
+fn a_conversation_keeps_the_bindings_it_was_created_with() {
+    let directory = scratch_dir("conversation-bindings");
+    let storage = std::sync::Arc::new(
+        sujiu_ffi::storage::FileStorage::new(&directory).expect("a data directory"),
+    );
+    let runtime =
+        sujiu_ffi::runtime::SujiuRuntime::new_persistent(sujiu_ffi::seed::seed(), storage.clone())
+            .expect("runtime");
+
+    let id = runtime.create_conversation(&sujiu_ffi::runtime::CreateConversationRequest {
+        participants: vec![
+            sujiu_ffi::runtime::ParticipantRequest {
+                character_id: "character-shen".to_string(),
+                role: Some(sujiu_core::ParticipantRole::Narrator),
+                display_name: None,
+            },
+            sujiu_ffi::runtime::ParticipantRequest {
+                character_id: "character-wen".to_string(),
+                role: None,
+                display_name: None,
+            },
+        ],
+        persona_id: Some("persona-insomniac".to_string()),
+        worldbook_ids: vec!["world-book-coast".to_string()],
+        prompt_profile_id: Some("profile-roleplay".to_string()),
+    });
+
+    let summary = runtime
+        .conversations()
+        .into_iter()
+        .find(|conversation| conversation.id == id)
+        .expect("the new conversation is listed");
+    assert_eq!(
+        summary.participants.len(),
+        2,
+        "a conversation is not a session with one character any more: {summary:?}"
+    );
+    assert_eq!(summary.participants[0].role, "narrator");
+    assert_eq!(summary.participants[0].name, "Shen");
+    assert_eq!(
+        summary.participants[1].role, "character",
+        "an unstated role means an ordinary speaking character"
+    );
+
+    let state = runtime
+        .conversation_state(&id)
+        .expect("the conversation is readable");
+    assert_eq!(state.persona_id.as_deref(), Some("persona-insomniac"));
+    assert_eq!(state.worldbook_ids, vec!["world-book-coast"]);
+    assert_eq!(state.prompt_profile_id.as_deref(), Some("profile-roleplay"));
+
+    drop(runtime);
+
+    // And it survives a reopen, from the conversation's own directory.
+    let reopened = sujiu_ffi::runtime::SujiuRuntime::new_persistent(
+        sujiu_ffi::runtime::Seed::default(),
+        storage,
+    )
+    .expect("runtime");
+    let state = reopened
+        .conversation_state(&id)
+        .expect("the conversation is still there after a restart");
+    assert_eq!(
+        state.participants.len(),
+        2,
+        "the participants belong to the conversation document, not to a live session: {state:?}"
+    );
+    assert_eq!(state.persona_id.as_deref(), Some("persona-insomniac"));
+    assert!(
+        directory
+            .join("conversations")
+            .join(&id)
+            .join("conversation.json")
+            .exists(),
+        "a conversation is rooted at its own id, not inside a character"
+    );
 }

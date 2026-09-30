@@ -17,14 +17,46 @@
  * model lives in Rust.
  */
 
+/**
+ * One character taking part in a conversation.
+ *
+ * A conversation is the root of a chat, and it holds zero, one or many
+ * characters. Nothing here means "the main character": a tabletop is a
+ * narrator plus several others, and it is stored the same way as a two-person
+ * chat.
+ */
+export interface Participant {
+  characterId: string;
+  name: string;
+  /** `character` or `narrator`, as a label a screen may show. */
+  role: string;
+}
+
 export interface SessionSummary {
   id: string;
+  /**
+   * The first participant, kept for a screen that still shows one character.
+   * Read `participants` for the conversation as it really is.
+   */
   characterId: string;
+  /** The first participant's name, for the same reason. */
   characterName: string;
+  participants: Participant[];
   preview: string;
   title: string;
   updatedAtMs: number;
   messageCount: number;
+}
+
+/** One character a new conversation should include. */
+export interface ParticipantRequest {
+  characterId: string;
+  /**
+   * Optional: an unrecognised or missing label means an ordinary speaking
+   * character. `narrator` covers a game master or narrator seat.
+   */
+  role?: string;
+  displayName?: string;
 }
 
 export interface CharacterSummary {
@@ -75,7 +107,15 @@ export interface Message {
 
 export interface ConversationSnapshot {
   sessionId: string;
+  /** The first participant, for a screen that still shows one character. */
   character?: CharacterSummary;
+  participants: Participant[];
+  /** The persona the user is playing in this conversation, if one is bound. */
+  personaId?: string;
+  /** The world books bound to this conversation directly. */
+  worldbookIds: string[];
+  /** The prompt profile this conversation compiles its prompt from, if any. */
+  promptProfileId?: string;
   messages: Message[];
 }
 
@@ -203,6 +243,20 @@ export class SujiuRuntimeBridge {
   listContextSources(): ContextSource[];
   conversationState(sessionId: string): ConversationSnapshot;
   createSession(characterId: string): string;
+  /**
+   * Open a conversation with any number of characters.
+   *
+   * This is the form that needs no fiction about a main character: an empty
+   * list is a conversation with nobody in it yet, one is the ordinary chat, and
+   * several is a table. `createSession` is a shortcut into this one, not a
+   * different storage model. Returns the new conversation id.
+   */
+  createConversation(
+    participants: ParticipantRequest[],
+    personaId?: string,
+    worldbookIds?: string[],
+    promptProfileId?: string
+  ): string;
   /** Throws when `provider.baseUrl` is blank. Nothing else is validated here. */
   configureProvider(provider: ProviderConfig): void;
   /**

@@ -15,10 +15,12 @@ use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use sujiu_ai::DiagnosticEntry;
 use sujiu_core::EndpointConfig;
+use sujiu_core::ParticipantRole;
 use sujiu_ffi::events::{TurnEvent, TurnEventReporter};
 use sujiu_ffi::runtime::{
-    CharacterSummary, ContextSourceSummary, ConversationSnapshot, EndpointExploration,
-    ModelDiscovery, ModelSummary, SendTurnRequest, SessionSummary, SujiuRuntime, ToolCallSummary,
+    CharacterSummary, ContextSourceSummary, ConversationSnapshot, CreateConversationRequest,
+    EndpointExploration, ModelDiscovery, ModelSummary, ParticipantRequest, ParticipantSummary,
+    SendTurnRequest, SessionSummary, SujiuRuntime, ToolCallSummary,
 };
 
 /// A live Rust runtime handed to the platform bridge.
@@ -30,11 +32,40 @@ pub struct SujiuRuntimeBridge {
     runtime: Arc<SujiuRuntime>,
 }
 
+/// One character taking part in a conversation.
+///
+/// A conversation is the root of a chat, and it may hold no participant, one
+/// character, or a whole table of them. Nothing here implies a "main"
+/// character; a table top is a game master plus several others.
+#[napi(object)]
+pub struct ParticipantDto {
+    pub character_id: String,
+    pub name: String,
+    /// `character` or `narrator`, as a label a screen may show.
+    pub role: String,
+}
+
+/// What a screen is asked to open a conversation with.
+///
+/// A bare character id still creates a one-participant conversation, so an
+/// existing platform flow keeps working while the model underneath is already
+/// group-shaped.
+#[napi(object)]
+pub struct ParticipantRequestDto {
+    pub character_id: String,
+    pub role: Option<String>,
+    pub display_name: Option<String>,
+}
+
 #[napi(object)]
 pub struct SessionSummaryDto {
     pub id: String,
+    /// The first participant, for a screen that still shows one character.
+    /// Read [`Self::participants`] for the conversation as it really is.
     pub character_id: String,
+    /// The first participant's name, for the same reason.
     pub character_name: String,
+    pub participants: Vec<ParticipantDto>,
     pub preview: String,
     pub title: String,
     pub updated_at_ms: f64,
@@ -199,7 +230,12 @@ pub struct MessageDto {
 #[napi(object)]
 pub struct ConversationSnapshotDto {
     pub session_id: String,
+    /// The first participant, for a screen that still shows one character.
     pub character: Option<CharacterSummaryDto>,
+    pub participants: Vec<ParticipantDto>,
+    pub persona_id: Option<String>,
+    pub worldbook_ids: Vec<String>,
+    pub prompt_profile_id: Option<String>,
     pub messages: Vec<MessageDto>,
 }
 
@@ -243,12 +279,38 @@ fn enum_label<T: serde::Serialize>(value: &T) -> String {
         .unwrap_or_default()
 }
 
+/// Reads a participant role a screen sent, defaulting to a speaking character.
+///
+/// A screen is not required to know the vocabulary: an unrecognised or missing
+/// label means the ordinary case rather than a rejected conversation.
+fn participant_role(label: &str) -> ParticipantRole {
+    match label {
+        "narrator" | "gm" | "gameMaster" | "game_master" => ParticipantRole::Narrator,
+        _ => ParticipantRole::Character,
+    }
+}
+
+impl From<ParticipantSummary> for ParticipantDto {
+    fn from(value: ParticipantSummary) -> Self {
+        Self {
+            character_id: value.character_id,
+            name: value.name,
+            role: value.role,
+        }
+    }
+}
+
 impl From<SessionSummary> for SessionSummaryDto {
     fn from(value: SessionSummary) -> Self {
         Self {
             id: value.id,
             character_id: value.character_id.unwrap_or_default(),
             character_name: value.character_name,
+            participants: value
+                .participants
+                .into_iter()
+                .map(ParticipantDto::from)
+                .collect(),
             preview: value.preview,
             title: value.title,
             updated_at_ms: value.updated_at_ms as f64,
@@ -309,6 +371,14 @@ impl From<ConversationSnapshot> for ConversationSnapshotDto {
         Self {
             session_id: value.session_id,
             character: value.character.map(CharacterSummaryDto::from),
+            participants: value
+                .participants
+                .into_iter()
+                .map(ParticipantDto::from)
+                .collect(),
+            persona_id: value.persona_id,
+            worldbook_ids: value.worldbook_ids,
+            prompt_profile_id: value.prompt_profile_id,
             messages: value
                 .messages
                 .into_iter()
@@ -558,6 +628,36 @@ impl SujiuRuntimeBridge {
         self.runtime.create_session(Some(character_id.as_str()))
     }
 
+    /// Open a conversation with any number of characters.
+    ///
+    /// This is the form that needs no fiction about a main character: an empty
+    /// list is a conversation with nobody in it yet, one is the ordinary chat,
+    /// and several is a table. The single-character path above is a shortcut
+    /// into this one, not a different storage model.
+    #[napi]
+    pub fn create_conversation(
+        &self,
+        participants: Vec<ParticipantRequestDto>,
+        persona_id: Option<String>,
+        worldbook_ids: Option<Vec<String>>,
+        prompt_profile_id: Option<String>,
+    ) -> String {
+        self.runtime
+            .create_conversation(&CreateConversationRequest {
+                participants: participants
+                    .into_iter()
+                    .map(|participant| ParticipantRequest {
+                        character_id: participant.character_id,
+                        role: participant.role.as_deref().map(participant_role),
+                        display_name: participant.display_name,
+                    })
+                    .collect(),
+                persona_id,
+                worldbook_ids: worldbook_ids.unwrap_or_default(),
+                prompt_profile_id,
+            })
+    }
+
     /// The wire formats the runtime speaks, in the order it tries them.
     ///
     /// This replaces the list of provider kinds a settings screen used to be
@@ -699,8 +799,18 @@ impl SujiuRuntimeBridge {
 #[cfg(test)]
 mod tests {
     use super::ProviderConfigDto;
+    use super::{participant_role, CreateConversationRequest, ParticipantRequest};
     use sujiu_core::{apply_reasoning_override, EndpointCapabilities, Protocol};
     use sujiu_ffi::events::TurnEventReporter;
+
+    fn empty_with(prototype: &CreateConversationRequest) -> CreateConversationRequest {
+        CreateConversationRequest {
+            participants: Vec::new(),
+            persona_id: prototype.persona_id.clone(),
+            worldbook_ids: Vec::new(),
+            prompt_profile_id: prototype.prompt_profile_id.clone(),
+        }
+    }
 
     fn form_fields(replays_assistant_reasoning: Option<bool>) -> ProviderConfigDto {
         ProviderConfigDto {
@@ -1014,5 +1124,108 @@ mod tests {
             discovery.iter().all(|entry| entry.kind == "discovery"),
             "the filtered read leaked the conversation half"
         );
+    }
+
+    /// A screen reads a conversation as a list of participants, and a session
+    /// summary still answers the one-character question a simple list has.
+    ///
+    /// The wire keeps `characterId` because removing it would break every
+    /// platform list row at once, and a convenience field is cheap. The list is
+    /// the truth, and a conversation with three of them has to be expressible
+    /// through the same DTO.
+    #[test]
+    fn a_conversation_reports_every_participant_and_still_answers_the_simple_question() {
+        let runtime =
+            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+
+        let table: Vec<super::SessionSummaryDto> = runtime
+            .sessions()
+            .into_iter()
+            .map(super::SessionSummaryDto::from)
+            .collect();
+        let roundtable = table
+            .iter()
+            .find(|summary| summary.participants.len() == 2)
+            .expect("the seed includes a conversation with two characters in it");
+        assert_eq!(
+            roundtable.participants[0].role, "narrator",
+            "a narrator seat is reported as what it is"
+        );
+        assert_eq!(roundtable.participants[1].role, "character");
+        assert_eq!(
+            roundtable.character_id, roundtable.participants[0].character_id,
+            "the convenience field is the first participant, not a main character"
+        );
+        assert_eq!(roundtable.character_name, "Shen");
+
+        let snapshot = super::ConversationSnapshotDto::from(
+            runtime
+                .conversation_state(&roundtable.id)
+                .expect("the conversation is readable"),
+        );
+        assert_eq!(snapshot.participants.len(), 2);
+        assert_eq!(snapshot.session_id, roundtable.id);
+    }
+
+    /// A screen may hand over any number of characters, and the DTO it hands
+    /// them over in loses nothing on the way to the runtime.
+    ///
+    /// The bridge's own `create_conversation` cannot run in a test binary, so
+    /// what is proved here is the translation: the DTOs a screen fills in become
+    /// the request the runtime receives, and an unstated role stays an ordinary
+    /// speaking character instead of becoming an error.
+    #[test]
+    fn a_screen_can_open_a_conversation_with_nobody_one_or_many() {
+        let empty = CreateConversationRequest {
+            participants: Vec::new(),
+            persona_id: None,
+            worldbook_ids: Vec::new(),
+            prompt_profile_id: None,
+        };
+        let one = CreateConversationRequest {
+            participants: vec![ParticipantRequest {
+                character_id: "character-lin".into(),
+                role: None,
+                display_name: None,
+            }],
+            ..empty_with(&empty)
+        };
+        let table = CreateConversationRequest {
+            participants: vec![
+                ParticipantRequest {
+                    character_id: "character-shen".into(),
+                    role: Some(participant_role("narrator")),
+                    display_name: None,
+                },
+                ParticipantRequest {
+                    character_id: "character-wen".into(),
+                    // A label this build does not know must not fail the call.
+                    role: Some(participant_role("gameMaster")),
+                    display_name: None,
+                },
+            ],
+            persona_id: Some("persona-insomniac".into()),
+            worldbook_ids: vec!["world-book-coast".into()],
+            prompt_profile_id: None,
+        };
+
+        let runtime =
+            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let empty_id = runtime.create_conversation(&empty);
+        let one_id = runtime.create_conversation(&one);
+        let table_id = runtime.create_conversation(&table);
+
+        let state = |id: &str| {
+            super::ConversationSnapshotDto::from(runtime.conversation_state(id).expect("readable"))
+        };
+        assert!(state(&empty_id).participants.is_empty());
+        assert_eq!(state(&one_id).participants[0].role, "character");
+
+        let table = state(&table_id);
+        assert_eq!(table.participants.len(), 2);
+        assert_eq!(table.participants[0].role, "narrator");
+        assert_eq!(table.participants[1].name, "Wen");
+        assert_eq!(table.persona_id.as_deref(), Some("persona-insomniac"));
+        assert_eq!(table.worldbook_ids, vec!["world-book-coast"]);
     }
 }

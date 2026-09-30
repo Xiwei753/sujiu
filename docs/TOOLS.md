@@ -40,6 +40,12 @@ keywords/tags/timestamp, scope and metadata.
 The URI is a retrieval address. It is deliberately independent of SQLite,
 files, embeddings or any other storage implementation.
 
+The record scope names a `conversation_id` (a legacy `sessionId` is read under
+that name and is written back as `conversationId`). A scope is a filter, not
+ownership: the conversation is the root entity, and a record scoped to one
+conversation says which conversation it belongs to, not which file it lives in.
+See [The context protocol is a projection of the domain](#the-context-protocol-is-a-projection-of-the-domain).
+
 ## The three standard read tools
 
 ### `list_context_sources`
@@ -99,6 +105,55 @@ A tiny, obvious world-book keyword match should not spend another model round.
 A large lorebook, distant plot event or ambiguous memory should not be dumped
 into every prompt.
 
+## What is never a tool call
+
+The deterministic path is not only a size optimisation. Some content must not be
+reachable through a tool at all, because the model cannot be allowed to decide
+whether it gets it.
+
+Injected directly every turn by the prompt compiler:
+
+- the app/system prompt, or the conversation's `PromptProfile` system prompt
+- the current `Persona`
+- every participating `Character` definition, scenario and system prompt
+- the format rules and other fixed segments from the `PromptProfile`
+- constant (always-on) world-book entries
+
+Filtered by the runtime and then injected: ordinary world-book and lorebook
+entries, matched by keyword, scope, priority, position and budget.
+
+The tool path is for what is genuinely large, distant or unpredictable: old
+history, large long-term memory, external documents, big databases, heavy
+on-demand resources.
+
+So a character card, a system prompt, a persona and the current conversation's
+world books are read through prompt assembly, never through
+`search_context` / `read_context`. The flow this forbids is the expensive one —
+the model thinks, calls a tool to fetch its own character, reasons again, maybe
+calls a world-book tool, and only then answers. It costs extra rounds, breaks
+the stable prompt prefix, and puts the prompt cache at the model's discretion.
+
+## The context protocol is a projection of the domain
+
+`ContextSource` / `ContextRecord` is the unified shape the model searches and
+reads. It is not the store of record.
+
+```text
+Character / Persona / WorldBook / Conversation / PromptProfile
+  -> independent domain storage
+  -> projection into ContextSource / ContextRecord
+  -> search_context / read_context
+```
+
+`project_library` projects personas as `persona:<id>` sources and world books as
+`worldbook:<id>` sources. Those projected sources are not written back as stored
+data, so the projection can never become a competing source of truth. Editing
+and persistence stay per domain entity; only retrieval is unified.
+
+A prompt profile and a transcript are deliberately not projected: both already
+reach the model through prompt assembly, and a searchable copy would only give
+the model a second, worse route to the same content.
+
 ## Tool discovery
 
 The three core context tools are intentionally small enough to remain available
@@ -143,7 +198,7 @@ Older material can be represented by:
 - `story_event` scene summaries for compact narrative continuity
 - `character_memory` records for durable facts and relationships
 
-This lets Sujiu eventually compact long sessions without losing the ability to
+This lets Sujiu eventually compact long conversations without losing the ability to
 retrieve an exact old event.
 
 `Transcript::compact` moves the oldest turns into a `CompactedTurns` record and

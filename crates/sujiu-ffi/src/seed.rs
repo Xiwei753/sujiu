@@ -1,14 +1,20 @@
 //! Deterministic seed data for a fresh runtime.
 //!
-//! Sujiu has no persistence layer yet. Until one exists the runtime starts from
-//! this catalog so every platform sees the same real domain values: characters
-//! with a persona, sessions with transcripts, and context sources backed by
-//! actual records.
+//! A new runtime starts from this library so every platform sees the same real
+//! domain values: characters, personas, world books and a prompt profile as
+//! entities of their own, conversations that bind them, transcripts, and
+//! context sources backed by actual records.
+//!
+//! The seed deliberately includes a conversation with more than one
+//! participant, because "the chat has exactly one character in it" used to be
+//! the only shape the data model could hold, and seed data that never shows the
+//! other shapes is how that assumption comes back.
 
 use serde_json::{Map, Value};
 use sujiu_core::{
-    AssistantStep, Character, ContextKind, ContextRecord, ContextScope, ContextSource, Session,
-    Transcript, Turn,
+    AssistantStep, Character, ContextKind, ContextRecord, ContextScope, ContextSource,
+    Conversation, Library, Participant, Persona, PromptProfile, Transcript, Turn, WorldBook,
+    WorldBookEntry, WorldBookPosition,
 };
 
 use crate::runtime::Seed;
@@ -28,9 +34,9 @@ fn character(
     description: &str,
     personality: &str,
     scenario: &str,
+    worldbook_ids: &[&str],
 ) -> Character {
     Character {
-        schema_version: 1,
         id: id.to_string(),
         name: name.to_string(),
         description: description.to_string(),
@@ -41,7 +47,29 @@ fn character(
         example_dialogue: String::new(),
         system_prompt: format!("You are {name}. Stay in character."),
         post_history_instructions: String::new(),
-        world_book: None,
+        worldbook_ids: worldbook_ids.iter().map(|id| (*id).to_string()).collect(),
+        extensions: Map::new(),
+        ..Character::default()
+    }
+}
+
+fn lore_entry(
+    id: &str,
+    name: &str,
+    content: &str,
+    keys: &[&str],
+    constant: bool,
+    priority: i32,
+) -> WorldBookEntry {
+    WorldBookEntry {
+        id: id.to_string(),
+        name: name.to_string(),
+        content: content.to_string(),
+        keys: keys.iter().map(|key| (*key).to_string()).collect(),
+        constant,
+        priority,
+        enabled: true,
+        position: WorldBookPosition::default(),
         extensions: Map::new(),
     }
 }
@@ -60,16 +88,22 @@ fn turn(id: &str, user: &str, answers: &[&str], at_ms: i64) -> Turn {
     turn
 }
 
-fn session(
+fn conversation(
     id: &str,
-    character_id: &str,
+    participants: Vec<Participant>,
+    persona_id: Option<&str>,
+    worldbook_ids: &[&str],
+    prompt_profile_id: Option<&str>,
     title: &str,
     updated_at_ms: i64,
     turns: Vec<Turn>,
-) -> Session {
-    Session {
+) -> Conversation {
+    Conversation {
         id: id.to_string(),
-        character_id: Some(character_id.to_string()),
+        participants,
+        persona_id: persona_id.map(str::to_owned),
+        worldbook_ids: worldbook_ids.iter().map(|id| (*id).to_string()).collect(),
+        prompt_profile_id: prompt_profile_id.map(str::to_owned),
         transcript: Transcript {
             turns,
             compacted: None,
@@ -78,6 +112,7 @@ fn session(
             ("title", Value::from(title)),
             ("updatedAtMs", Value::from(updated_at_ms)),
         ]),
+        ..Conversation::default()
     }
 }
 
@@ -105,8 +140,61 @@ fn record(
     }
 }
 
-/// The catalog a new runtime starts from.
+/// The library a new runtime starts from.
 pub fn seed() -> Seed {
+    let world_books = vec![WorldBook {
+        id: "world-book-coast".to_string(),
+        name: "The northern coast".to_string(),
+        entries: vec![
+            lore_entry(
+                "coast-constant",
+                "Tone",
+                "The coast is cold, quiet and out of season. Weather is never small here.",
+                &[],
+                true,
+                10,
+            ),
+            lore_entry(
+                "coast-station",
+                "The coastal station",
+                "KRS-9 transmits from a concrete hut on the northern breakwater. Its console has one blinking status light that nobody has been able to replace since the winter storm.",
+                &["station", "console", "radio", "breakwater"],
+                false,
+                50,
+            ),
+            lore_entry(
+                "coast-archive",
+                "The lower archive",
+                "Water reaches the lowest shelves first. Wen salvages what she can and files everything else by hand.",
+                &["archive", "library", "flood"],
+                false,
+                40,
+            ),
+        ],
+        extensions: Map::new(),
+        ..WorldBook::default()
+    }];
+
+    let personas = vec![Persona {
+        id: "persona-insomniac".to_string(),
+        name: "The insomniac".to_string(),
+        description:
+            "A night-shift listener who is always tired and never quite as bored as they sound."
+                .to_string(),
+        user_prompt: "Keep replies short. Do not summarise the scene back at me.".to_string(),
+        ..Persona::default()
+    }];
+
+    let prompt_profiles = vec![PromptProfile {
+        id: "profile-roleplay".to_string(),
+        name: "Roleplay".to_string(),
+        format_rules: "Write in third person for narration and first person for speech. Never speak for the user's character."
+            .to_string(),
+        post_history_instructions:
+            "Stay in the moment. Do not step outside the scene to explain yourself.".to_string(),
+        ..PromptProfile::default()
+    }];
+
     let characters = vec![
         character(
             "character-lin",
@@ -114,6 +202,7 @@ pub fn seed() -> Seed {
             "A night-shift radio operator who answers calls nobody else picks up.",
             "Dry, observant, tired but never careless.",
             "A small coastal radio station, 3am.",
+            &["world-book-coast"],
         ),
         character(
             "character-wen",
@@ -121,6 +210,7 @@ pub fn seed() -> Seed {
             "An archivist who remembers the order of every shelf in a library that is slowly flooding.",
             "Warm, precise, quietly funny.",
             "The lower archive of a municipal library.",
+            &[],
         ),
         character(
             "character-shen",
@@ -128,13 +218,17 @@ pub fn seed() -> Seed {
             "A travelling engineer who repairs machines nobody else can reach.",
             "Blunt, patient, allergic to small talk.",
             "A mountain pass, halfway up.",
+            &[],
         ),
     ];
 
-    let sessions = vec![
-        session(
+    let conversations = vec![
+        conversation(
             "session-1",
-            "character-lin",
+            vec![Participant::character("character-lin")],
+            Some("persona-insomniac"),
+            &[],
+            Some("profile-roleplay"),
             "The blinking light",
             NOW_MS,
             vec![turn(
@@ -144,9 +238,12 @@ pub fn seed() -> Seed {
                 NOW_MS - 60_000,
             )],
         ),
-        session(
+        conversation(
             "session-2",
-            "character-wen",
+            vec![Participant::character("character-wen")],
+            None,
+            &["world-book-coast"],
+            None,
             "Flood order",
             NOW_MS - 86_400_000,
             vec![turn(
@@ -156,9 +253,18 @@ pub fn seed() -> Seed {
                 NOW_MS - 86_400_000,
             )],
         ),
-        session(
+        // Two characters and a narrator in one conversation: the shape a
+        // group chat or a tabletop session needs, which the old single-character
+        // session could not hold at all.
+        conversation(
             "session-3",
-            "character-shen",
+            vec![
+                Participant::narrator("character-shen"),
+                Participant::character("character-lin"),
+            ],
+            None,
+            &[],
+            None,
             "Halfway up",
             NOW_MS - 200_000_000,
             Vec::new(),
@@ -170,9 +276,7 @@ pub fn seed() -> Seed {
             id: "source-character".to_string(),
             kind: ContextKind::Persona,
             name: "Character settings".to_string(),
-            description: "Imported character card fields used for prompt compilation."
-                .to_string()
-                .to_string(),
+            description: "Imported character card fields used for prompt compilation.".to_string(),
             scope: ContextScope::default(),
             mutable: true,
             record_count: characters.len(),
@@ -192,7 +296,9 @@ pub fn seed() -> Seed {
             id: "source-story".to_string(),
             kind: ContextKind::StoryEvent,
             name: "Plot memory".to_string(),
-            description: "Scene summaries extracted from earlier sessions.".to_string(),
+            description: "Scene summaries extracted from earlier conversations."
+                .to_string()
+                .to_string(),
             scope: ContextScope::default(),
             mutable: true,
             record_count: 2,
@@ -270,15 +376,21 @@ pub fn seed() -> Seed {
             "source-history",
             ContextKind::ChatHistory,
             "Halfway up",
-            "An abandoned session. Shen was asked to inspect a stalled cable winch and never replied.",
+            "An abandoned conversation. Shen was asked to inspect a stalled cable winch and never replied.",
             &["shen", "winch", "cable"],
             NOW_MS - 200_000_000,
         ),
     ];
 
     Seed {
-        characters,
-        sessions,
+        library: Library {
+            conversations,
+            characters,
+            personas,
+            world_books,
+            prompt_profiles,
+            global_worldbook_ids: Vec::new(),
+        },
         sources,
         records,
     }

@@ -11,7 +11,7 @@ pub mod types;
 
 pub use agent::{AgentConfig, AgentOutcome, AgentRuntime, AgentStop, CancelToken};
 pub use context::{
-    register_standard_context_tools, ContextHit, ContextSearchQuery, ContextStore,
+    project_library, register_standard_context_tools, ContextHit, ContextSearchQuery, ContextStore,
     ContextStoreError, InMemoryContextStore, ListContextSourcesTool, ReadContextTool,
     SearchContextTool,
 };

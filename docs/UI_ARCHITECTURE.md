@@ -372,8 +372,9 @@ produce a different reading of the same trace from another one.
 
 #### Persistence
 
-Session, history and catalog semantics belong to the runtime, so the persisted
-document belongs to the runtime. A platform supplies only a **location**:
+Conversation, history and catalog semantics belong to the runtime, so the
+persisted documents belong to the runtime. A platform supplies only a
+**location**:
 
 ```text
 FileService.dataDirectory(context)   // platform capability, reads no app data
@@ -384,6 +385,20 @@ FileService.dataDirectory(context)   // platform capability, reads no app data
 The runtime decides the format and when to write, writes atomically, and never
 picks a path itself. A bridge without storage is not a broken bridge, so the
 contract method is optional and reports whether a directory was attached.
+
+The layout inside that directory is rooted at the conversation:
+
+```text
+sujiu-library.json                       manifest: ids, endpoint, stored context
+conversations/<conversation-id>/conversation.json
+characters/<character-id>.json
+personas/<persona-id>.json
+worldbooks/<world-book-id>.json
+prompt_profiles/<profile-id>.json
+```
+
+A platform must not create, read or interpret these documents. It opens a data
+directory and it reads summaries over the bridge.
 
 #### Surviving the background
 
@@ -537,12 +552,20 @@ The frontends need a coarse, provider-neutral conversation API. The current
 Required data (provider-neutral, stable IDs, no provider wire format):
 
 ```text
-SessionSummary   id, title, character_id, character_name, preview, updated_at_ms, message_count
-CharacterSummary id, name, description
-ModelSummary     id, name, provider_label, capabilities, available
+ConversationSummary id, title, participants, character_id, character_name,
+                    preview, updated_at_ms, message_count
+ParticipantSummary character_id, name, role
+CharacterSummary   id, name, description
+ModelSummary       id, name, provider_label, capabilities, available
 ContextSourceSummary id, kind, label, record_count, last_used_at_ms
-ConversationSnapshot  messages + per-turn tool/context records
+ConversationSnapshot  participants, persona_id, worldbook_ids, prompt_profile_id,
+                      messages + per-turn tool/context records
 ```
+
+A conversation is the root entity and holds zero, one or many participants.
+`character_id`/`character_name` on the summary are derived from the first
+participant, kept so a screen that still shows a single character keeps
+working; new code should read `participants`.
 
 Required operations:
 
@@ -550,7 +573,9 @@ Required operations:
 list_sessions()                 list_characters(query)
 list_models()                   list_context_sources(session_id)
 conversation_state(session_id)  send_turn(session_id, input) -> TurnEvent stream
-cancel_turn(session_id)         create_session(character_id, model_id, title)
+cancel_turn(session_id)         create_conversation(participants, persona_id,
+                                                   worldbook_ids, prompt_profile_id)
+                               create_session(character_id)  <- shortcut for one participant
 ```
 
 Rules:
@@ -583,6 +608,7 @@ sujiu_list_characters_json(runtime, query)
 sujiu_list_models_json(runtime)
 sujiu_list_context_sources_json(runtime)
 sujiu_conversation_state_json(runtime, session_id)
+sujiu_create_conversation_json(runtime, request_json)
 sujiu_create_session_json(runtime, character_id)
 sujiu_send_turn_json(runtime, request_json)
 sujiu_send_turn_streaming(runtime, request_json, callback, user_data)

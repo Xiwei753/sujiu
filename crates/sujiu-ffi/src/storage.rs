@@ -85,6 +85,16 @@ impl AppStorage for FileStorage {
 
     fn save(&self, key: &str, contents: &str) {
         let target = self.document(key);
+        // A key can name a document inside a directory — a conversation is
+        // stored under its own id, not beside the others — so the parent has to
+        // exist before the write does. Creating it here rather than at load time
+        // is what lets a first save create the whole tree.
+        if let Some(parent) = target.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                return;
+            }
+        }
+
         let temporary = target.with_extension("tmp");
         if std::fs::write(&temporary, contents).is_err() {
             return;

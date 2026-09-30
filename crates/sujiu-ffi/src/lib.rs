@@ -17,26 +17,49 @@ use std::ffi::{c_char, c_void, CStr, CString};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sujiu_core::{Character, EndpointConfig, PromptCompiler, PromptPlan, Transcript};
+use sujiu_core::{
+    Character, Conversation, EndpointConfig, Library, Participant, PromptCompiler, PromptPlan,
+    Transcript,
+};
 
 pub use sujiu_core::CORE_VERSION;
 
+pub mod documents;
 pub mod events;
 pub mod runtime;
 pub mod seed;
 pub mod storage;
 
-use runtime::{CollectingReporter, SendTurnRequest, SujiuRuntime};
+use runtime::{CollectingReporter, CreateConversationRequest, SendTurnRequest, SujiuRuntime};
 
+/// Everything the prompt compiler needs for one turn.
+///
+/// The conversation is the input, not a character: the participants, the
+/// persona, the world books and the prompt profile all reach the plan through
+/// the conversation's own bindings, which is the same path a real turn takes.
+/// A caller that only has a card and a transcript can still preview a prompt by
+/// passing them as a single-participant library and conversation.
 #[derive(Debug, Deserialize)]
 struct CompilePromptInput {
     #[serde(default)]
     app_system_prompt: Option<String>,
-    character: Character,
+    /// The stored entities, so a preview can resolve the conversation's
+    /// references. A preview of a character card that has no library is
+    /// therefore possible, and a preview of a conversation without its
+    /// participants is not — because that would show a prompt the real runtime
+    /// would never send.
+    #[serde(default)]
+    library: Library,
+    #[serde(default)]
+    conversation: Conversation,
+    /// A single card, for previews written before conversations had
+    /// participants. Ignored when the conversation names participants.
+    #[serde(default)]
+    character: Option<Character>,
     /// The stored transcript, not a flattened message list.
     ///
     /// A preview of a tool-using turn is only honest when the tool steps are
-    /// passed in, so this takes the same transcript a session stores.
+    /// passed in, so this takes the same transcript a conversation stores.
     #[serde(default)]
     history: Transcript,
     user_input: String,
@@ -76,12 +99,29 @@ pub fn compile_prompt_json(input: &str) -> String {
         }
     };
 
-    let plan = PromptCompiler::compile(
+    // A caller that passed a bare card is asking about one character, so give
+    // that character a conversation of its own rather than compiling a
+    // conversation with nobody in it. The card stays in the library, so the
+    // conversation's participant resolves exactly as a real one would.
+    let mut library = parsed.library;
+    let mut conversation = parsed.conversation;
+
+    if conversation.participants.is_empty() {
+        if let Some(character) = parsed.character {
+            conversation.participants = vec![Participant::character(&character.id)];
+            library.upsert_character(character);
+        }
+    }
+
+    if !parsed.history.turns.is_empty() || parsed.history.compacted.is_some() {
+        conversation.transcript = parsed.history;
+    }
+
+    let plan = PromptCompiler::compile(&library.prompt_context(
+        &conversation,
         parsed.app_system_prompt.as_deref(),
-        &parsed.character,
-        &parsed.history,
         &parsed.user_input,
-    );
+    ));
 
     serde_json::to_string(&ApiEnvelope::ok(plan)).expect("prompt plan is serializable")
 }
@@ -346,6 +386,46 @@ pub unsafe extern "C" fn sujiu_conversation_state_json(
     }
 }
 
+/// Create a conversation and return its id.
+///
+/// The body names the participants, the persona, the world books and the prompt
+/// profile. Every one of them is optional, and none of them has to exist as an
+/// entity for the call to succeed: a conversation that references a card which
+/// is not there is a conversation with a missing participant, and the prompt
+/// compiler leaves that participant out rather than inventing one.
+///
+/// The response carries the id under both `conversationId` and `sessionId`.
+/// A conversation is the root and a session id is the same string seen from the
+/// older, single-character view of the same thing, so a frontend written before
+/// the split keeps working without being taught a second name for one id.
+#[no_mangle]
+pub unsafe extern "C" fn sujiu_create_conversation_json(
+    runtime: *mut SujiuRuntime,
+    request: *const c_char,
+) -> *mut c_char {
+    let Some(runtime) = (unsafe { runtime.as_ref() }) else {
+        return null_envelope("runtime pointer is null");
+    };
+
+    let Some(request) = (unsafe { read_json::<CreateConversationRequest>(request, "request") })
+    else {
+        return into_c_string(
+            serde_json::to_string(&ApiEnvelope::<()>::error(
+                "request is not a valid conversation JSON",
+            ))
+            .expect("error envelope is serializable"),
+        );
+    };
+
+    let id = runtime.create_conversation(&request);
+
+    into_c_string(ok_json(&serde_json::json!({
+        "conversationId": id,
+        "sessionId": id,
+    })))
+}
+
+/// Create a conversation with one character in it.
 #[no_mangle]
 pub unsafe extern "C" fn sujiu_create_session_json(
     runtime: *mut SujiuRuntime,
@@ -582,8 +662,11 @@ fn into_c_string(value: String) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::documents;
     use crate::events::TurnEventKind;
+    use crate::runtime::ParticipantRequest;
     use sujiu_ai::DiagnosticKind;
+    use sujiu_core::ParticipantRole;
 
     fn runtime() -> SujiuRuntime {
         SujiuRuntime::new(seed::seed()).expect("runtime")
@@ -632,10 +715,54 @@ mod tests {
             .tokio
             .block_on(runtime.context_sources())
             .expect("sources");
-        assert_eq!(sources.len(), 4);
+        // Four seeded sources, plus one projected per world book and one per
+        // persona. The projection is a view of stored entities, so it appears
+        // here without ever having been saved as a source of its own.
+        assert_eq!(sources.len(), 6);
         assert!(sources
             .iter()
             .any(|source| source.kind == sujiu_core::ContextKind::WorldLore));
+        assert!(sources
+            .iter()
+            .any(|source| source.id == "worldbook:world-book-coast"));
+    }
+
+    #[test]
+    fn a_conversation_can_hold_nobody_one_character_or_a_whole_table() {
+        let runtime = runtime();
+
+        let solo = runtime.create_session(Some("character-lin"));
+        let state = runtime.conversation_state(&solo).expect("a conversation");
+        assert_eq!(state.participants.len(), 1);
+        assert_eq!(state.participants[0].character_id, "character-lin");
+        assert_eq!(state.participants[0].role, "character");
+
+        let group = runtime.create_conversation(&CreateConversationRequest {
+            participants: vec![
+                ParticipantRequest {
+                    character_id: "character-shen".to_string(),
+                    role: Some(ParticipantRole::Narrator),
+                    display_name: None,
+                },
+                ParticipantRequest {
+                    character_id: "character-lin".to_string(),
+                    role: None,
+                    display_name: Some("The voice on the radio".to_string()),
+                },
+            ],
+            ..CreateConversationRequest::default()
+        });
+        let state = runtime.conversation_state(&group).expect("a conversation");
+        assert_eq!(state.participants.len(), 2);
+        assert_eq!(state.participants[0].role, "narrator");
+        assert_eq!(state.participants[1].name, "The voice on the radio");
+
+        // Zero participants is a real thing: a chat the user has not set up
+        // yet. It is not the same as a missing conversation.
+        let empty = runtime.create_session(None);
+        let state = runtime.conversation_state(&empty).expect("a conversation");
+        assert!(state.participants.is_empty());
+        assert!(state.character.is_none());
     }
 
     #[test]
@@ -1050,7 +1177,15 @@ mod tests {
 
         assert_eq!(runtime.sessions().len(), 3);
         assert_eq!(runtime.characters("").len(), 3);
-        assert!(dir.join("sujiu-runtime.json").exists());
+        assert!(
+            dir.join(documents::LIBRARY_FILE).exists(),
+            "a new store is a manifest, not one blob"
+        );
+        assert!(
+            dir.join("conversations/session-1/conversation.json")
+                .exists(),
+            "a conversation owns its own directory"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1251,11 +1386,9 @@ mod tests {
     fn the_user_can_deliberately_replace_a_document_the_runtime_cannot_read() {
         let dir = scratch_dir("discard-protected");
         let file = dir.join("sujiu-runtime.json");
-        std::fs::write(
-            &file,
-            r#"{ "version": 2, "sessions": [ { "transcript": { "continuation": "retire" } } ] }"#,
-        )
-        .expect("write the stored document");
+        let before =
+            r#"{ "version": 2, "sessions": [ { "transcript": { "continuation": "retire" } } ] }"#;
+        std::fs::write(&file, before).expect("write the stored document");
 
         let runtime = SujiuRuntime::new(crate::seed::seed()).expect("runtime");
         runtime
@@ -1271,11 +1404,19 @@ mod tests {
             runtime.storage_protection().is_none(),
             "an explicit discard has to leave the protected state"
         );
-        let written = std::fs::read_to_string(&file).expect("read back");
+        // The store the runtime manages is the seed again. The document it
+        // could not read is left on disk, because the runtime does not delete
+        // files it did not write and cannot tell what is in that one.
+        let written = std::fs::read_to_string(dir.join("sujiu-library.json")).expect("read back");
         assert!(
             !written.contains("retire"),
-            "the document that could not be read is gone, as the user asked"
+            "nothing the runtime could not read is carried into the new store"
         );
+        assert!(
+            !file.exists() || std::fs::read_to_string(&file).expect("read back") == before,
+            "the document the runtime could not read is never rewritten"
+        );
+        assert_eq!(runtime.sessions().len(), 3, "the seed is back in charge");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

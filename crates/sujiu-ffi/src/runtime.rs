@@ -1,31 +1,39 @@
 //! Stateful conversation runtime behind the C ABI.
 //!
-//! The runtime owns the provider-neutral data a frontend needs: sessions,
-//! characters, models, context sources and conversation state, plus the turn
-//! loop built on the shared agent runtime. Platform code receives only
-//! normalized turn events from `events`, never provider wire formats or tool
-//! internals.
+//! The runtime owns the provider-neutral data a frontend needs: conversations,
+//! characters, personas, world books, prompt profiles, models, context sources
+//! and conversation state, plus the turn loop built on the shared agent
+//! runtime. Platform code receives only normalized turn events from `events`,
+//! never provider wire formats or tool internals.
+//!
+//! The conversation is the root. A character is a participant, not the owner of
+//! a chat: `create_conversation` takes any number of them, a persona, world
+//! books and a prompt profile, and the prompt for the turn is assembled from
+//! what the conversation binds. Nothing here asks the model to fetch its own
+//! character card or persona — that content is injected every turn, and tools
+//! are for what is genuinely too large or too unpredictable to inject.
 
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sujiu_ai::{
-    register_standard_context_tools, AgentConfig, AgentOutcome, AgentRuntime, AgentStop,
-    CancelToken, ContextStore, ContextStoreError, InMemoryContextStore, OpenAiCompatConfig,
-    OpenAiCompatProvider, OpenAiResponsesProvider, ProviderContinuation, ResponsesConfig,
-    ToolRegistry,
+    project_library, register_standard_context_tools, AgentConfig, AgentOutcome, AgentRuntime,
+    AgentStop, CancelToken, ContextStore, ContextStoreError, InMemoryContextStore,
+    OpenAiCompatConfig, OpenAiCompatProvider, OpenAiResponsesProvider, ProviderContinuation,
+    ResponsesConfig, ToolRegistry,
 };
 use sujiu_core::{
-    apply_reasoning_override, Character, ChatMessage, ChatRole, CompactionInput, ContextKind,
-    ContextRecord, ContextSource, EndpointCapabilities, EndpointConfig, ModelListing,
-    PromptCompiler, Protocol, ProviderIdentity, Session, Transcript, Turn,
+    apply_reasoning_override, Character, ChatRole, CompactionInput, ContextKind, ContextRecord,
+    ContextSource, Conversation, EndpointCapabilities, EndpointConfig, Library, ModelListing,
+    Participant, ParticipantRole, PromptCompiler, Protocol, ProviderIdentity, Transcript,
     DEFAULT_APP_SYSTEM_PROMPT,
 };
 
 use sujiu_ai::diagnostics::{fields, DiagnosticEntry, DiagnosticKind, DiagnosticLog, LOG_KEY};
 use sujiu_ai::CachedListing;
 
+use crate::documents::{self, LibraryIndex};
 use crate::events::{TurnEventKind, TurnEventReporter, TurnEventSink};
 use crate::storage::{AppStorage, FileStorage, MemoryStorage};
 
@@ -46,12 +54,33 @@ const MAX_TRANSCRIPT_MESSAGES: usize = 200;
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 const DEFAULT_TEMPERATURE: f32 = 0.8;
 
+/// One character taking part in a conversation, as a screen reads it.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionSummary {
+pub struct ParticipantSummary {
+    pub character_id: String,
+    /// The character's own name, or the title the conversation gave them.
+    pub name: String,
+    /// `character` or `narrator`.
+    pub role: String,
+}
+
+/// A row in the conversation list.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSummary {
     pub id: String,
+    /// Everyone in the conversation, in participant order. Empty is valid.
+    pub participants: Vec<ParticipantSummary>,
+    /// The first participant, for a frontend that only knows about one.
+    ///
+    /// Derived, and labelled as such: it is a convenience for a list row, not
+    /// the relationship the conversation has. A conversation with three
+    /// participants has no primary one, and a UI that wants to know that has to
+    /// read `participants`.
     pub character_id: Option<String>,
-    /// Resolved character name, so a list does not need a second lookup.
+    /// Resolved name of the first participant, so a list does not need a second
+    /// lookup.
     pub character_name: String,
     /// First line of the last message, so a list can render without loading
     /// the whole conversation.
@@ -59,6 +88,51 @@ pub struct SessionSummary {
     pub title: String,
     pub updated_at_ms: i64,
     pub message_count: usize,
+}
+
+/// Kept for callers written before the conversation was the root entity.
+pub type SessionSummary = ConversationSummary;
+
+/// One character to speak with, when a conversation is created.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ParticipantRequest {
+    pub character_id: String,
+    /// `character` or `narrator`; a table's game master is a narrator.
+    #[serde(default)]
+    pub role: Option<ParticipantRole>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+impl From<ParticipantRequest> for Participant {
+    fn from(request: ParticipantRequest) -> Self {
+        Participant {
+            character_id: request.character_id,
+            role: request.role.unwrap_or_default(),
+            display_name: request.display_name,
+        }
+    }
+}
+
+/// What a new conversation binds.
+///
+/// Every field is a reference, never an embedded document: a world book or a
+/// persona is stored once and can be shared by any number of conversations,
+/// which is the whole reason those entities were split out of a character.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateConversationRequest {
+    /// Zero, one or many. A conversation with none is valid and can be given
+    /// participants later.
+    #[serde(default)]
+    pub participants: Vec<ParticipantRequest>,
+    #[serde(default)]
+    pub persona_id: Option<String>,
+    #[serde(default)]
+    pub worldbook_ids: Vec<String>,
+    #[serde(default)]
+    pub prompt_profile_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -311,8 +385,17 @@ pub struct MessageSummary {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConversationSnapshot {
+    /// The conversation's id. Named `sessionId` on the wire for frontends
+    /// written before the conversation was the root entity; it is the same
+    /// value, and a conversation is not two things with two ids.
     pub session_id: String,
+    /// Everyone in it, in participant order.
+    pub participants: Vec<ParticipantSummary>,
+    /// The first participant's card, for a frontend that only knows about one.
     pub character: Option<CharacterSummary>,
+    pub persona_id: Option<String>,
+    pub worldbook_ids: Vec<String>,
+    pub prompt_profile_id: Option<String>,
     pub messages: Vec<MessageSummary>,
 }
 
@@ -357,13 +440,10 @@ impl std::fmt::Display for TurnError {
     }
 }
 
-struct Catalog {
-    characters: Vec<Character>,
-    sessions: Vec<Session>,
-}
-
 struct Inner {
-    catalog: Catalog,
+    /// Every domain entity the app stores, as entities. The source of truth:
+    /// the context store below is a projection of part of it.
+    library: Library,
     store: Arc<InMemoryContextStore>,
     tools: Arc<ToolRegistry>,
     endpoint: Option<EndpointConfig>,
@@ -399,239 +479,46 @@ impl StorageState {
 /// Seed data for a fresh runtime.
 ///
 /// Used when no document has been persisted yet, so a first launch has a small
-/// deterministic catalog of real domain values instead of inventing data per
+/// deterministic library of real domain values instead of inventing data per
 /// call. Once a document exists the seed is ignored.
 #[derive(Default)]
 pub struct Seed {
-    pub characters: Vec<Character>,
-    pub sessions: Vec<Session>,
+    pub library: Library,
     pub sources: Vec<ContextSource>,
     pub records: Vec<ContextRecord>,
 }
 
-/// Everything a launch needs, as one document.
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Snapshot {
-    /// Bumped when the document shape changes incompatibly.
-    version: u32,
-    characters: Vec<Character>,
-    sessions: Vec<Session>,
-    sources: Vec<ContextSource>,
-    records: Vec<ContextRecord>,
-    endpoint: Option<EndpointConfig>,
-}
-
-/// A session as version 1 stored it: a flat list of text messages.
+/// Read a store, in whichever shape it is in.
 ///
-/// Reading one of these is a migration, not a normal load. The old shape had
-/// no place to record a tool call, so a migration can restore the turn/step
-/// structure but never the steps that were already lost.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacySession {
-    id: String,
-    #[serde(default)]
-    character_id: Option<String>,
-    #[serde(default)]
-    messages: Vec<ChatMessage>,
-    #[serde(default)]
-    metadata: serde_json::Map<String, Value>,
-}
-
-impl LegacySession {
-    fn into_session(self) -> Session {
-        let mut transcript = Transcript::default();
-
-        for message in self.messages {
-            let at_ms = message.metadata.get("atMs").and_then(Value::as_i64);
-
-            match message.role {
-                // A user message opens a turn. Reusing the message id as the
-                // turn id keeps the ids a platform already stored recognizable.
-                ChatRole::User => transcript.push(Turn {
-                    id: message.id,
-                    user: message.content,
-                    steps: Vec::new(),
-                    state: sujiu_core::TurnState::Completed,
-                    created_at_ms: at_ms,
-                }),
-                ChatRole::Assistant => {
-                    let step = sujiu_core::AssistantStep::text_only(message.content);
-                    match transcript.turns.last_mut() {
-                        Some(turn) => {
-                            turn.steps.push(step);
-                            turn.created_at_ms = turn.created_at_ms.or(at_ms);
-                        }
-                        // An assistant message with no turn before it is kept,
-                        // so a migration never silently drops history.
-                        None => {
-                            let mut turn = Turn::new(message.id, String::new());
-                            turn.created_at_ms = at_ms;
-                            turn.steps.push(step);
-                            transcript.push(turn);
-                        }
-                    }
-                }
-                ChatRole::System | ChatRole::Developer => {}
-            }
-        }
-
-        Session {
-            id: self.id,
-            character_id: self.character_id,
-            transcript,
-            metadata: self.metadata,
-        }
-    }
-}
-
-/// The endpoint as version 2 of the document wrote it.
-///
-/// It had a vendor `kind` and a `model`. Both are read here and dropped on the
-/// way in: the kind never decided anything worth keeping, and the model becomes
-/// the selected one. Reading it through `EndpointConfig` instead would fail,
-/// because a v2 file is exactly the kind of document this build has to keep
-/// opening without losing the user's sessions.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacyEndpointConfig {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    base_url: String,
-    #[serde(default)]
-    model: String,
-    #[serde(default)]
-    credential_ref: Option<String>,
-    #[serde(default)]
-    extra: serde_json::Map<String, Value>,
-}
-
-impl LegacyEndpointConfig {
-    fn into_endpoint(self) -> EndpointConfig {
-        EndpointConfig {
-            id: self.id,
-            name: self.name,
-            base_url: self.base_url,
-            selected_model: (!self.model.trim().is_empty()).then_some(self.model),
-            credential_ref: self.credential_ref,
-            overrides: self.extra,
-        }
-    }
-}
-
-/// Version 1 of the document, read only to migrate it.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct LegacySnapshot {
-    #[serde(default)]
-    characters: Vec<Character>,
-    #[serde(default)]
-    sessions: Vec<LegacySession>,
-    #[serde(default)]
-    sources: Vec<ContextSource>,
-    #[serde(default)]
-    records: Vec<ContextRecord>,
-    #[serde(default)]
-    provider_config: Option<LegacyEndpointConfig>,
-}
-
-/// Version 2 of the document.
-///
-/// Only the endpoint moved: a version 2 session was already a real transcript,
-/// with the tool calls and results the older flat shape had nowhere to put. So
-/// its sessions are read as they are. Running them through the version 1
-/// migration instead would silently drop every turn, and the unreadable
-/// continuation event inside one of those turns would be dropped with it,
-/// which is how a store can lose a conversation without ever saying so.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Version2Snapshot {
-    #[serde(default)]
-    characters: Vec<Character>,
-    #[serde(default)]
-    sessions: Vec<Session>,
-    #[serde(default)]
-    sources: Vec<ContextSource>,
-    #[serde(default)]
-    records: Vec<ContextRecord>,
-    #[serde(default)]
-    provider_config: Option<LegacyEndpointConfig>,
-}
-
-impl Version2Snapshot {
-    fn into_snapshot(self) -> Snapshot {
-        Snapshot {
-            version: SNAPSHOT_VERSION,
-            characters: self.characters,
-            sessions: self.sessions,
-            sources: self.sources,
-            records: self.records,
-            endpoint: self
-                .provider_config
-                .map(LegacyEndpointConfig::into_endpoint),
-        }
-    }
-}
-
-/// Read a persisted document, migrating an older shape when necessary.
-fn parse_snapshot(document: &str) -> Option<Snapshot> {
-    let value: Value = serde_json::from_str(document).ok()?;
-    let version = value.get("version").and_then(Value::as_u64).unwrap_or(1);
-
-    // A version 2 document wrote its endpoint under `providerConfig`, and a
-    // version 3 one writes `endpoint`. Reading a v2 file as v3 would find no
-    // endpoint at all and quietly look like a fresh install.
-    if version < 3 {
-        if version < 2 {
-            let legacy: LegacySnapshot = serde_json::from_value(value).ok()?;
-            return Some(Snapshot {
-                version: SNAPSHOT_VERSION,
-                characters: legacy.characters,
-                sessions: legacy
-                    .sessions
-                    .into_iter()
-                    .map(LegacySession::into_session)
-                    .collect(),
-                sources: legacy.sources,
-                records: legacy.records,
-                endpoint: legacy
-                    .provider_config
-                    .map(LegacyEndpointConfig::into_endpoint),
-            });
-        }
-
-        let version2: Version2Snapshot = serde_json::from_value(value).ok()?;
-        return Some(version2.into_snapshot());
+/// `None` means there is nothing stored yet, which is a first launch. `Some(Err)`
+/// means there is a document and this build could not read it, which is the one
+/// case where writing would destroy data instead of saving it.
+fn read_store(storage: &dyn AppStorage) -> Option<Result<documents::LoadedLibrary, String>> {
+    if storage.load(documents::LIBRARY_FILE).is_some() {
+        return Some(
+            documents::load(storage)
+                .ok_or_else(|| "the library manifest did not match its documents".to_string()),
+        );
     }
 
-    serde_json::from_value(value).ok()
+    // A store written before the split. It is read once, migrated, and written
+    // back as a library; the old document is left where it is, because deleting
+    // a user's only copy of a conversation is not this runtime's decision to
+    // make, and because a second copy of it is harmless next to a manifest.
+    storage
+        .load(documents::LEGACY_SNAPSHOT_FILE)
+        .map(|document| {
+            documents::migrate_legacy_document(&document)
+                .ok_or_else(|| format!("{document} was a document this version cannot migrate"))
+        })
 }
 
-/// A new session id that cannot collide with one already in the catalog.
-fn next_session_id(sessions: &[Session]) -> String {
-    let mut number = sessions.len() + 1;
-    loop {
-        let id = format!("session-{number}");
-        if !sessions.iter().any(|session| session.id == id) {
-            return id;
-        }
-        number += 1;
-    }
-}
-
-/// Document name the runtime keeps its state in.
 /// What the endpoint cache is filed under.
 ///
-/// Separate from the conversation document, and for the same reason the log
-/// is: a cache this build cannot read is a cache that starts empty, and that
-/// must never be a reason to protect or rewrite a conversation.
+/// Separate from the library, and for the same reason the log is: a cache
+/// this build cannot read is a cache that starts empty, and that must never be
+/// a reason to protect or rewrite a conversation.
 const CAPABILITIES_KEY: &str = "sujiu-capabilities.json";
-const SNAPSHOT_FILE: &str = "sujiu-runtime.json";
-const SNAPSHOT_VERSION: u32 = 3;
 
 /// The stateful runtime exported across the FFI boundary.
 pub struct SujiuRuntime {
@@ -672,29 +559,32 @@ impl SujiuRuntime {
     }
 
     fn assemble(seed: Seed, storage: Arc<dyn AppStorage>, restore: bool) -> std::io::Result<Self> {
-        let document = restore.then(|| storage.load(SNAPSHOT_FILE)).flatten();
-        let snapshot = document.as_deref().and_then(parse_snapshot);
+        let stored = restore.then(|| read_store(&*storage)).flatten();
 
         // A document that is there but unreadable is not a fresh install. The
         // seed is what a first launch looks like, and writing it over a file we
         // failed to understand would trade a recoverable file for an empty one.
-        let storage_state = match document.as_deref() {
-            Some(unreadable) if snapshot.is_none() => StorageState::Protected {
-                reason: format!(
-                    "the stored document could not be read by this version ({unreadable})"
-                ),
-            },
-            _ => StorageState::Writable,
+        let (storage_state, loaded) = match stored {
+            Some(Ok(loaded)) => (StorageState::Writable, Some(loaded)),
+            Some(Err(reason)) => (
+                StorageState::Protected {
+                    reason: format!(
+                        "the stored document could not be read by this version ({reason})"
+                    ),
+                },
+                None,
+            ),
+            None => (StorageState::Writable, None),
         };
 
-        let sources = snapshot
+        let library = loaded
             .as_ref()
-            .map(|snapshot| snapshot.sources.clone())
-            .unwrap_or(seed.sources);
-        let records = snapshot
+            .map(|loaded| loaded.library.clone())
+            .unwrap_or(seed.library);
+        let (sources, records) = loaded
             .as_ref()
-            .map(|snapshot| snapshot.records.clone())
-            .unwrap_or(seed.records);
+            .map(|loaded| (loaded.index.sources.clone(), loaded.index.records.clone()))
+            .unwrap_or((seed.sources, seed.records));
 
         let store = Arc::new(InMemoryContextStore::new());
         for source in &sources {
@@ -703,6 +593,11 @@ impl SujiuRuntime {
         for record in &records {
             store.add_record(record.clone());
         }
+        // The library is projected into the same search protocol the stored
+        // records use, so a persona or a world book is reachable through one
+        // interface. It is a view: the documents above are where those entities
+        // actually live, which is why a save writes the documents and not this.
+        project_library(&store, &library);
 
         let mut tools = ToolRegistry::new();
         register_standard_context_tools(&mut tools, store.clone() as Arc<dyn ContextStore>);
@@ -712,24 +607,13 @@ impl SujiuRuntime {
             .enable_all()
             .build()?;
 
-        let catalog = match &snapshot {
-            Some(snapshot) => Catalog {
-                characters: snapshot.characters.clone(),
-                sessions: snapshot.sessions.clone(),
-            },
-            None => Catalog {
-                characters: seed.characters,
-                sessions: seed.sessions,
-            },
-        };
-
-        let endpoint = snapshot
+        let endpoint = loaded
             .as_ref()
-            .and_then(|snapshot| snapshot.endpoint.clone());
+            .and_then(|loaded| loaded.index.endpoint.clone());
 
         let runtime = Self {
             inner: Mutex::new(Inner {
-                catalog,
+                library,
                 store,
                 tools: Arc::new(tools),
                 endpoint,
@@ -809,36 +693,37 @@ impl SujiuRuntime {
     /// is a store whose contents are still worth keeping.
     pub fn use_directory(&self, path: &str) -> Result<(), String> {
         let storage = FileStorage::new(path).map_err(|error| error.to_string())?;
-        if let Some(document) = storage.load(SNAPSHOT_FILE) {
-            match parse_snapshot(&document) {
-                Some(snapshot) => {
-                    let mut inner = self.inner.lock().unwrap();
-                    inner.catalog = Catalog {
-                        characters: snapshot.characters,
-                        sessions: snapshot.sessions,
-                    };
-                    inner.endpoint = snapshot.endpoint;
-                    inner.store.clear();
-                    for source in snapshot.sources {
-                        inner.store.add_source(source);
-                    }
-                    for record in snapshot.records {
-                        inner.store.add_record(record);
-                    }
+        match read_store(&storage) {
+            Some(Ok(loaded)) => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.library = loaded.library;
+                inner.endpoint = loaded.index.endpoint.clone();
+                inner.store.clear();
+                for source in &loaded.index.sources {
+                    inner.store.add_source(source.clone());
                 }
-                // Keep what is there, now and later. A directory that has
-                // content this build cannot read is not an empty directory,
-                // and every later write would replace the only copy of it.
-                None => {
-                    self.inner.lock().unwrap().storage_state = StorageState::Protected {
-                        reason: format!(
-                            "the stored document in {path} could not be read by this version ({document})"
-                        ),
-                    };
+                for record in &loaded.index.records {
+                    inner.store.add_record(record.clone());
                 }
+                // Projected again, because the domain documents just read are
+                // what the view is built from — a restored store must not be the
+                // reason a persona stops being searchable.
+                project_library(&inner.store, &inner.library);
+                inner.storage_state = StorageState::Writable;
             }
-        } else {
-            self.inner.lock().unwrap().storage_state = StorageState::Writable;
+            // Keep what is there, now and later. A directory that has content
+            // this build cannot read is not an empty directory, and every later
+            // write would replace the only copy of it.
+            Some(Err(reason)) => {
+                self.inner.lock().unwrap().storage_state = StorageState::Protected {
+                    reason: format!(
+                        "the stored document in {path} could not be read by this version ({reason})"
+                    ),
+                };
+            }
+            None => {
+                self.inner.lock().unwrap().storage_state = StorageState::Writable;
+            }
         }
         // Everything the new storage holds has to be read back, not just the
         // conversation. The cache and the log were restored in `assemble`, from
@@ -909,10 +794,7 @@ impl SujiuRuntime {
             return Ok(());
         }
 
-        inner.catalog = Catalog {
-            characters: seed.characters,
-            sessions: seed.sessions,
-        };
+        inner.library = seed.library;
         inner.storage_state = StorageState::Writable;
         drop(inner);
 
@@ -926,27 +808,37 @@ impl SujiuRuntime {
         self.storage.lock().unwrap().location()
     }
 
+    /// Write the library out: one document per entity, then the manifest.
+    ///
+    /// The context store goes in the manifest, with the projected sources
+    /// filtered back out. A world book and a persona are stored as their own
+    /// documents and rebuilt into the search view on every launch, so writing
+    /// the view here too would store the same lore twice and leave two
+    /// documents that could disagree.
     fn persist(&self) {
         if self.storage_protection().is_some() {
             return;
         }
 
-        let snapshot = {
+        let (library, index) = {
             let inner = self.inner.lock().unwrap();
-            let (sources, records) = inner.store.snapshot();
-            Snapshot {
-                version: SNAPSHOT_VERSION,
-                characters: inner.catalog.characters.clone(),
-                sessions: inner.catalog.sessions.clone(),
-                sources,
-                records,
-                endpoint: inner.endpoint.clone(),
-            }
+            let (mut sources, mut records) = inner.store.snapshot();
+            sources.retain(|source| !documents::is_projected(&source.id));
+            records.retain(|record| !documents::is_projected(&record.source_id));
+
+            (
+                inner.library.clone(),
+                LibraryIndex {
+                    endpoint: inner.endpoint.clone(),
+                    sources,
+                    records,
+                    ..LibraryIndex::default()
+                },
+            )
         };
 
-        if let Ok(document) = serde_json::to_string(&snapshot) {
-            self.storage.lock().unwrap().save(SNAPSHOT_FILE, &document);
-        }
+        let storage = self.storage.lock().unwrap();
+        let _ = documents::save(&**storage, &library, &index);
     }
 
     pub fn endpoint(&self) -> Option<EndpointConfig> {
@@ -1082,54 +974,55 @@ impl SujiuRuntime {
         self.persist_capabilities();
     }
 
+    /// Every conversation, as list rows.
     pub fn sessions(&self) -> Vec<SessionSummary> {
-        let inner = self.inner.lock().unwrap();
+        self.conversations()
+    }
 
-        inner
-            .catalog
-            .sessions
+    pub fn conversations(&self) -> Vec<ConversationSummary> {
+        let inner = self.inner.lock().unwrap();
+        let library = &inner.library;
+
+        library
+            .conversations
             .iter()
-            .map(|session| {
-                let character = session.character_id.as_ref().and_then(|id| {
-                    inner
-                        .catalog
-                        .characters
-                        .iter()
-                        .find(|character| &character.id == id)
-                });
+            .map(|conversation| {
+                let participants = participant_summaries(library, conversation);
+                let character_name = participants
+                    .first()
+                    .map(|participant| participant.name.clone())
+                    .unwrap_or_default();
 
                 // The folded conversation, because this is a list. The
                 // transcript behind it keeps every step.
-                let messages = session.ui_messages();
+                let messages = conversation.ui_messages();
 
-                SessionSummary {
+                ConversationSummary {
                     // A projection of the last message, not a display string. The
-                    // bound exists so a session list does not carry whole
-                    // messages across the boundary; how a platform renders or
-                    // further clips it is that platform's business.
+                    // bound exists so a list does not carry whole messages
+                    // across the boundary; how a platform renders or further
+                    // clips it is that platform's business.
                     preview: messages
                         .iter()
                         .rev()
                         .find(|message| !message.text.trim().is_empty())
                         .map(|message| projected_preview(&message.text))
                         .unwrap_or_default(),
-                    character_name: character
-                        .map(|character| character.name.clone())
-                        .unwrap_or_default(),
-                    id: session.id.clone(),
-                    character_id: session.character_id.clone(),
-                    title: session
+                    character_name,
+                    id: conversation.id.clone(),
+                    character_id: participants.first().map(|item| item.character_id.clone()),
+                    participants,
+                    title: conversation
                         .metadata
                         .get("title")
                         .and_then(Value::as_str)
                         .map(str::to_owned)
-                        // An untitled session stays empty: what to call it is
+                        // An untitled conversation stays empty: what to call it is
                         // presentation copy, and the UI localizes the fallback.
-                        .unwrap_or_else(|| match character {
-                            Some(character) => character.name.clone(),
-                            None => String::new(),
-                        }),
-                    updated_at_ms: session
+                        // With nobody in it there is no name to fall back to
+                        // either, which is why this is not invented here.
+                        .unwrap_or_default(),
+                    updated_at_ms: conversation
                         .metadata
                         .get("updatedAtMs")
                         .and_then(Value::as_i64)
@@ -1145,7 +1038,7 @@ impl SujiuRuntime {
         let inner = self.inner.lock().unwrap();
 
         inner
-            .catalog
+            .library
             .characters
             .iter()
             .filter(|character| {
@@ -1162,14 +1055,7 @@ impl SujiuRuntime {
     }
 
     pub fn character(&self, id: &str) -> Option<Character> {
-        self.inner
-            .lock()
-            .unwrap()
-            .catalog
-            .characters
-            .iter()
-            .find(|character| character.id == id)
-            .cloned()
+        self.inner.lock().unwrap().library.character(id).cloned()
     }
 
     pub fn models(&self) -> Vec<ModelSummary> {
@@ -1436,22 +1322,15 @@ impl SujiuRuntime {
 
     pub fn conversation_state(&self, session_id: &str) -> Option<ConversationSnapshot> {
         let inner = self.inner.lock().unwrap();
-        let session = inner
-            .catalog
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)?;
+        let library = &inner.library;
+        let conversation = library.conversation(session_id)?;
 
-        let character = session
-            .character_id
-            .as_ref()
-            .and_then(|id| {
-                inner
-                    .catalog
-                    .characters
-                    .iter()
-                    .find(|character| &character.id == id)
-            })
+        let participants = participant_summaries(library, conversation);
+        // The first participant's card, for a frontend that only knows about
+        // one. Reported next to the full list rather than instead of it.
+        let character = participants
+            .first()
+            .and_then(|participant| library.character(&participant.character_id))
             .map(|character| CharacterSummary {
                 id: character.id.clone(),
                 name: character.name.clone(),
@@ -1461,7 +1340,7 @@ impl SujiuRuntime {
         // The UI projection: one user message and one assistant message per
         // turn, with the turn's tool calls folded into the assistant message.
         // This is a view of the transcript, not a replacement for it.
-        let messages = session
+        let messages = conversation
             .ui_messages()
             .into_iter()
             .rev()
@@ -1489,25 +1368,40 @@ impl SujiuRuntime {
             .collect();
 
         Some(ConversationSnapshot {
-            session_id: session.id.clone(),
+            session_id: conversation.id.clone(),
+            participants,
             character,
+            persona_id: conversation.persona_id.clone(),
+            worldbook_ids: conversation.worldbook_ids.clone(),
+            prompt_profile_id: conversation.prompt_profile_id.clone(),
             messages,
         })
     }
 
-    /// Create a session and return its id.
-    pub fn create_session(&self, character_id: Option<&str>) -> String {
+    /// Create a conversation and return its id.
+    ///
+    /// The participants, persona, world books and prompt profile are all
+    /// references, and none of them is required: a conversation with nobody in
+    /// it yet is a real thing a user can create and then set up.
+    pub fn create_conversation(&self, request: &CreateConversationRequest) -> String {
         let id = {
             let mut inner = self.inner.lock().unwrap();
-            let id = next_session_id(&inner.catalog.sessions);
+            let id = inner.library.next_conversation_id();
 
-            inner.catalog.sessions.insert(
+            inner.library.conversations.insert(
                 0,
-                Session {
+                Conversation {
                     id: id.clone(),
-                    character_id: character_id.map(str::to_owned),
-                    transcript: Transcript::default(),
-                    metadata: serde_json::Map::new(),
+                    participants: request
+                        .participants
+                        .iter()
+                        .cloned()
+                        .map(Participant::from)
+                        .collect(),
+                    persona_id: request.persona_id.clone(),
+                    worldbook_ids: request.worldbook_ids.clone(),
+                    prompt_profile_id: request.prompt_profile_id.clone(),
+                    ..Conversation::default()
                 },
             );
 
@@ -1516,6 +1410,28 @@ impl SujiuRuntime {
 
         self.persist();
         id
+    }
+
+    /// Create a conversation with one character in it.
+    ///
+    /// The shape a single-character chat always had, kept because it is the
+    /// common case and because a frontend written before this split calls it.
+    /// It is a wrapper over [`SujiuRuntime::create_conversation`], not a
+    /// different kind of conversation.
+    pub fn create_session(&self, character_id: Option<&str>) -> String {
+        let participants = character_id
+            .filter(|id| !id.trim().is_empty())
+            .map(|id| ParticipantRequest {
+                character_id: id.to_owned(),
+                ..ParticipantRequest::default()
+            })
+            .into_iter()
+            .collect();
+
+        self.create_conversation(&CreateConversationRequest {
+            participants,
+            ..CreateConversationRequest::default()
+        })
     }
 
     /// Replace the oldest turns of a session with a summary, keeping the last
@@ -1539,14 +1455,12 @@ impl SujiuRuntime {
     ) -> Result<bool, TurnError> {
         let compacted = {
             let mut inner = self.inner.lock().unwrap();
-            let session = inner
-                .catalog
-                .sessions
-                .iter_mut()
-                .find(|session| session.id == session_id)
-                .ok_or_else(|| TurnError::SessionNotFound("unknown session".to_string()))?;
+            let conversation = inner
+                .library
+                .conversation_mut(session_id)
+                .ok_or_else(|| TurnError::SessionNotFound("unknown conversation".to_string()))?;
 
-            session
+            conversation
                 .transcript
                 .compact(keep_recent, |_, _| summary.to_owned())
         };
@@ -1571,14 +1485,12 @@ impl SujiuRuntime {
         keep_recent: usize,
     ) -> Result<Option<CompactionInput>, TurnError> {
         let inner = self.inner.lock().unwrap();
-        let session = inner
-            .catalog
-            .sessions
-            .iter()
-            .find(|session| session.id == session_id)
-            .ok_or_else(|| TurnError::SessionNotFound("unknown session".to_string()))?;
+        let conversation = inner
+            .library
+            .conversation(session_id)
+            .ok_or_else(|| TurnError::SessionNotFound("unknown conversation".to_string()))?;
 
-        Ok(session.transcript.compaction_input(keep_recent))
+        Ok(conversation.transcript.compaction_input(keep_recent))
     }
 
     /// Run one agent turn, reporting normalized events to `reporter`.
@@ -1688,11 +1600,9 @@ impl SujiuRuntime {
     fn prepare(&self, request: &SendTurnRequest) -> Result<PreparedTurn, TurnError> {
         let inner = self.inner.lock().unwrap();
 
-        let session = inner
-            .catalog
-            .sessions
-            .iter()
-            .find(|session| session.id == request.session_id)
+        let conversation = inner
+            .library
+            .conversation(&request.session_id)
             .cloned()
             .ok_or_else(|| TurnError::SessionNotFound(request.session_id.clone()))?;
 
@@ -1725,25 +1635,16 @@ impl SujiuRuntime {
             .filter(|key| !key.trim().is_empty())
             .ok_or(TurnError::MissingCredential)?;
 
-        let character = session
-            .character_id
-            .as_ref()
-            .and_then(|id| {
-                inner
-                    .catalog
-                    .characters
-                    .iter()
-                    .find(|character| &character.id == id)
-                    .cloned()
-            })
-            .unwrap_or_default();
-
-        let plan = PromptCompiler::compile(
+        // Everything the turn needs to speak as itself is assembled here, from
+        // the conversation and whatever it is bound to. The model never has to
+        // ask for a character card, a persona or a prompt rule: the compiler
+        // decides what is always present, and tools stay reserved for the
+        // material that is too large or too unpredictable to send every turn.
+        let plan = PromptCompiler::compile(&inner.library.prompt_context(
+            &conversation,
             Some(DEFAULT_APP_SYSTEM_PROMPT),
-            &character,
-            &session.transcript,
             &request.user_text,
-        );
+        ));
 
         // Only replay provider state that belongs to this exact endpoint and
         // model. After a switch this is `None`, and the adapter rebuilds the
@@ -1757,7 +1658,7 @@ impl SujiuRuntime {
             base_url: config.base_url.clone(),
             model: config.selected_model.clone().unwrap_or_default(),
         };
-        let continuation = session.transcript.continuation_for(&identity).cloned();
+        let continuation = conversation.transcript.continuation_for(&identity).cloned();
 
         Ok(PreparedTurn {
             messages: plan.model_messages(),
@@ -1951,20 +1852,15 @@ impl SujiuRuntime {
     fn persist_turn(&self, request: &SendTurnRequest, outcome: &AgentOutcome) {
         let now_ms = now_ms();
         let mut inner = self.inner.lock().unwrap();
-        let Some(session) = inner
-            .catalog
-            .sessions
-            .iter_mut()
-            .find(|session| session.id == request.session_id)
-        else {
+        let Some(conversation) = inner.library.conversation_mut(&request.session_id) else {
             return;
         };
 
         let mut turn = outcome.turn.clone();
-        turn.id = next_turn_id(&session.transcript);
+        turn.id = next_turn_id(&conversation.transcript);
         turn.created_at_ms = Some(now_ms);
-        session.transcript.push(turn);
-        session
+        conversation.transcript.push(turn);
+        conversation
             .metadata
             .insert("updatedAtMs".to_string(), Value::from(now_ms));
 
@@ -2173,6 +2069,40 @@ impl TurnProvider {
     fn as_ref(&self) -> &dyn sujiu_ai::AiProvider {
         self.provider.as_ref()
     }
+}
+
+/// How a conversation's participants read on screen.
+///
+/// A participant is a reference, so a name is looked up rather than stored: a
+/// card renamed after the conversation was created must show its new name here,
+/// and a per-conversation alias wins over the card so one card can be "the shop
+///keeper" in one chat and something else in another. A participant whose card
+/// is gone is still listed, because dropping it would silently change who the
+/// conversation is with.
+fn participant_summaries(
+    library: &Library,
+    conversation: &Conversation,
+) -> Vec<ParticipantSummary> {
+    conversation
+        .participants
+        .iter()
+        .map(|participant| ParticipantSummary {
+            character_id: participant.character_id.clone(),
+            name: participant
+                .display_name
+                .clone()
+                .or_else(|| {
+                    library
+                        .character(&participant.character_id)
+                        .map(|character| character.name.clone())
+                })
+                .unwrap_or_else(|| participant.character_id.clone()),
+            role: match participant.role {
+                ParticipantRole::Character => "character".to_string(),
+                ParticipantRole::Narrator => "narrator".to_string(),
+            },
+        })
+        .collect()
 }
 
 /// A turn id that cannot collide with one already in the transcript.
