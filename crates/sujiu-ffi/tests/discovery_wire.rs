@@ -266,9 +266,10 @@ fn an_endpoint_is_explored_from_a_url_and_a_key_alone() {
     );
     let runtime = runtime();
 
-    let exploration = runtime
-        .tokio
-        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+    let exploration =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
 
     let paths = server.paths();
     assert!(
@@ -322,9 +323,10 @@ fn a_gateway_that_routes_by_model_is_still_found() {
     );
     let runtime = runtime();
 
-    let exploration = runtime
-        .tokio
-        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+    let exploration =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
 
     assert_eq!(
         exploration.protocol, "openai_chat_completions",
@@ -385,9 +387,10 @@ fn an_endpoint_that_only_says_nothing_is_reported_as_unknown_not_as_unsupported(
     );
     let runtime = runtime();
 
-    let exploration = runtime
-        .tokio
-        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+    let exploration =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
 
     assert_eq!(
         exploration.protocol, "",
@@ -428,9 +431,10 @@ fn a_gateway_that_dispatches_on_model_is_found_once_the_probe_names_a_real_one()
     );
     let runtime = runtime();
 
-    let exploration = runtime
-        .tokio
-        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+    let exploration =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
 
     assert_eq!(
         exploration.protocol, "openai_chat_completions",
@@ -467,9 +471,10 @@ fn nothing_is_retried_when_the_endpoint_listed_no_model_to_ask_with() {
     );
     let runtime = runtime();
 
-    let exploration = runtime
-        .tokio
-        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+    let exploration =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
 
     assert_eq!(exploration.status, "undetermined");
     assert!(
@@ -488,9 +493,10 @@ fn a_gateway_that_cannot_list_still_reports_the_protocol_it_speaks() {
     let server = EndpointServer::start(absent(), absent(), answers());
     let runtime = runtime();
 
-    let exploration = runtime
-        .tokio
-        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+    let exploration =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
 
     assert_eq!(exploration.protocol, "openai_chat_completions");
     assert_eq!(
@@ -515,9 +521,10 @@ fn a_rejected_key_is_reported_as_a_key_problem() {
     let server = EndpointServer::start(rejected.clone(), rejected.clone(), rejected);
     let runtime = runtime();
 
-    let exploration = runtime
-        .tokio
-        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-wrong"));
+    let exploration =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-wrong", true));
 
     assert_eq!(
         exploration.models.listing, "permission_denied",
@@ -563,9 +570,10 @@ fn every_discovery_outcome_leaves_the_model_to_the_user() {
         let server = EndpointServer::start(listing, responses, chat);
         let runtime = runtime();
 
-        let exploration = runtime
-            .tokio
-            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+        let exploration =
+            runtime
+                .tokio
+                .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
 
         assert!(
             exploration.models.manual_entry_allowed,
@@ -593,9 +601,10 @@ fn a_responses_capable_endpoint_is_chosen_over_the_older_one() {
     );
     let runtime = runtime();
 
-    let exploration = runtime
-        .tokio
-        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test"));
+    let exploration =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
 
     assert_eq!(exploration.protocol, "openai_responses");
     assert_eq!(
@@ -659,4 +668,302 @@ impl sujiu_ffi::events::TurnEventReporter for Recorder {
             self.failed = true;
         }
     }
+}
+
+/// Looking at the same endpoint twice must not cost two round trips.
+///
+/// This is the whole reason the answers are remembered. Opening a settings
+/// screen used to ask an endpoint for its model list and then probe three
+/// protocols, every time, which on a free tier is both a wait for the user and a
+/// route to being rate limited. The second look has to be free.
+#[test]
+fn a_second_look_at_the_same_endpoint_costs_no_request() {
+    let server = EndpointServer::start(
+        Route::Ok(models(&["harbour-large", "harbour-mini"])),
+        absent(),
+        answers(),
+    );
+    let runtime = runtime();
+
+    let first =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
+    let asked = server.paths();
+    assert!(
+        !asked.is_empty(),
+        "the first look asked nothing to be worth caching"
+    );
+
+    let second =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", false));
+
+    assert!(
+        server.paths().is_empty(),
+        "the second look went back to the network: {:?}",
+        server.paths()
+    );
+    assert_eq!(
+        second.protocol, first.protocol,
+        "the protocol changed itself"
+    );
+    assert_eq!(
+        second.models.models.len(),
+        first.models.models.len(),
+        "the remembered list is not the list that was fetched"
+    );
+    assert_eq!(second.status, first.status);
+    assert!(
+        runtime.diagnostics_text().contains("discovery_cached"),
+        "a cached answer has to say so in the log, or a reader cannot tell an \
+         old answer from a fresh one: {}",
+        runtime.diagnostics_text()
+    );
+}
+
+/// "Ask again" has to actually ask.
+///
+/// The cache is only acceptable if it can be told to get out of the way, because
+/// a user who has just corrected a key would otherwise keep being shown the
+/// answer to the question they are no longer asking.
+#[test]
+/// The real device found this one: an endpoint that lists its models but whose
+/// probes only ever answer a bare `404 page not found` comes back as
+/// `undetermined`, and an `undetermined` negotiation is deliberately never
+/// cached. Requiring a cached negotiation as well as a cached listing meant the
+/// endpoint that most needs remembering was the one that could never be
+/// remembered, so every visit re-asked it.
+#[test]
+fn a_list_is_remembered_even_when_no_protocol_was_ever_established() {
+    let server = EndpointServer::start(
+        Route::Ok(models(&["nimbus-one", "nimbus-two"])),
+        Route::PlainNotFound,
+        Route::PlainNotFound,
+    );
+    let runtime = runtime();
+
+    let first =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
+    assert_eq!(
+        first.status, "undetermined",
+        "this endpoint answers every probe with the same 404 it gives for a \
+         path it never had, so nothing can be concluded"
+    );
+    assert_eq!(first.models.models.len(), 2);
+    // The first visit asked four things and then, because nothing was
+    // concluded, asked three more with a model the listing had just offered.
+    // Those are recorded too, so they are read out before the second visit
+    // rather than being blamed on it.
+    let first_visit = server.paths();
+    assert_eq!(
+        first_visit.len(),
+        7,
+        "the first visit is the expensive one this cache exists to avoid: \
+         {first_visit:?}"
+    );
+
+    let second =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", false));
+
+    // `paths` drains what it has recorded, so it is read once. Calling it a
+    // second time for the failure message would print the empty list it just
+    // emptied, which is exactly the wrong thing to show.
+    let again = server.paths();
+    assert!(
+        again.is_empty(),
+        "the second visit asked the network again: {again:?}"
+    );
+    assert_eq!(
+        second.models.models.len(),
+        2,
+        "a remembered answer has to be an answer: the list is the part of it \
+         that was actually established"
+    );
+    assert_eq!(
+        second.status, "undetermined",
+        "a cached list is not a cached probe. Reporting a protocol here would \
+         be claiming a probe happened when none did"
+    );
+}
+
+fn asking_again_is_what_the_re_probe_button_means() {
+    let server = EndpointServer::start(Route::Ok(models(&["harbour-large"])), absent(), answers());
+    let runtime = runtime();
+
+    runtime
+        .tokio
+        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
+    assert!(!server.paths().is_empty());
+
+    runtime
+        .tokio
+        .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
+
+    assert!(
+        !server.paths().is_empty(),
+        "a refresh has to reach the endpoint, or the button does nothing"
+    );
+}
+
+/// An answer about one endpoint is not an answer about another.
+///
+/// The cache is keyed by endpoint id *and* normalized base URL, so re-pointing
+/// at a different address cannot inherit what the old one said. This is the
+/// failure that would be worst: a working endpoint reported through another's
+/// answer.
+#[test]
+fn one_address_does_not_inherit_another_addresss_answers() {
+    let first = EndpointServer::start(Route::Ok(models(&["harbour-large"])), absent(), answers());
+    let second = EndpointServer::start(
+        Route::Ok(models(&["other-large", "other-mini", "other-nano"])),
+        answers(),
+        absent(),
+    );
+    let runtime = runtime();
+
+    runtime
+        .tokio
+        .block_on(runtime.discover_endpoint(&first.base_url(), "sk-test", true));
+    first.paths();
+
+    let other =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&second.base_url(), "sk-test", false));
+
+    assert!(
+        !second.paths().is_empty(),
+        "the second address was never asked about anything"
+    );
+    assert_eq!(
+        other.models.models.len(),
+        3,
+        "the second address was shown the first one's models"
+    );
+}
+
+/// The answers have to outlive the process, or they are not a cache.
+///
+/// A cache that only ever lived in memory answered the question once per
+/// launch, which is the complaint that made it worth having.
+#[test]
+fn the_answers_survive_a_restart() {
+    let server = EndpointServer::start(
+        Route::Ok(models(&["harbour-large", "harbour-mini"])),
+        absent(),
+        answers(),
+    );
+    let storage: std::sync::Arc<dyn sujiu_ffi::storage::AppStorage> =
+        std::sync::Arc::new(sujiu_ffi::storage::MemoryStorage::new());
+
+    {
+        let runtime = SujiuRuntime::new_persistent(sujiu_ffi::seed::seed(), storage.clone())
+            .expect("runtime");
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", true));
+        assert!(
+            !server.paths().is_empty(),
+            "nothing was fetched to remember"
+        );
+    }
+
+    let restarted =
+        SujiuRuntime::new_persistent(sujiu_ffi::seed::seed(), storage).expect("runtime");
+    let remembered =
+        restarted
+            .tokio
+            .block_on(restarted.discover_endpoint(&server.base_url(), "sk-test", false));
+
+    assert!(
+        server.paths().is_empty(),
+        "a new process re-asked an endpoint it already had the answer for"
+    );
+    assert_eq!(
+        remembered.models.models.len(),
+        2,
+        "the models a previous process paid for did not come back"
+    );
+}
+
+/// A platform names the storage directory after the runtime is built.
+///
+/// That is the ordinary order on HarmonyOS: the runtime is created with
+/// whatever storage it can manage, and the app then hands it `filesDir`. Every
+/// test above hands the real storage to the constructor instead, which is why
+/// all of them passed while the shipped app forgot its cache on every launch —
+/// the restore had run against a storage that was about to be thrown away.
+#[test]
+fn a_directory_named_after_the_runtime_is_still_read_back() {
+    let root = std::env::temp_dir().join(format!("sujiu-capabilities-late-{}", std::process::id()));
+    std::fs::create_dir_all(&root).expect("a directory to name later");
+    std::fs::write(
+        root.join("sujiu-capabilities.json"),
+        r#"{"entries":{},"listings":{"endpoint|https://late.example/v1":{"listing":"available","models":["late-one","late-two"],"at_ms":1}}}"#,
+    )
+    .expect("a cache left by an earlier launch");
+
+    // Born with process-only storage, exactly as a platform runtime is.
+    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    runtime
+        .use_directory(root.to_str().expect("a path"))
+        .expect("naming a directory is allowed");
+
+    let remembered = runtime
+        .remembered_endpoint("https://late.example/v1")
+        .expect("the answers in the directory it was just given");
+    assert_eq!(
+        remembered.models.models.len(),
+        2,
+        "the cache in the late-named directory was not read: {remembered:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// A key that is missing or wrong must not be remembered as "this endpoint has
+/// no models".
+///
+/// The listing cache and the probe cache follow the same rule, and this is
+/// where it bites hardest: `list_models` answers `PermissionDenied` without
+/// making a request at all when there is no key, so caching it would file a
+/// working endpoint under "no models" the moment somebody opens the settings
+/// screen before typing their key.
+#[test]
+fn a_missing_key_does_not_become_a_remembered_answer() {
+    let server = EndpointServer::start(
+        Route::Ok(models(&["harbour-large", "harbour-mini"])),
+        absent(),
+        answers(),
+    );
+    let runtime = runtime();
+
+    let keyless = runtime
+        .tokio
+        .block_on(runtime.discover_endpoint(&server.base_url(), "", true));
+    assert_eq!(
+        keyless.models.models.len(),
+        0,
+        "a keyless listing cannot have found models"
+    );
+
+    // Same endpoint, now with a key, and no refresh: the keyless answer must not
+    // be sitting in the cache pretending to be an answer.
+    let with_key =
+        runtime
+            .tokio
+            .block_on(runtime.discover_endpoint(&server.base_url(), "sk-test", false));
+    assert_eq!(
+        with_key.models.models.len(),
+        2,
+        "the endpoint was filed as having no models because the key was blank: \
+         {:?}",
+        with_key.models
+    );
 }

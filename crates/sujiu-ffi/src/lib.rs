@@ -1291,6 +1291,7 @@ mod tests {
         runtime.tokio.block_on(runtime.discover_endpoint(
             "https://sujiu-does-not-resolve.invalid/v1".into(),
             key.into(),
+            true,
         ));
 
         let raw = runtime.diagnostics_text();
@@ -1369,7 +1370,11 @@ mod tests {
 
         let tail = runtime.diagnostics(3);
         assert_eq!(tail.len(), 3, "a limit is a cap, never a promise of more");
-        assert_eq!(runtime.diagnostics(0).len(), 10, "asking for everything");
+        // Ten configurations plus the line the runtime writes at launch saying
+        // it remembered nothing. That line is why this is not simply ten: a
+        // cache that restored nothing and a cache nobody asked are different
+        // situations, and only one of them is a bug.
+        assert_eq!(runtime.diagnostics(0).len(), 11, "asking for everything");
         assert!(
             tail.iter()
                 .all(|entry| entry.stage == "endpoint_configured"),

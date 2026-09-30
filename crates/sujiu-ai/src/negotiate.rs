@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use sujiu_core::{classify, EndpointConfig, ModelListing, ProbeFailure, ProbeVerdict, Protocol};
@@ -28,7 +28,7 @@ use sujiu_core::{classify, EndpointConfig, ModelListing, ProbeFailure, ProbeVerd
 use crate::diagnostics::{fields, truncate, DiagnosticKind, DiagnosticLog};
 
 /// What happened when we asked one protocol whether it was there.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolAttempt {
     pub protocol: Protocol,
     pub verdict: ProbeVerdict,
@@ -70,7 +70,7 @@ impl ProtocolAttempt {
 }
 
 /// The outcome of negotiating with one endpoint.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Negotiation {
     /// The protocol the runtime will use, if one was both supported and
     /// implemented here.
@@ -167,6 +167,32 @@ impl Negotiation {
     /// One of: `supported`, `no_usable_protocol`, `credentials_rejected`,
     /// `no_such_endpoint`, `rate_limited`, `server_unavailable`,
     /// `network_error`, `unreadable`, `undetermined`.
+    /// Nothing has been established for this endpoint, and nothing is being
+    /// asked right now.
+    ///
+    /// This is the answer a cached model list has to be paired with when the
+    /// walk that found the list never concluded. It matters that it reads as
+    /// `undetermined` and not as `no_usable_protocol`: the first says "we have
+    /// not found out", the second says "there is nothing here to find", and the
+    /// second is a claim this value has no evidence for — it would be
+    /// reporting the absence of a probe as the result of one.
+    pub fn not_established() -> Self {
+        Self {
+            selected: None,
+            supported: Vec::new(),
+            undetermined: Protocol::PRIORITY.to_vec(),
+            not_implemented: Vec::new(),
+            reason: Some(
+                "this endpoint's protocol has not been established yet, and this                  answer came from what it said last time rather than from asking                  it again"
+                    .to_string(),
+            ),
+            from_cache: true,
+            failure: None,
+            attempts: Vec::new(),
+            ambiguous: true,
+        }
+    }
+
     pub fn status(&self) -> &'static str {
         if self.selected.is_some() {
             return "supported";
@@ -1039,10 +1065,43 @@ fn listing_status_failure(status: u16) -> ModelListing {
     }
 }
 
+/// What an endpoint's model route said, remembered so it does not have to be
+/// asked again on every screen that wants to show a model.
+///
+/// This is the other half of `CapabilityCache`, and it is here for the same
+/// reason: asking is a network round trip, and a settings screen that asks
+/// every time it opens turns a free screen into a slow one and, against a free
+/// tier, into a rate-limited one.
+///
+/// A listing is the weakest fact this module keeps. A gateway can add a model
+/// tomorrow, so the remembered list can be out of date, and unlike a protocol
+/// answer there is nothing cheap about proving it wrong. It is kept anyway,
+/// because a list that is one model out of date is still a list the user can
+/// pick from, and no list at all is not. `at_ms` is what lets a caller — or a
+/// reader of the diagnostic log — say how old the answer is rather than
+/// presenting it as this moment's truth.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CachedListing {
+    /// Which route answered, and how it ended.
+    pub listing: ModelListing,
+    /// The model ids it returned, in the order it returned them.
+    pub models: Vec<String>,
+    /// When it was fetched, so staleness is a visible fact rather than a guess.
+    pub at_ms: i64,
+}
+
 /// Negotiated capabilities for one endpoint, cached between turns.
-#[derive(Default)]
+///
+/// Serialisable on purpose. A cache that only ever lived in memory answered the
+/// question once per launch, which is the complaint that made it worth keeping:
+/// the point of remembering is that the answer is there *next* time, including
+/// after the process is gone.
+#[derive(Default, Serialize, Deserialize)]
 pub struct CapabilityCache {
+    #[serde(default)]
     entries: Mutex<HashMap<String, Negotiation>>,
+    #[serde(default)]
+    listings: Mutex<HashMap<String, CachedListing>>,
 }
 
 impl CapabilityCache {
@@ -1060,7 +1119,30 @@ impl CapabilityCache {
         }
     }
 
-    /// Forget everything, so the next turn re-probes.
+    /// The remembered model route for this endpoint, if there is one.
+    /// How many model lists are remembered.
+    ///
+    /// This exists to be logged. A cache that silently restores nothing looks
+    /// exactly like a cache that was never consulted, and those two need
+    /// different fixes.
+    pub fn listing_count(&self) -> usize {
+        self.listings.lock().unwrap().len()
+    }
+
+    pub fn listing(&self, key: &str) -> Option<CachedListing> {
+        self.listings.lock().ok()?.get(key).cloned()
+    }
+
+    /// Remember a model route, replacing whatever was remembered for this
+    /// endpoint. A later answer always wins: a gateway that has just published
+    /// a new model should not be argued with by an older list.
+    pub fn remember_listing(&self, key: String, listing: CachedListing) {
+        if let Ok(mut entries) = self.listings.lock() {
+            entries.insert(key, listing);
+        }
+    }
+
+    /// Forget everything, so the next turn re-probes and the next probe re-lists.
     ///
     /// This is what a user reaches for after fixing a key or changing a
     /// gateway's routing, and it is why the cache is allowed to exist at all:
@@ -1068,6 +1150,27 @@ impl CapabilityCache {
     pub fn clear(&self) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.clear();
+        }
+        if let Ok(mut listings) = self.listings.lock() {
+            listings.clear();
+        }
+    }
+
+    /// Put back what a previous process learned.
+    ///
+    /// Restoring is not a convenience. The alternative is that every launch
+    /// re-asks every question, and the user pays for that in waiting on a
+    /// screen that could have drawn its answer immediately.
+    pub fn restore(&self, other: CapabilityCache) {
+        if let (Ok(mut entries), Ok(incoming)) = (self.entries.lock(), other.entries.lock()) {
+            for (key, value) in incoming.iter() {
+                entries.insert(key.clone(), value.clone());
+            }
+        }
+        if let (Ok(mut listings), Ok(incoming)) = (self.listings.lock(), other.listings.lock()) {
+            for (key, value) in incoming.iter() {
+                listings.insert(key.clone(), value.clone());
+            }
         }
     }
 

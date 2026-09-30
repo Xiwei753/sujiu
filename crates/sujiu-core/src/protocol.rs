@@ -307,7 +307,8 @@ fn says_endpoint_is_unknown(body: &str) -> bool {
 /// Separate from [`Protocol`] on purpose. A provider with no listing endpoint
 /// may still serve every protocol it claims, and a provider whose listing
 /// needs a permission the key lacks is still perfectly usable for chat.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelListing {
     /// Not asked yet.
     #[default]

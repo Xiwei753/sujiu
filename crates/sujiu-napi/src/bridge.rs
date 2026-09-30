@@ -593,6 +593,20 @@ impl SujiuRuntimeBridge {
         stored_endpoint_of(self.runtime.endpoint())
     }
 
+    /// What an endpoint told us before, without asking it again.
+    ///
+    /// This is what a platform reads at launch so the model list is already
+    /// there. It never reaches the network, which is the difference from
+    /// `discover_endpoint`: a launch that quietly asked would cost every user a
+    /// round trip every time they opened the app, and on a free tier a rate
+    /// limit as well.
+    #[napi]
+    pub fn remembered_endpoint(&self, base_url: String) -> Option<EndpointExplorationDto> {
+        self.runtime
+            .remembered_endpoint(&base_url)
+            .map(EndpointExplorationDto::from)
+    }
+
     /// Find out what an endpoint is, from an address and a key and nothing else.
     ///
     /// This is the order the user actually works in, and it is why the settings
@@ -600,16 +614,23 @@ impl SujiuRuntimeBridge {
     /// no configuration to complete first, and no model to know in advance.
     /// The model list and the protocol are reported as two independent answers,
     /// because a gateway can list nothing and still speak Responses.
+    ///
+    /// `refresh` is what a platform's "ask again" button passes. Leaving it out
+    /// asks the cache, which is what an ordinary open of a settings screen
+    /// wants: the endpoint already answered this, and re-asking costs the user a
+    /// wait and the endpoint a rate limit.
     #[napi]
     pub fn discover_endpoint(
         &self,
         base_url: String,
         api_key: String,
+        refresh: Option<bool>,
     ) -> Result<EndpointExplorationDto> {
-        let exploration = self
-            .runtime
-            .tokio
-            .block_on(self.runtime.discover_endpoint(&base_url, &api_key));
+        let exploration = self.runtime.tokio.block_on(self.runtime.discover_endpoint(
+            &base_url,
+            &api_key,
+            refresh.unwrap_or(false),
+        ));
         Ok(EndpointExplorationDto::from(exploration))
     }
 
@@ -901,6 +922,7 @@ mod tests {
         runtime.tokio.block_on(runtime.discover_endpoint(
             "https://sujiu-does-not-resolve.invalid/v1".into(),
             key.into(),
+            true,
         ));
 
         let entries: Vec<super::DiagnosticEntryDto> = runtime

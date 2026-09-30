@@ -20,8 +20,8 @@ pub use diagnostics::{
     DiagnosticLog,
 };
 pub use negotiate::{
-    list_models, negotiate as negotiate_protocol, negotiate_asking, CapabilityCache, Negotiation,
-    ProtocolAttempt,
+    list_models, negotiate as negotiate_protocol, negotiate_asking, CachedListing, CapabilityCache,
+    Negotiation, ProtocolAttempt,
 };
 pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 pub use provider::{http_client, AiProvider, NullStreamSink, ProviderError, StreamSink};

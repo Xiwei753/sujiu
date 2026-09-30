@@ -24,6 +24,7 @@ use sujiu_core::{
 };
 
 use sujiu_ai::diagnostics::{fields, DiagnosticEntry, DiagnosticKind, DiagnosticLog, LOG_KEY};
+use sujiu_ai::CachedListing;
 
 use crate::events::{TurnEventKind, TurnEventReporter, TurnEventSink};
 use crate::storage::{AppStorage, FileStorage, MemoryStorage};
@@ -146,6 +147,91 @@ pub struct EndpointExploration {
     /// Why negotiation concluded what it did, when it is not a clean answer.
     pub reason: Option<String>,
     pub models: ModelDiscovery,
+}
+
+/// What a model route returned, in the shape a screen reads.
+///
+/// The chosen model stays selectable even when the endpoint will not list
+/// anything, otherwise discovery would hide the model the user already chose and
+/// is using successfully — an endpoint that answers "I have no models" is
+/// answering about its listing, not revoking a choice somebody already made.
+/// An endpoint as the user typed it, before anything has been saved.
+///
+/// Deliberately carries no chosen model: this is the endpoint *before* the
+/// configuration exists, and a model would change the capability key and with
+/// it the cache the runtime is trying to find.
+fn unsaved_endpoint(base_url: &str) -> EndpointConfig {
+    EndpointConfig {
+        id: "endpoint".to_string(),
+        name: String::new(),
+        base_url: base_url.to_string(),
+        selected_model: None,
+        credential_ref: None,
+        overrides: serde_json::Map::new(),
+    }
+}
+
+/// Turn what negotiation concluded into the shape a screen reads.
+///
+/// One function, used by both the live and the remembered answer, so a cached
+/// exploration cannot drift from a fresh one. Two code paths building the same
+/// summary is how a cached screen ends up disagreeing with a probed one about
+/// which model is in use.
+fn exploration_from(
+    negotiation: &sujiu_ai::Negotiation,
+    models: ModelDiscovery,
+) -> EndpointExploration {
+    EndpointExploration {
+        protocol: negotiation.selected.map(protocol_label).unwrap_or_default(),
+        protocols: negotiation
+            .supported
+            .iter()
+            .map(|protocol| protocol_label(*protocol))
+            .collect(),
+        status: negotiation.status().to_string(),
+        reason: negotiation.failure_explanation(),
+        models,
+    }
+}
+
+fn model_discovery(
+    listing: sujiu_core::ModelListing,
+    discovered: &[String],
+    config: &EndpointConfig,
+) -> ModelDiscovery {
+    let mut models: Vec<ModelSummary> = discovered
+        .iter()
+        .map(|id| ModelSummary {
+            id: id.clone(),
+            name: id.clone(),
+            endpoint_id: config.id.clone(),
+            endpoint_label: config.display_label(),
+            configured: config.selected_model.as_deref() == Some(id.as_str()),
+        })
+        .collect();
+
+    if models.is_empty() {
+        if let Some(chosen) = config
+            .selected_model
+            .as_ref()
+            .filter(|model| !model.trim().is_empty())
+        {
+            models.push(ModelSummary {
+                id: chosen.clone(),
+                name: chosen.clone(),
+                endpoint_id: config.id.clone(),
+                endpoint_label: config.display_label(),
+                configured: true,
+            });
+        }
+    }
+
+    ModelDiscovery {
+        listing: listing_label(listing),
+        note: listing_note(listing, config),
+        manual_entry_allowed: true,
+        models,
+    }
 }
 
 fn listing_label(listing: ModelListing) -> String {
@@ -538,6 +624,12 @@ fn next_session_id(sessions: &[Session]) -> String {
 }
 
 /// Document name the runtime keeps its state in.
+/// What the endpoint cache is filed under.
+///
+/// Separate from the conversation document, and for the same reason the log
+/// is: a cache this build cannot read is a cache that starts empty, and that
+/// must never be a reason to protect or rewrite a conversation.
+const CAPABILITIES_KEY: &str = "sujiu-capabilities.json";
 const SNAPSHOT_FILE: &str = "sujiu-runtime.json";
 const SNAPSHOT_VERSION: u32 = 3;
 
@@ -659,6 +751,45 @@ impl SujiuRuntime {
             }
         }
 
+        // The same reasoning applies to the endpoint cache, and here it is not
+        // merely tidy: without it every launch re-asks every question, which is
+        // the cost that made the answers worth remembering in the first place.
+        match runtime.storage.lock().unwrap().load(CAPABILITIES_KEY) {
+            Some(saved) => match serde_json::from_str::<sujiu_ai::CapabilityCache>(&saved) {
+                Ok(previous) => {
+                    let restored = previous.len();
+                    let listings = previous.listing_count();
+                    runtime.capabilities.restore(previous);
+                    runtime.diagnostics.record(
+                        DiagnosticKind::Discovery,
+                        "discovery_cache_restored",
+                        "the endpoint answers from the last launch were read back",
+                        fields([
+                            ("protocols", restored.to_string()),
+                            ("listings", listings.to_string()),
+                        ]),
+                    );
+                }
+                Err(error) => {
+                    runtime.diagnostics.record(
+                        DiagnosticKind::Discovery,
+                        "discovery_cache_unreadable",
+                        "the remembered endpoint answers could not be read back",
+                        fields([("why", error.to_string())]),
+                    );
+                }
+            },
+            None => runtime.diagnostics.note(
+                DiagnosticKind::Discovery,
+                "discovery_cache_absent",
+                "no endpoint answers were remembered from a previous launch",
+            ),
+        }
+        // A launch-time observation that only exists in memory is lost the first
+        // time the process ends, and this is exactly the observation somebody
+        // reads after "my settings did not come back".
+        runtime.persist_diagnostics();
+
         if restore {
             // A first launch writes its seed, so the next launch is a restore
             // and not a reset. A protected document is left alone, and
@@ -709,8 +840,46 @@ impl SujiuRuntime {
         } else {
             self.inner.lock().unwrap().storage_state = StorageState::Writable;
         }
+        // Everything the new storage holds has to be read back, not just the
+        // conversation. The cache and the log were restored in `assemble`, from
+        // whatever storage the runtime happened to be born with, and on a
+        // platform the directory is only named after construction — so a
+        // restore that does not happen here has silently read the wrong place.
+        // That is not hypothetical: it is why a HarmonyOS build remembered the
+        // endpoint's models on the first launch after a probe and then forgot
+        // them on the next one, while the conversation came back perfectly.
+        let diagnostics = match storage.load(LOG_KEY) {
+            Some(saved) => serde_json::from_str::<Vec<DiagnosticEntry>>(&saved).ok(),
+            None => None,
+        };
+        let capabilities = match storage.load(CAPABILITIES_KEY) {
+            Some(saved) => serde_json::from_str::<sujiu_ai::CapabilityCache>(&saved).ok(),
+            None => None,
+        };
+        if let Some(entries) = diagnostics {
+            self.diagnostics.restore(entries);
+        }
+        match capabilities {
+            Some(previous) => {
+                let listings = previous.listing_count();
+                self.capabilities.restore(previous);
+                self.diagnostics.record(
+                    DiagnosticKind::Discovery,
+                    "discovery_cache_restored",
+                    "the endpoint answers from this directory were read back",
+                    fields([("listings", listings.to_string())]),
+                );
+            }
+            None => self.diagnostics.note(
+                DiagnosticKind::Discovery,
+                "discovery_cache_absent",
+                "this directory holds no remembered endpoint answers",
+            ),
+        }
+
         *self.storage.lock().unwrap() = Arc::new(storage);
         self.persist();
+        self.persist_diagnostics();
         Ok(())
     }
 
@@ -825,6 +994,22 @@ impl SujiuRuntime {
         self.storage.lock().unwrap().save(LOG_KEY, &document);
     }
 
+    /// File the endpoint cache, so the next launch starts with the answers this
+    /// one paid for.
+    ///
+    /// Written separately from the conversation document for the reason the log
+    /// is: the two have nothing to do with each other, and coupling them would
+    /// let a cache that cannot be read put a user's conversations at risk.
+    fn persist_capabilities(&self) {
+        let Ok(document) = serde_json::to_string(&self.capabilities) else {
+            return;
+        };
+        self.storage
+            .lock()
+            .unwrap()
+            .save(CAPABILITIES_KEY, &document);
+    }
+
     /// The wire formats this build speaks, in the order it prefers them.
     ///
     /// This replaces the old "provider kinds" list. A frontend used to be
@@ -891,6 +1076,10 @@ impl SujiuRuntime {
     /// is cheap to refill.
     pub fn forget_capabilities_about(&self) {
         self.capabilities.clear();
+        // Forgetfulness that outlives the process is still forgetfulness; without
+        // this the next launch would restore the answer about the endpoint the
+        // user has just re-pointed.
+        self.persist_capabilities();
     }
 
     pub fn sessions(&self) -> Vec<SessionSummary> {
@@ -1041,15 +1230,18 @@ impl SujiuRuntime {
     /// is named. The only thing the user is afterwards asked to decide is the
     /// model, because that is the one choice a machine genuinely cannot make
     /// for them.
-    pub async fn discover_endpoint(&self, base_url: &str, api_key: &str) -> EndpointExploration {
-        let config = EndpointConfig {
-            id: "endpoint".to_string(),
-            name: String::new(),
-            base_url: base_url.to_string(),
-            selected_model: None,
-            credential_ref: None,
-            overrides: serde_json::Map::new(),
-        };
+    /// Explore an address and a key the user just typed.
+    ///
+    /// `refresh` asks the endpoint again instead of answering from what it said
+    /// before; see `explore_endpoint` for why that is a per-call choice rather
+    /// than a policy the runtime decides on its own.
+    pub async fn discover_endpoint(
+        &self,
+        base_url: &str,
+        api_key: &str,
+        refresh: bool,
+    ) -> EndpointExploration {
+        let config = unsaved_endpoint(base_url);
 
         self.diagnostics.record(
             DiagnosticKind::Discovery,
@@ -1071,9 +1263,31 @@ impl SujiuRuntime {
             ]),
         );
 
-        let exploration = self.explore_endpoint(&config, Some(api_key)).await;
+        let exploration = self.explore_endpoint(&config, Some(api_key), refresh).await;
         self.persist_diagnostics();
         exploration
+    }
+
+    /// What this endpoint told us before, without asking it again.
+    ///
+    /// Nothing here touches the network, which is the entire point. A caller
+    /// that wants the current truth calls `discover_endpoint`; this is for the
+    /// screen that just wants to show what is already known, and it is what a
+    /// launch reads so the model list is there before anybody asks. Returning
+    /// nothing is an ordinary answer — it means nobody has asked this endpoint
+    /// yet — and not a failure.
+    pub fn remembered_endpoint(&self, base_url: &str) -> Option<EndpointExploration> {
+        let config = unsaved_endpoint(base_url);
+        let key = config.capability_key();
+        let listing = self.capabilities.listing(&key)?;
+        let negotiation = self
+            .capabilities
+            .get(&key)
+            .unwrap_or_else(sujiu_ai::Negotiation::not_established);
+        Some(exploration_from(
+            &negotiation,
+            model_discovery(listing.listing, &listing.models, &config),
+        ))
     }
 
     /// Explore an endpoint that has **not** been saved yet.
@@ -1087,11 +1301,65 @@ impl SujiuRuntime {
     ///
     /// Nothing here is written to disk. A settings screen explores, the user
     /// picks or types a model, and only then is an endpoint stored.
+    /// What an endpoint can do: which protocols it answers, and which models it
+    /// lists.
+    ///
+    /// `refresh` is the escape hatch, and it exists because a cache that cannot
+    /// be refilled is a bug waiting to happen — a user who has just corrected a
+    /// key needs a way to say "ask again" rather than being shown yesterday's
+    /// answer to yesterday's question. Everything else is answered from what
+    /// this endpoint already said, because every open of this screen used to
+    /// cost several round trips, and against a free tier it cost the user a
+    /// wait and the endpoint a rate limit.
     pub async fn explore_endpoint(
         &self,
         config: &EndpointConfig,
         api_key: Option<&str>,
+        refresh: bool,
     ) -> EndpointExploration {
+        let key = config.capability_key();
+
+        if !refresh {
+            if let Some(listing) = self.capabilities.listing(&key) {
+                // The listing is what makes this worth answering from memory. A
+                // protocol answer is deliberately not cached when the walk could
+                // not conclude one, so "only the listing is remembered" is the
+                // normal case for an endpoint that routes by model. Pairing that
+                // listing with an invented protocol answer would be reporting
+                // the absence of a probe as the result of one.
+                let negotiation = self
+                    .capabilities
+                    .get(&key)
+                    .unwrap_or_else(sujiu_ai::Negotiation::not_established);
+
+                self.diagnostics.record(
+                    DiagnosticKind::Discovery,
+                    "discovery_cached",
+                    "answered from what this endpoint said before",
+                    fields([
+                        ("endpoint", config.normalized_base_url()),
+                        (
+                            "protocol",
+                            negotiation
+                                .selected
+                                .map(protocol_label)
+                                .unwrap_or_else(|| "none".to_string()),
+                        ),
+                        ("listing", listing_label(listing.listing)),
+                        ("count", listing.models.len().to_string()),
+                        (
+                            "asked_ms_ago",
+                            (sujiu_ai::diagnostics::now_ms() - listing.at_ms).to_string(),
+                        ),
+                    ]),
+                );
+                return exploration_from(
+                    &negotiation,
+                    model_discovery(listing.listing, &listing.models, config),
+                );
+            }
+        }
+
         let models = self.explore(config, api_key).await;
 
         // The listing runs first so the probe has a real model to retry with. A
@@ -1105,29 +1373,15 @@ impl SujiuRuntime {
             None,
             config,
             api_key.unwrap_or_default(),
-            // Deliberately not the turn cache: what a settings screen needs to
-            // see is what the endpoint says now, not what a turn was told
-            // earlier in this process.
-            None,
+            Some(&self.capabilities),
             Some(self.diagnostics.as_ref()),
             &listed,
         )
         .await;
 
-        EndpointExploration {
-            protocol: negotiation
-                .selected
-                .map(|protocol| protocol_label(protocol))
-                .unwrap_or_default(),
-            protocols: negotiation
-                .supported
-                .iter()
-                .map(|protocol| protocol_label(*protocol))
-                .collect(),
-            status: negotiation.status().to_string(),
-            reason: negotiation.failure_explanation(),
-            models,
-        }
+        self.persist_capabilities();
+
+        exploration_from(&negotiation, models)
     }
 
     async fn explore(&self, config: &EndpointConfig, api_key: Option<&str>) -> ModelDiscovery {
@@ -1139,44 +1393,29 @@ impl SujiuRuntime {
         )
         .await;
 
-        let mut models = discovered
-            .iter()
-            .map(|id| ModelSummary {
-                id: id.clone(),
-                name: id.clone(),
-                endpoint_id: config.id.clone(),
-                endpoint_label: config.display_label(),
-
-                configured: config.selected_model.as_deref() == Some(id.as_str()),
-            })
-            .collect::<Vec<_>>();
-
-        // The chosen model stays selectable even when the endpoint will not
-        // list anything, otherwise discovery would hide the model the user
-        // already chose and is using successfully.
-        if models.is_empty() {
-            if let Some(chosen) = config
-                .selected_model
-                .as_ref()
-                .filter(|model| !model.trim().is_empty())
-            {
-                models.push(ModelSummary {
-                    id: chosen.clone(),
-                    name: chosen.clone(),
-                    endpoint_id: config.id.clone(),
-                    endpoint_label: config.display_label(),
-
-                    configured: true,
-                });
-            }
+        // Not every answer is worth keeping, and this is the same rule the
+        // probe already follows: a bad key, a rate limit and an unreachable host
+        // are statements about this moment, not about the endpoint. Remembering
+        // one would make a transient failure permanent — a user who fixes their
+        // key would keep being told the endpoint has no models, with nothing on
+        // screen suggesting why. "There is no model route here" and "the models
+        // are these" are the only two answers that are facts about the service.
+        if matches!(
+            listing,
+            sujiu_core::ModelListing::Available | sujiu_core::ModelListing::Unavailable
+        ) {
+            self.capabilities.remember_listing(
+                config.capability_key(),
+                CachedListing {
+                    listing,
+                    models: discovered.clone(),
+                    at_ms: sujiu_ai::diagnostics::now_ms(),
+                },
+            );
+            self.persist_capabilities();
         }
 
-        ModelDiscovery {
-            listing: listing_label(listing),
-            note: listing_note(listing, config),
-            manual_entry_allowed: true,
-            models,
-        }
+        model_discovery(listing, &discovered, config)
     }
 
     pub async fn context_sources(&self) -> Result<Vec<ContextSourceSummary>, ContextStoreError> {

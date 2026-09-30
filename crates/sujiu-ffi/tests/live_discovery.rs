@@ -39,7 +39,7 @@ fn a_live_endpoint_is_described_without_a_model_and_without_leaking_the_key() {
     let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
     let exploration = runtime
         .tokio
-        .block_on(runtime.discover_endpoint(&base_url, &api_key));
+        .block_on(runtime.discover_endpoint(&base_url, &api_key, true));
 
     println!("status: {}", exploration.status);
     println!("protocol: {}", exploration.protocol);
