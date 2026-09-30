@@ -246,6 +246,7 @@ ShareService               PermissionService
 LifecycleService           NotificationService
 ClipboardService           SystemAppearanceService
 PlatformInfoService
+BackgroundHoldService
 ```
 
 Services expose capabilities (`CredentialService.saveSecret`,
@@ -293,6 +294,14 @@ endpoint entry. It is a secret that:
 - never appears in a `ProviderDraft`, a UI state object, a log line, or a
   bridge event.
 
+The form opens on what is already configured. A settings screen that starts empty
+says "nothing is set up" to someone who did set it up, and the most likely
+response is to type over a working endpoint. The stored address and model are
+read back and drawn into the form; the credential is not, because it was never
+page state to begin with and there is nothing to draw it from. An address or a
+model that is genuinely absent is drawn as an empty field, which is different
+from not having asked.
+
 The user chooses no vendor and no protocol. The runtime advertises the protocols
 it can speak, in the order it prefers them, and negotiation settles which one an
 endpoint actually gets. A hostname may produce a display label and nothing else.
@@ -311,6 +320,43 @@ FileService.dataDirectory(context)   // platform capability, reads no app data
 The runtime decides the format and when to write, writes atomically, and never
 picks a path itself. A bridge without storage is not a broken bridge, so the
 contract method is optional and reports whether a directory was attached.
+
+#### Surviving the background
+
+**Locking the screen sends the app to the background.** It is not a pause: a
+suspended process loses its network access, so a turn that is streaming an answer
+dies part-way through when the screen dims. No permission causes this and no
+permission prevents it — `ohos.permission.INTERNET` is granted at install and
+says nothing about the foreground. The remedy is a **transient task**: a short,
+time-limited window in which the app may keep running in order to finish work it
+has already started. A long-running task would be the wrong instrument, because
+it demands a category that matches the work and a visible notification, and a
+chat answer is not that.
+
+The hold is held only while it is needed, and that is decided by who owns what:
+
+- the platform service owns the hold, and wraps the platform API;
+- the ability reports **lifecycle** and knows nothing about turns;
+- presentation reports **that a turn reached one of its three endings** and
+  nothing about the process around it;
+- the hold is taken when the app backgrounds while a turn is still running, and
+  released the moment that turn ends — however it ends, including a failure and a
+  cancellation, because those are the two ways a turn actually stops.
+
+A refused hold is not an error. The platform may decline one, and when it does
+the turn continues exactly as before, without the guarantee. Treating a refusal as
+a failure would turn a scheduling decision into a broken conversation.
+
+The window is not ours to size. The platform caps a transient task at about three
+minutes, and less on a low battery, so the hold is asked for once and given back
+when the turn ends. A turn that outlives the window fails the way it would have
+without it — and the transcript keeps every step it did finish.
+
+```text
+ability.onBackground()  -> graph -> if (controller.busy) hold.acquire()
+ability.onForeground()  -> graph -> hold.release()
+controller settles      -> graph -> hold.release()
+```
 
 ### 2.5 Dependency direction
 

@@ -12,7 +12,8 @@
 import sujiu from 'libsujiu_napi.so';
 import { SujiuBridge, SessionSummary, CharacterSummary, ModelSummary, ContextSourceSummary,
   ConversationSnapshot, MessageSummary, MessageRole, TurnEvent, TurnEventKind,
-  TurnEventListener, ProviderDraft, EndpointExploration, ModelDiscovery } from './SujiuBridge';
+  TurnEventListener, ProviderDraft, EndpointExploration, ModelDiscovery,
+  StoredEndpoint } from './SujiuBridge';
 
 interface NativeSession {
   id: string;
@@ -96,6 +97,20 @@ interface NativeEndpointExploration {
   models: NativeModelDiscovery;
 }
 
+/**
+ * The native shape of an endpoint that is already configured.
+ *
+ * There is no credential field here, and there must not be one added. The key
+ * lives in platform storage and is read immediately before a turn; a type that
+ * carried it would put a secret one careless read away from a log line.
+ */
+interface NativeStoredEndpoint {
+  id: string;
+  baseUrl: string;
+  selectedModel?: string;
+  label: string;
+}
+
 interface NativeTurnRequest {
   sessionId: string;
   userText: string;
@@ -123,13 +138,22 @@ interface NativeRuntime {
   cancelTurn(): void;
   useDataDirectory(directory: string): Promise<void>;
   dataDirectory(): string | null;
-  /** Applies a provider description. Rejects when the address is blank. */
-  configureProvider(draft: NativeProviderConfig): Promise<void>;
+  /**
+   * Applies a provider description. Throws when the address is blank.
+   *
+   * Declared as returning nothing because that is what it returns. It used to be
+   * declared as a promise, and chaining `.then` onto a value that is not one
+   * threw *after* the endpoint had been written — so every save reported a
+   * failure for work that had succeeded. The type now says what is true.
+   */
+  configureProvider(draft: NativeProviderConfig): void;
   /**
    * Asks an endpoint what it can do. Needs an address and a key and nothing
    * else: no stored endpoint, no chosen model, no vendor named.
    */
   discoverEndpoint(baseUrl: string, apiKey: string): NativeEndpointExploration;
+  /** The endpoint already configured, or null. Never carries a credential. */
+  storedEndpoint(): NativeStoredEndpoint | null;
   /**
    * Runs a turn and reports each event as JSON.
    *
@@ -233,6 +257,15 @@ function toEndpointExploration(value: NativeEndpointExploration): EndpointExplor
     reason: value.reason === undefined ? '' : value.reason,
     models: toModelDiscovery(value.models)
   } as EndpointExploration;
+}
+
+function toStoredEndpoint(value: NativeStoredEndpoint): StoredEndpoint {
+  return {
+    id: value.id,
+    baseUrl: value.baseUrl,
+    selectedModel: value.selectedModel,
+    label: value.label
+  } as StoredEndpoint;
 }
 
 function toSession(value: NativeSession): SessionSummary {
@@ -559,6 +592,22 @@ export class SujiuNativeBridge implements SujiuBridge {
       return Promise.resolve();
     } catch (error) {
       return Promise.reject(new Error(`configure_provider failed: ${(error as Error).message}`));
+    }
+  }
+
+  /**
+   * Reads back the endpoint already configured, so a settings form can open on it.
+   *
+   * An empty form is not neutral. Opened on an endpoint that has a model and a
+   * conversation behind it, it reads as "nothing is set up", and the natural
+   * reaction to that is to set it up again.
+   */
+  storedEndpoint(): Promise<StoredEndpoint | null> {
+    try {
+      const stored = this.runtime.storedEndpoint();
+      return Promise.resolve(stored === null ? null : toStoredEndpoint(stored));
+    } catch (error) {
+      return Promise.reject(new Error(`stored_endpoint failed: ${(error as Error).message}`));
     }
   }
 

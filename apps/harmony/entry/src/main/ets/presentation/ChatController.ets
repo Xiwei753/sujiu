@@ -7,6 +7,7 @@ import {
   ModelSummary,
   SessionSummary,
   ProviderDraft,
+  StoredEndpoint,
   SujiuBridge,
   TurnEvent,
   TurnEventKind
@@ -154,11 +155,46 @@ export class ChatController {
   endpointNote: string = '';
 
   /**
+   * What is already configured, so a form can open on it.
+   *
+   * The address and the chosen model are configuration, and a person opening
+   * settings to change one of them should see the other rather than an empty
+   * field. The credential is deliberately absent from this and cannot be
+   * requested: it lives in platform storage and is read immediately before a
+   * turn, so that a secret is never something a view could print.
+   */
+  storedEndpoint: StoredEndpoint | null = null;
+
+  /**
    * Raised when the appearance mode changes. Presentation does not decide what
    * that means for colors; the UI layer listens and re-themes itself.
    */
   onAppearanceChanged: () => void = () => {
   };
+
+  /**
+   * Raised when a turn reaches any of its three end states: completed, failed or
+   * cancelled. A callback rather than a flag, because whether a turn is still
+   * running is presentation's business while what should happen to the process
+   * around it belongs to the platform layer that owns the lifecycle.
+   */
+  onTurnSettled: () => void = () => {
+  };
+
+  /**
+   * The single place a turn is declared over.
+   *
+   * A turn ends in exactly three ways and each of them is a real ending: it
+   * finished, it failed, or the person stopped it. A fourth possibility — the
+   * runtime simply never answered — is not an ending, and it is why the agent
+   * loop still commits whatever it had when a turn stops for any reason. So the
+   * three are reported together rather than letting each of them forget the
+   * others, which is how a background hold ends up outliving the turn that
+   * asked for it.
+   */
+  private settleTurn(): void {
+    this.onTurnSettled();
+  }
 
   private assistantOpen: boolean = false;
   private messageCounter: number = 0;
@@ -181,6 +217,14 @@ export class ChatController {
       this.protocols = await this.bridge.supportedProtocols();
     } catch (error) {
       this.protocols = [];
+    }
+    try {
+      // Read back what is saved, so the form opens on it. An endpoint that was
+      // never configured leaves this null, which is a normal state and not a
+      // reason to hide the form.
+      this.storedEndpoint = await this.bridge.storedEndpoint();
+    } catch (error) {
+      this.storedEndpoint = null;
     }
     this.hasCredential = this.credentials.hasSecret(CREDENTIAL_NAME);
   }
@@ -513,15 +557,18 @@ export class ChatController {
       case TurnEventKind.Completed:
         this.assistantOpen = false;
         this.generationState = GenerationState.Completed;
+        this.settleTurn();
         break;
       case TurnEventKind.Failed:
         this.assistantOpen = false;
         this.generationState = GenerationState.Failed;
         this.fail(event.message ?? '', event.text ?? '');
+        this.settleTurn();
         break;
       case TurnEventKind.Cancelled:
         this.assistantOpen = false;
         this.generationState = GenerationState.Cancelled;
+        this.settleTurn();
         break;
       default:
         break;

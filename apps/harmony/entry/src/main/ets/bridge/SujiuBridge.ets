@@ -101,6 +101,24 @@ export interface EndpointExploration {
   models: ModelDiscovery;
 }
 
+/**
+ * An endpoint that is already configured.
+ *
+ * This exists so a settings form can open on what is saved rather than on empty
+ * fields, which reads as "nothing is set up" when something is. It carries the
+ * address and the chosen model and nothing else. There is no credential here and
+ * there should never be one: the key lives in platform storage and is read
+ * immediately before a turn, so a secret is never something a view holds.
+ */
+export interface StoredEndpoint {
+  id: string;
+  baseUrl: string;
+  /** Absent until a model is chosen, which is a normal state, not an error. */
+  selectedModel?: string;
+  /** A word to show the person. It describes; it decides nothing. */
+  label: string;
+}
+
 export interface ModelDiscovery {
   /** One of: unknown, available, unavailable, permission_denied, rate_limited, unreachable. */
   listing: string;
@@ -184,6 +202,14 @@ export interface SujiuBridge {
   discoverEndpoint(baseUrl: string, apiKey: string): Promise<EndpointExploration>;
   /** Hands a provider description to the runtime. Rejects a blank address. */
   configureProvider(draft: ProviderDraft): Promise<void>;
+  /**
+   * Reads back what is already configured, or null when nothing is.
+   *
+   * The settings form opens on this. An empty form is not neutral: it says
+   * "nothing is set up" about a session that has an endpoint, a model and a
+   * conversation behind it.
+   */
+  storedEndpoint(): Promise<StoredEndpoint | null>;
   /**
    * Runs the next turn against `draft` instead of the saved provider, without
    * saving it.

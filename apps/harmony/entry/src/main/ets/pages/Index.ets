@@ -1,6 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { KeyboardAvoidMode } from '@kit.ArkUI';
-import { CharacterSummary, ModelSummary, ProviderDraft } from '../bridge/SujiuBridge';
+import { CharacterSummary, ModelSummary, ProviderDraft, StoredEndpoint } from '../bridge/SujiuBridge';
 import { AppGraph } from '../app/Controller';
 import { Composer } from '../components/Composer';
 import { ConversationView } from '../components/ConversationView';
@@ -73,7 +73,47 @@ struct Index {
     // page up, so the top bar slides under the status bar and the conversation
     // overlaps the system area. Resizing keeps the chat chrome in place.
     this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
-    this.graph.start();
+    this.startUp();
+  }
+
+  /**
+   * Starts the graph, then opens the fields on what it found.
+   *
+   * The order matters and is not incidental: `loadProvider` reads the stored
+   * endpoint across the bridge, so a form drawn before it resolves sees nothing
+   * configured and says so to a user who has already configured something.
+   */
+  private async startUp(): Promise<void> {
+    await this.graph.start();
+    this.openSettingsOnStoredEndpoint();
+  }
+
+  /**
+   * Opens the settings fields on what is already configured.
+   *
+   * Reading it back is not a convenience. An empty form opened on an endpoint
+   * that has a model and a conversation behind it says "nothing is set up", and
+   * the reasonable response to that is to set it up again, over the top of what
+   * is already there.
+   *
+   * The epoch is bumped because a TextInput's text is its *initial* value: new
+   * state alone would leave the fields showing what they showed before. It is
+   * not bumped per keystroke, so this cannot rebuild a field under a cursor —
+   * a form is not open while somebody is typing in it.
+   *
+   * The credential is not read back and cannot be. It stays in platform storage
+   * and is fetched immediately before a turn.
+   */
+  private openSettingsOnStoredEndpoint(): void {
+    const stored: StoredEndpoint | null = this.controller.storedEndpoint;
+    if (stored === null) {
+      return;
+    }
+    this.providerBaseUrl = stored.baseUrl;
+    if (stored.selectedModel !== undefined && stored.selectedModel.length > 0) {
+      this.providerModel = stored.selectedModel;
+    }
+    this.providerFieldEpoch += 1;
   }
 
   /**

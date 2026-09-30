@@ -141,6 +141,49 @@ pub unsafe extern "C" fn sujiu_provider_kinds_json() -> *mut c_char {
     into_c_string(ok_json(&SujiuRuntime::supported_protocols()))
 }
 
+/// What the settings form needs to show what is already configured.
+///
+/// Deliberately not the stored endpoint itself. A form has to be able to redraw
+/// itself from what is configured, and a credential is a secret that belongs in
+/// platform storage rather than in anything a form can read back, so this
+/// carries the address and the model and nothing that could be used to talk to
+/// the endpoint on its own.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StoredEndpointSummary {
+    pub id: String,
+    pub base_url: String,
+    pub selected_model: Option<String>,
+    pub label: String,
+}
+
+/// Read the endpoint a previous session configured, if there is one.
+///
+/// A settings form that cannot read this back has to start blank, and a blank
+/// form is a form that invites the user to retype what is already stored — or,
+/// worse, to save a half-filled one over a working configuration.
+#[no_mangle]
+pub unsafe extern "C" fn sujiu_endpoint_json(runtime: *mut SujiuRuntime) -> *mut c_char {
+    let Some(runtime) = (unsafe { runtime.as_ref() }) else {
+        return into_c_string(
+            serde_json::to_string(&ApiEnvelope::<Option<StoredEndpointSummary>>::error(
+                "runtime pointer is null",
+            ))
+            .expect("error envelope is serializable"),
+        );
+    };
+
+    let summary: Option<StoredEndpointSummary> =
+        runtime.endpoint().map(|config| StoredEndpointSummary {
+            id: config.id.clone(),
+            base_url: config.base_url.clone(),
+            selected_model: config.selected_model.clone(),
+            label: config.display_label(),
+        });
+
+    into_c_string(ok_json(&summary))
+}
+
 /// Configure the endpoint used by later turns.
 ///
 /// There is no vendor to validate, because there is no vendor any more. What is
@@ -789,6 +832,35 @@ mod tests {
 
         assert!(runtime.conversation_state(&id).is_some());
         assert_eq!(runtime.sessions()[0].id, id);
+    }
+
+    /// A settings form has to be able to open on what is already configured.
+    ///
+    /// A form that cannot read it back starts blank, and a blank form is an
+    /// invitation to retype what is stored — or to save a half-filled one over
+    /// a configuration that was working.
+    #[test]
+    fn a_settings_form_can_read_back_what_is_already_configured() {
+        let runtime = runtime();
+        assert!(
+            runtime.endpoint().is_none(),
+            "nothing is configured until something is"
+        );
+
+        runtime
+            .set_endpoint(Some(endpoint()))
+            .expect("a blank model is still an endpoint");
+        runtime
+            .set_endpoint(Some(EndpointConfig {
+                selected_model: Some("chosen-model".to_string()),
+                ..endpoint()
+            }))
+            .expect("a chosen model");
+
+        let stored = runtime.endpoint().expect("the endpoint is there");
+        assert_eq!(stored.base_url, "https://example.invalid/v1");
+        assert_eq!(stored.selected_model.as_deref(), Some("chosen-model"));
+        assert_eq!(stored.display_label(), "Local");
     }
 
     /// A directory that only this test uses, removed when the test ends.

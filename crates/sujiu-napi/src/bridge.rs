@@ -110,6 +110,23 @@ impl From<EndpointExploration> for EndpointExplorationDto {
     }
 }
 
+/// An endpoint that is already stored, as far as a form may know one.
+///
+/// No credential field, and none is wanted: a form that could read the key back
+/// would be one `dump the view state` away from writing it to a log. The key is
+/// the one thing a settings screen asks to be told "yes you have one" and
+/// nothing more.
+#[napi(object)]
+pub struct StoredEndpointDto {
+    pub id: String,
+    pub base_url: String,
+    /// `None` until the user has chosen one, which is a normal state: an
+    /// endpoint can be asked what it offers before anyone picks a model.
+    pub selected_model: Option<String>,
+    /// A word to show a person. Decides nothing.
+    pub label: String,
+}
+
 #[napi(object)]
 pub struct ContextSourceDto {
     pub id: String,
@@ -369,6 +386,26 @@ impl Task for SendTurnTask {
     }
 }
 
+/// What a settings form gets back about an endpoint that is already configured.
+///
+/// A free function so the conversion can be tested on its own. The generated
+/// binding around it needs a live NAPI runtime and so cannot be reached from a
+/// test binary at all, which makes this the part that has to be right by
+/// construction rather than by luck.
+///
+/// Note what is absent: a credential. Every field here becomes a property the
+/// form can read, and a form that could read the key back would be one careless
+/// log line away from printing it. The address and the chosen model are enough
+/// to redraw the screen, and nothing more is offered.
+fn stored_endpoint_of(config: Option<EndpointConfig>) -> Option<StoredEndpointDto> {
+    config.map(|config| StoredEndpointDto {
+        id: config.id.clone(),
+        base_url: config.base_url.clone(),
+        selected_model: config.selected_model.clone(),
+        label: config.display_label(),
+    })
+}
+
 /// Builds a runtime from the seed catalog that ships with the app.
 ///
 /// This is a free function rather than an associated one on purpose: a factory
@@ -501,6 +538,17 @@ impl SujiuRuntimeBridge {
         self.runtime
             .set_endpoint(Some(provider.to_domain()))
             .map_err(|error| napi::Error::from_reason(format!("{error}")))
+    }
+
+    /// Read back what is already configured, so a settings form can open on
+    /// the truth rather than on three empty fields.
+    ///
+    /// No credential comes back. The key lives in platform storage and is
+    /// never something a form can read into a field and then leak into a log
+    /// line or a state dump.
+    #[napi]
+    pub fn stored_endpoint(&self) -> Option<StoredEndpointDto> {
+        stored_endpoint_of(self.runtime.endpoint())
     }
 
     /// Find out what an endpoint is, from an address and a key and nothing else.
@@ -686,5 +734,69 @@ mod tests {
         assert!(forced.replays_assistant_reasoning);
         assert_eq!(forced.protocol, negotiated.protocol);
         assert_eq!(forced.supported, negotiated.supported);
+    }
+
+    /// A settings form has to be able to redraw itself on what is configured.
+    ///
+    /// This drives the round trip a platform actually performs: a DTO goes in,
+    /// the runtime stores it, and a DTO comes back out for the form. The
+    /// generated NAPI binding around those two calls needs a live NAPI runtime
+    /// and cannot be linked into a test binary at all, so the two mappings on
+    /// either side of the runtime are driven directly. Those are the only parts
+    /// that can quietly go wrong -- a dropped field, a model arriving as an
+    /// empty string instead of absent, a credential appearing by accident.
+    #[test]
+    fn a_settings_form_can_open_on_what_is_already_configured() {
+        let runtime =
+            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+
+        assert!(
+            super::stored_endpoint_of(runtime.endpoint()).is_none(),
+            "nothing is configured until something is"
+        );
+
+        // An address on its own is still an endpoint: a model is chosen after
+        // discovery, not before it.
+        runtime
+            .set_endpoint(Some(
+                ProviderConfigDto {
+                    id: "endpoint-default".into(),
+                    name: "Gateway".into(),
+                    base_url: "https://gateway.example/v1".into(),
+                    selected_model: None,
+                    max_tokens: None,
+                    temperature: None,
+                    replays_assistant_reasoning: None,
+                }
+                .to_domain(),
+            ))
+            .expect("an endpoint without a model");
+
+        let chosen = super::stored_endpoint_of(runtime.endpoint()).expect("it was just stored");
+        assert_eq!(chosen.base_url, "https://gateway.example/v1");
+        assert_eq!(
+            chosen.selected_model, None,
+            "a model that was never chosen is absent, not an empty string"
+        );
+
+        runtime
+            .set_endpoint(Some(
+                ProviderConfigDto {
+                    id: "endpoint-default".into(),
+                    name: "Gateway".into(),
+                    base_url: "https://gateway.example/v1".into(),
+                    selected_model: Some("picked-model".into()),
+                    max_tokens: None,
+                    temperature: None,
+                    replays_assistant_reasoning: None,
+                }
+                .to_domain(),
+            ))
+            .expect("a chosen model");
+
+        let chosen = super::stored_endpoint_of(runtime.endpoint()).expect("it is still stored");
+        assert_eq!(chosen.base_url, "https://gateway.example/v1");
+        assert_eq!(chosen.selected_model.as_deref(), Some("picked-model"));
+        assert_eq!(chosen.label, "Gateway");
     }
 }
