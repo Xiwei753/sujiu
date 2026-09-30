@@ -14,7 +14,7 @@ pub use model::{
     AssistantTurn, ContinuationSupport, ContinuationUpdate, ModelMessage, ModelRole,
     ProviderContinuation, ProviderIdentity, ProviderRequest, ReasoningSidecar, TokenUsage,
     ToolAnnotations, ToolCall, ToolCallState, ToolContent, ToolDefinition, ToolDiscovery,
-    ToolOutput, ToolResult,
+    ToolOutput, ToolResult, SENT_MESSAGES_KEY,
 };
 pub use prompt::{
     CacheContinuity, PromptCompiler, PromptPlan, PromptSegment, PromptSource,
@@ -23,9 +23,7 @@ pub use prompt::{
 pub use protocol::{
     classify, EndpointCapabilities, ModelListing, ProbeFailure, ProbeVerdict, Protocol,
 };
-pub use provider::{
-    apply_reasoning_override, ProviderConfig, ProviderKind, REPLAYS_ASSISTANT_REASONING_KEY,
-};
+pub use provider::{apply_reasoning_override, EndpointConfig, REPLAYS_ASSISTANT_REASONING_KEY};
 pub use session::{ChatMessage, ChatRole, Session};
 pub use transcript::{
     model_messages_from_transcript, validate_pairing, AssistantStep, CompactedTurns,

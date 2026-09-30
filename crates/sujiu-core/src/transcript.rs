@@ -750,7 +750,7 @@ mod tests {
     use super::*;
     use crate::{
         model::{ContinuationSupport, ProviderContinuation, ProviderIdentity, ToolOutput},
-        ProviderKind,
+        Protocol,
     };
     use serde_json::json;
 
@@ -815,7 +815,7 @@ mod tests {
     #[test]
     fn an_answer_without_a_tool_call_still_carries_its_reasoning() {
         let origin = identity(
-            ProviderKind::OpenAiCompatible,
+            Protocol::OpenAiChatCompletions,
             "p1",
             "https://a.example/v1",
             "m",
@@ -868,7 +868,7 @@ mod tests {
         // An empty identity is not any real provider, so it can never be
         // replayed. Keeping the text is the point; guessing who wrote it is not.
         assert!(!sidecar.is_replayable_for(&identity(
-            ProviderKind::OpenAiCompatible,
+            Protocol::OpenAiChatCompletions,
             "p1",
             "https://a.example/v1",
             "m"
@@ -883,7 +883,7 @@ mod tests {
         thinking.reasoning = Some(crate::model::ReasoningSidecar::new(
             "nothing said",
             identity(
-                ProviderKind::OpenAiCompatible,
+                Protocol::OpenAiChatCompletions,
                 "p1",
                 "https://a.example/v1",
                 "m",
@@ -894,14 +894,14 @@ mod tests {
     }
 
     fn identity(
-        kind: ProviderKind,
-        provider_id: &str,
+        protocol: Protocol,
+        endpoint_id: &str,
         base_url: &str,
         model: &str,
     ) -> ProviderIdentity {
         ProviderIdentity {
-            kind,
-            provider_id: provider_id.to_string(),
+            protocol,
+            endpoint_id: endpoint_id.to_string(),
             base_url: base_url.to_string(),
             model: model.to_string(),
         }
@@ -914,7 +914,7 @@ mod tests {
         let mut turn = tool_turn();
         turn.steps[0].continuation = ContinuationUpdate::Replace(ProviderContinuation {
             identity: identity(
-                ProviderKind::OpenAiCompatible,
+                Protocol::OpenAiChatCompletions,
                 "provider-a",
                 "https://a.example/v1",
                 "model-a",
@@ -929,7 +929,7 @@ mod tests {
 
         assert!(transcript
             .continuation_for(&identity(
-                ProviderKind::OpenAiCompatible,
+                Protocol::OpenAiChatCompletions,
                 "provider-a",
                 "https://a.example/v1",
                 "model-a"
@@ -940,7 +940,7 @@ mod tests {
         // two different providers.
         assert!(transcript
             .continuation_for(&identity(
-                ProviderKind::OpenAiCompatible,
+                Protocol::OpenAiChatCompletions,
                 "provider-b",
                 "https://b.example/v1",
                 "model-a"
@@ -948,7 +948,7 @@ mod tests {
             .is_none());
         assert!(transcript
             .continuation_for(&identity(
-                ProviderKind::OpenAiCompatible,
+                Protocol::OpenAiChatCompletions,
                 "provider-a",
                 "https://a.example/v1",
                 "model-b"
@@ -956,7 +956,7 @@ mod tests {
             .is_none());
         assert!(transcript
             .continuation_for(&identity(
-                ProviderKind::Anthropic,
+                Protocol::AnthropicMessages,
                 "provider-a",
                 "https://a.example/v1",
                 "model-a"
@@ -969,7 +969,7 @@ mod tests {
         let mut turn = tool_turn();
         turn.steps[0].continuation = ContinuationUpdate::Replace(ProviderContinuation {
             identity: identity(
-                ProviderKind::OpenAiCompatible,
+                Protocol::OpenAiChatCompletions,
                 "provider-a",
                 "https://a.example/v1",
                 "model-a",
@@ -985,7 +985,7 @@ mod tests {
 
         assert!(transcript
             .continuation_for(&identity(
-                ProviderKind::OpenAiCompatible,
+                Protocol::OpenAiChatCompletions,
                 "provider-a",
                 "https://a.example/v1",
                 "model-a"
@@ -1001,7 +1001,7 @@ mod tests {
         let mut turn = tool_turn();
         turn.steps[0].continuation = ContinuationUpdate::Replace(ProviderContinuation {
             identity: identity(
-                ProviderKind::OpenAiCompatible,
+                Protocol::OpenAiChatCompletions,
                 "provider-a",
                 "https://a.example/v1",
                 "model-a",
@@ -1017,7 +1017,7 @@ mod tests {
         transcript.push(turn);
 
         let identity = identity(
-            ProviderKind::OpenAiCompatible,
+            Protocol::OpenAiChatCompletions,
             "provider-a",
             "https://a.example/v1",
             "model-a",
@@ -1035,7 +1035,7 @@ mod tests {
         let mut turn = tool_turn();
         turn.steps[0].continuation = ContinuationUpdate::Replace(ProviderContinuation {
             identity: identity(
-                ProviderKind::OpenAiCompatible,
+                Protocol::OpenAiChatCompletions,
                 "provider-a",
                 "https://a.example/v1",
                 "model-a",
@@ -1054,7 +1054,7 @@ mod tests {
         )
         .expect("transcript parses back");
         let identity = identity(
-            ProviderKind::OpenAiCompatible,
+            Protocol::OpenAiChatCompletions,
             "provider-a",
             "https://a.example/v1",
             "model-a",
@@ -1080,7 +1080,7 @@ mod tests {
         .expect("older continuation state still parses");
 
         let identity = identity(
-            ProviderKind::OpenAiCompatible,
+            Protocol::OpenAiChatCompletions,
             "provider-a",
             "https://a.example/v1",
             "model-a",

@@ -55,8 +55,8 @@ impl OpenAiCompatConfig {
 
         Self {
             identity: ProviderIdentity {
-                kind: sujiu_core::ProviderKind::OpenAiCompatible,
-                provider_id: String::new(),
+                protocol: sujiu_core::Protocol::OpenAiChatCompletions,
+                endpoint_id: String::new(),
                 base_url: base_url.clone(),
                 model: model.clone(),
             },
@@ -732,8 +732,8 @@ mod tests {
         assert_eq!(continuation.response_id.as_deref(), Some("resp-1"));
         assert_eq!(continuation.identity.model, "model");
         assert_eq!(
-            continuation.identity.kind,
-            sujiu_core::ProviderKind::OpenAiCompatible
+            continuation.identity.protocol,
+            sujiu_core::Protocol::OpenAiChatCompletions
         );
         assert!(!continuation.support.is_chainable());
         assert!(!continuation.is_reusable_for(&continuation.identity));
@@ -784,8 +784,8 @@ mod tests {
             messages: vec![ModelMessage::user("hi")],
             continuation: Some(ProviderContinuation {
                 identity: ProviderIdentity {
-                    kind: sujiu_core::ProviderKind::Anthropic,
-                    provider_id: "other".into(),
+                    protocol: sujiu_core::Protocol::AnthropicMessages,
+                    endpoint_id: "other".into(),
                     base_url: "https://other.invalid".into(),
                     model: "other".into(),
                 },

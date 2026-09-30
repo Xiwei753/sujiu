@@ -4,6 +4,7 @@ pub mod context;
 pub mod negotiate;
 pub mod openai_compat;
 pub mod provider;
+pub mod responses;
 pub mod tool;
 pub mod types;
 
@@ -18,6 +19,7 @@ pub use negotiate::{
 };
 pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 pub use provider::{AiProvider, NullStreamSink, ProviderError, StreamSink};
+pub use responses::{OpenAiResponsesProvider, ResponsesConfig};
 pub use tool::{Tool, ToolError, ToolRegistry};
 pub use types::{
     messages_from_prompt_plan, AssistantTurn, ModelMessage, ModelRole, ProviderContinuation,
@@ -27,6 +29,6 @@ pub use types::{
 
 /// Provider data the runtime needs from the core.
 pub use sujiu_core::{
-    apply_reasoning_override, EndpointCapabilities, ModelListing, ProbeFailure, ProbeVerdict,
-    Protocol, ProviderConfig, ProviderKind,
+    apply_reasoning_override, EndpointCapabilities, EndpointConfig, ModelListing, ProbeFailure,
+    ProbeVerdict, Protocol,
 };

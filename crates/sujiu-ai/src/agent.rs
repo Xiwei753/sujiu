@@ -687,8 +687,8 @@ mod tests {
     #[tokio::test]
     async fn each_round_continues_from_the_previous_round() {
         let identity = ProviderIdentity {
-            kind: sujiu_core::ProviderKind::OpenAiCompatible,
-            provider_id: "primary".into(),
+            protocol: sujiu_core::Protocol::OpenAiChatCompletions,
+            endpoint_id: "primary".into(),
             base_url: "https://api.example.com/v1".into(),
             model: "example-1".into(),
         };
@@ -762,8 +762,8 @@ mod tests {
     #[tokio::test]
     async fn a_round_without_new_state_keeps_the_previous_handle() {
         let identity = ProviderIdentity {
-            kind: sujiu_core::ProviderKind::OpenAiCompatible,
-            provider_id: "primary".into(),
+            protocol: sujiu_core::Protocol::OpenAiChatCompletions,
+            endpoint_id: "primary".into(),
             base_url: "https://api.example.com/v1".into(),
             model: "example-1".into(),
         };
@@ -819,8 +819,8 @@ mod tests {
     #[tokio::test]
     async fn a_provider_can_drop_a_handle_it_no_longer_honours() {
         let identity = ProviderIdentity {
-            kind: sujiu_core::ProviderKind::OpenAiCompatible,
-            provider_id: "primary".into(),
+            protocol: sujiu_core::Protocol::OpenAiChatCompletions,
+            endpoint_id: "primary".into(),
             base_url: "https://api.example.com/v1".into(),
             model: "example-1".into(),
         };

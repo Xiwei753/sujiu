@@ -40,9 +40,12 @@ export interface CharacterSummary {
 export interface ModelSummary {
   id: string;
   name: string;
-  providerId: string;
-  providerName: string;
-  kind: string;
+  endpointId: string;
+  /**
+   * A word to show a person: the endpoint's own name, or a friendly one for an
+   * address we recognise. It decides no protocol and no capability.
+   */
+  endpointLabel: string;
   configured: boolean;
 }
 
@@ -76,13 +79,63 @@ export interface ConversationSnapshot {
   messages: Message[];
 }
 
-/** Only the OpenAI-compatible kind is implemented in the runtime today. */
+/**
+ * What an endpoint turned out to be able to do.
+ *
+ * The model list and the protocol are two independent questions reported as two
+ * independent answers: a gateway can list nothing and still speak the newest
+ * protocol, and it can list fifty models and speak only the oldest one. One of
+ * them failing says nothing about the other.
+ */
+export interface EndpointExploration {
+  /** Empty when no protocol could be established; read `reason` then. */
+  protocol: string;
+  /**
+   * The protocols confirmed to answer, best first. Normally a single entry:
+   * negotiation stops at the first protocol that works, because probing the rest
+   * would spend the user's own requests to learn about transports this build is
+   * not going to use.
+   */
+  protocols: string[];
+  /** Why negotiation stopped, when it stopped without settling on anything. */
+  reason?: string;
+  models: ModelDiscovery;
+}
+
+export interface ModelDiscovery {
+  /**
+   * One of `unknown`, `available`, `unavailable`, `permission_denied`,
+   * `rate_limited`, `unreachable`.
+   */
+  listing: string;
+  /** A sentence saying what this outcome does and does not mean. */
+  note: string;
+  /**
+   * Whether the user may type a model name instead of choosing from a list.
+   * True for every outcome: failing to enumerate models must never close the only
+   * door the user has left.
+   */
+  manualEntryAllowed: boolean;
+  models: ModelSummary[];
+}
+
+/**
+ * A description of an endpoint.
+ *
+ * There is no vendor field. A user supplies an address and a key, and Sujiu works
+ * out what is there, so naming a company here would be asking the user to decide
+ * something the runtime settles by asking the endpoint.
+ */
 export interface ProviderConfig {
   id: string;
   name: string;
-  kind: string;
   baseUrl: string;
-  model: string;
+  /**
+   * The chosen model, omitted before discovery has happened. Optional because
+   * exploration runs first: the user is shown what an endpoint offers and then
+   * picks a model out of it.
+   */
+  selectedModel?: string;
   maxTokens?: number;
   temperature?: number;
   /**
@@ -136,20 +189,31 @@ export const create: () => SujiuRuntimeBridge;
 export class SujiuRuntimeBridge {
   coreVersion(): string;
   /**
-   * Provider kinds the runtime can actually drive, e.g.
-   * `['openai_compatible']`. A settings screen must offer only these: a kind
-   * that is not listed is rejected by `configureProvider` and would fail every
-   * turn.
+   * The wire protocols the runtime speaks, best first, e.g.
+   * `['openai_responses', 'openai_chat_completions', 'anthropic_messages']`. This
+   * replaced a list of vendors: a settings screen used to be handed a list of
+   * companies to put in a dropdown, which asked the user to choose something
+   * negotiation decides by asking the endpoint. Nothing here is a model to
+   * offer, and no entry is a company.
    */
-  providerKinds(): string[];
+  supportedProtocols(): string[];
   listSessions(): SessionSummary[];
   listCharacters(query?: string): CharacterSummary[];
   listModels(): ModelSummary[];
   listContextSources(): ContextSource[];
   conversationState(sessionId: string): ConversationSnapshot;
   createSession(characterId: string): string;
-  /** Throws when `provider.kind` is not in `providerKinds()`. */
+  /** Throws when `provider.baseUrl` is blank. Nothing else is validated here. */
   configureProvider(provider: ProviderConfig): void;
+  /**
+   * Works out what an endpoint can do from an address and a key alone.
+   *
+   * No endpoint has to be saved, no model has to be chosen, and no vendor is
+   * named: this is the whole configuration flow, and the only thing left for the
+   * user to decide afterwards is the model. `apiKey` is passed through and not
+   * kept by the runtime.
+   */
+  discoverEndpoint(baseUrl: string, apiKey: string): EndpointExploration;
   /**
    * Runs a turn and reports every normalized event as JSON.
    *

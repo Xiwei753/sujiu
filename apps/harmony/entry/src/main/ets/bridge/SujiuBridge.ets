@@ -84,17 +84,61 @@ export interface TurnEvent {
 export type TurnEventListener = (event: TurnEvent) => void;
 
 /**
+ * What an endpoint turned out to be able to do.
+ *
+ * The model list and the protocol are two independent questions and are reported
+ * as two independent answers: a gateway can list nothing and still speak the
+ * newest protocol, and it can list fifty models and speak only the oldest one.
+ * One of them failing says nothing about the other.
+ */
+export interface EndpointExploration {
+  /** The protocol that was settled on, empty when none could be established. */
+  protocol: string;
+  /** The protocols confirmed to answer, best first. Normally a single entry. */
+  protocols: string[];
+  /** Why negotiation stopped, when it stopped without settling on anything. */
+  reason: string;
+  models: ModelDiscovery;
+}
+
+export interface ModelDiscovery {
+  /** One of: unknown, available, unavailable, permission_denied, rate_limited, unreachable. */
+  listing: string;
+  /** A sentence for the person, saying what this outcome does and does not mean. */
+  note: string;
+  /**
+   * Whether the user may type a model name instead of choosing from a list.
+   *
+   * This is true for every outcome. A gateway with no listing route is still
+   * perfectly able to chat, so failing to enumerate models must never close the
+   * only door the user has left.
+   */
+  manualEntryAllowed: boolean;
+  models: ModelSummary[];
+}
+
+/**
  * Provider settings the user configured.
  *
  * This is a description, never a credential: the api key travels separately,
  * per turn, and the runtime does not keep it.
+ *
+ * There is no vendor field. A user supplies an address and a key and Sujiu works
+ * out what is there, so naming a company here would be asking the user to decide
+ * something the runtime settles by asking the endpoint.
  */
 export interface ProviderDraft {
   id: string;
   name: string;
-  kind: string;
   baseUrl: string;
-  model: string;
+  /**
+   * The chosen model, or unset before discovery has happened.
+   *
+   * Optional because the order of work is: type an address and a key, find out
+   * what is there, and only then choose a model out of it. Requiring a model
+   * here would put the choice before the question it is chosen from.
+   */
+  selectedModel?: string;
   /**
    * Optional sampling overrides. Left out, the runtime applies its own defaults,
    * so a platform does not have to restate provider semantics to describe an
@@ -122,9 +166,23 @@ export interface SujiuBridge {
   conversationState(sessionId: string): Promise<ConversationSnapshot>;
   /** Creates an empty session so a brand new chat can send its first message. */
   createSession(characterId: string): Promise<SessionSummary>;
-  /** Provider kinds this runtime can actually drive, from the runtime itself. */
-  supportedProviderKinds(): Promise<string[]>;
-  /** Hands a provider description to the runtime. Rejects an unsupported kind. */
+  /**
+   * The wire protocols this runtime speaks, best first, from the runtime itself.
+   *
+   * This replaced a list of vendors. A frontend used to be handed a list of
+   * companies to put in a dropdown, which asked the user to choose something
+   * negotiation decides by asking the endpoint.
+   */
+  supportedProtocols(): Promise<string[]>;
+  /**
+   * Works out what an endpoint can do from an address and a key alone.
+   *
+   * Nothing is stored, and no model needs to be known: the settings screen asks
+   * this first, shows what came back, and the user then does the one thing only
+   * a person can do, which is pick a model.
+   */
+  discoverEndpoint(baseUrl: string, apiKey: string): Promise<EndpointExploration>;
+  /** Hands a provider description to the runtime. Rejects a blank address. */
   configureProvider(draft: ProviderDraft): Promise<void>;
   /**
    * Runs the next turn against `draft` instead of the saved provider, without

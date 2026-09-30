@@ -1,6 +1,7 @@
 import {
   CharacterSummary,
   ContextSourceSummary,
+  EndpointExploration,
   MessageRole,
   MessageSummary,
   ModelSummary,
@@ -135,11 +136,22 @@ export class ChatController {
    * controller asks the platform credential service for the key right before a
    * turn, so a secret never becomes presentation state and never reaches a view.
    */
-  providerKinds: string[] = [];
+  protocols: string[] = [];
   providerDraft: ProviderDraft | null = null;
   hasCredential: boolean = false;
   savingProvider: boolean = false;
   providerNoticeCode: string = '';
+
+  /**
+   * What the last exploration of an address and a key found, and whether one has
+   * been run. Held separately from the saved provider because exploration happens
+   * first: the user is choosing a model out of what came back, not out of what an
+   * earlier choice left behind.
+   */
+  exploringEndpoint: boolean = false;
+  explored: boolean = false;
+  exploration: EndpointExploration | null = null;
+  endpointNote: string = '';
 
   /**
    * Raised when the appearance mode changes. Presentation does not decide what
@@ -166,37 +178,72 @@ export class ChatController {
   /** Loads the provider the user saved, so the model list matches reality. */
   async loadProvider(): Promise<void> {
     try {
-      this.providerKinds = await this.bridge.supportedProviderKinds();
+      this.protocols = await this.bridge.supportedProtocols();
     } catch (error) {
-      this.providerKinds = [];
+      this.protocols = [];
     }
     this.hasCredential = this.credentials.hasSecret(CREDENTIAL_NAME);
   }
 
   /**
+   * Asks an endpoint what it can do, before anything has been saved.
+   *
+   * The order of work matters: the user types an address and a key, this reports
+   * which models are there and which protocol answers, and only then is a model
+   * chosen. Requiring a model first would put the choice in front of the question
+   * it is chosen from, and would make the endpoint unsaveable until the user had
+   * guessed the very answer the runtime could have looked up.
+   */
+  async exploreEndpoint(baseUrl: string, secret: string): Promise<void> {
+    if (this.exploringEndpoint || baseUrl.length === 0) {
+      return;
+    }
+    this.exploringEndpoint = true;
+    this.providerNoticeCode = '';
+    this.explored = false;
+    try {
+      const found: EndpointExploration = await this.bridge.discoverEndpoint(baseUrl, secret);
+      this.exploration = found;
+      this.models = found.models.models;
+      this.endpointNote = found.models.note;
+      // A typed model is the user's own words, so it is kept whatever the
+      // listing said. Losing it because a gateway has no listing route would
+      // punish the user for the gateway's shortcoming.
+      if (this.models.length === 0 && !found.models.manualEntryAllowed) {
+        this.providerNoticeCode = 'provider_no_models';
+      }
+      this.explored = true;
+    } catch (error) {
+      hilog.error(0x0000, 'Sujiu', 'discoverEndpoint failed: %{public}s', (error as Error).message);
+      this.fail('provider_not_saved', (error as Error).message);
+    } finally {
+      this.exploringEndpoint = false;
+    }
+  }
+
+  /**
    * Turns the three fields a settings form actually collects into a provider
-   * description. Everything else is decided here rather than by the view: the
-   * kind must be one the runtime advertised, and sampling parameters are
-   * provider semantics the runtime already defaults, so the form cannot set
-   * values that disagree with how a turn really runs.
+   * description. Everything else is decided here rather than by the view: no
+   * vendor is named, and sampling parameters are provider semantics the runtime
+   * already defaults, so the form cannot set values that disagree with how a
+   * turn really runs.
    */
   async saveProviderFromForm(baseUrl: string, model: string, secret: string): Promise<void> {
-    if (this.providerKinds.length === 0 || baseUrl.length === 0 || model.length === 0) {
+    if (baseUrl.length === 0 || model.length === 0) {
       return;
     }
     await this.saveProvider({
-      id: 'provider-default',
+      id: 'endpoint-default',
       name: model,
-      kind: this.providerKinds[0],
       baseUrl: baseUrl,
-      model: model
+      selectedModel: model
     } as ProviderDraft, secret);
   }
 
   /**
    * Saves a provider description and, when given, the api key. The description
-   * goes to the runtime; the key goes to the credential service. An unsupported
-   * kind fails here instead of at the first turn.
+   * goes to the runtime; the key goes to the credential service. A blank address
+   * fails here instead of at the first turn.
    */
   async saveProvider(draft: ProviderDraft, secret: string): Promise<void> {
     if (this.savingProvider) {

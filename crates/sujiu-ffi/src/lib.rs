@@ -17,7 +17,7 @@ use std::ffi::{c_char, c_void, CStr, CString};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sujiu_core::{Character, PromptCompiler, PromptPlan, ProviderConfig, Transcript};
+use sujiu_core::{Character, EndpointConfig, PromptCompiler, PromptPlan, Transcript};
 
 pub use sujiu_core::CORE_VERSION;
 
@@ -130,20 +130,22 @@ pub unsafe extern "C" fn sujiu_runtime_free(runtime: *mut SujiuRuntime) {
     }
 }
 
-/// Provider kinds this runtime can actually drive, as JSON strings.
+/// The wire protocols this runtime speaks, in the order it prefers them.
 ///
-/// A frontend calls this to decide which kinds its settings screen may offer.
-/// It is a list, not a boolean, because more than one kind can be supported
-/// without any frontend change.
+/// This replaces the old "provider kinds" list, which asked a settings screen
+/// to put a vendor in a dropdown. The user does not choose a protocol: the
+/// runtime negotiates one with the endpoint, and this list is only here so a
+/// screen can show what may end up being used.
 #[no_mangle]
 pub unsafe extern "C" fn sujiu_provider_kinds_json() -> *mut c_char {
-    into_c_string(ok_json(&SujiuRuntime::supported_provider_kinds()))
+    into_c_string(ok_json(&SujiuRuntime::supported_protocols()))
 }
 
-/// Configure the provider used by later turns.
+/// Configure the endpoint used by later turns.
 ///
-/// An unsupported kind is an error, not a silent store, so a settings screen
-/// cannot offer a provider that would fail every turn.
+/// There is no vendor to validate, because there is no vendor any more. What is
+/// rejected is an endpoint with nowhere to send a request, so a settings screen
+/// cannot store one that would fail every turn.
 #[no_mangle]
 pub unsafe extern "C" fn sujiu_configure_provider_json(
     runtime: *mut SujiuRuntime,
@@ -156,16 +158,16 @@ pub unsafe extern "C" fn sujiu_configure_provider_json(
         );
     };
 
-    let Some(config) = (unsafe { read_json::<ProviderConfig>(config, "config") }) else {
+    let Some(config) = (unsafe { read_json::<EndpointConfig>(config, "config") }) else {
         return into_c_string(
             serde_json::to_string(&ApiEnvelope::<()>::error(
-                "config is not valid provider JSON",
+                "config is not a valid endpoint JSON object",
             ))
             .expect("error envelope is serializable"),
         );
     };
 
-    if let Err(error) = runtime.set_provider_config(Some(config)) {
+    if let Err(error) = runtime.set_endpoint(Some(config)) {
         return into_c_string(
             serde_json::to_string(&ApiEnvelope::<()>::error(&error.to_string()))
                 .expect("error envelope is serializable"),
@@ -471,6 +473,7 @@ fn into_c_string(value: String) -> *mut c_char {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::events::TurnEventKind;
 
     fn runtime() -> SujiuRuntime {
         SujiuRuntime::new(seed::seed()).expect("runtime")
@@ -589,14 +592,13 @@ mod tests {
     fn a_turn_without_a_credential_does_not_reach_the_provider() {
         let runtime = runtime();
         runtime
-            .set_provider_config(Some(ProviderConfig {
+            .set_endpoint(Some(EndpointConfig {
                 id: "test".into(),
                 name: "Test".into(),
-                kind: sujiu_core::ProviderKind::OpenAiCompatible,
                 base_url: "https://example.invalid/v1".into(),
-                model: "test-model".into(),
+                selected_model: Some("test-model".into()),
                 credential_ref: None,
-                extra: serde_json::Map::new(),
+                overrides: serde_json::Map::new(),
             }))
             .expect("openai compatible is supported");
 
@@ -626,14 +628,13 @@ mod tests {
         assert!(runtime.models().is_empty());
 
         runtime
-            .set_provider_config(Some(ProviderConfig {
+            .set_endpoint(Some(EndpointConfig {
                 id: "test".into(),
                 name: "Test".into(),
-                kind: sujiu_core::ProviderKind::OpenAiCompatible,
                 base_url: "https://example.invalid/v1".into(),
-                model: "test-model".into(),
+                selected_model: Some("test-model".into()),
                 credential_ref: None,
-                extra: serde_json::Map::new(),
+                overrides: serde_json::Map::new(),
             }))
             .expect("openai compatible is supported");
 
@@ -644,31 +645,88 @@ mod tests {
     }
 
     #[test]
-    fn only_provider_kinds_the_runtime_can_drive_are_advertised() {
+    fn the_advertised_list_is_the_protocol_priority_and_not_a_vendor_list() {
+        let advertised = SujiuRuntime::supported_protocols();
+
         assert_eq!(
-            SujiuRuntime::supported_provider_kinds(),
-            vec!["openai_compatible".to_string()]
+            advertised,
+            vec![
+                "openai_responses".to_string(),
+                "openai_chat_completions".to_string(),
+                "anthropic_messages".to_string(),
+            ],
+            "a frontend is handed the order to try, not a list of vendors to put in a dropdown"
+        );
+        for label in &advertised {
+            assert!(
+                !label.contains("openai_compatible") && !label.contains("gemini"),
+                "{label} is a vendor a user used to be asked to pick"
+            );
+        }
+    }
+
+    #[test]
+    fn an_endpoint_is_whatever_the_user_says_it_is_and_only_a_blank_url_is_refused() {
+        let runtime = runtime();
+
+        // No vendor to validate any more: an address the runtime has never heard of
+        // is exactly the self-hosted gateway this is meant to support. Deciding
+        // whether it can be reached, and speaking what, is what the first turn's
+        // negotiation is for.
+        runtime
+            .set_endpoint(Some(EndpointConfig {
+                id: "test".into(),
+                name: "Test".into(),
+                base_url: "https://example.invalid".into(),
+                selected_model: Some("test-model".into()),
+                credential_ref: None,
+                overrides: serde_json::Map::new(),
+            }))
+            .expect("an unknown address is not a misconfiguration");
+
+        assert_eq!(runtime.models().len(), 1, "the model is still usable");
+
+        let error = runtime
+            .set_endpoint(Some(EndpointConfig {
+                id: "test".into(),
+                name: "Test".into(),
+                base_url: "   ".into(),
+                selected_model: Some("test-model".into()),
+                credential_ref: None,
+                overrides: serde_json::Map::new(),
+            }))
+            .expect_err("there is nothing to explore without an address");
+
+        assert!(
+            error.to_string().contains("no_provider_configured"),
+            "got {error}"
         );
     }
 
     #[test]
-    fn configuring_an_unsupported_provider_kind_is_rejected() {
+    fn an_endpoint_may_be_saved_before_a_model_is_chosen() {
         let runtime = runtime();
 
-        let error = runtime
-            .set_provider_config(Some(ProviderConfig {
+        runtime
+            .set_endpoint(Some(EndpointConfig {
                 id: "test".into(),
                 name: "Test".into(),
-                kind: sujiu_core::ProviderKind::Anthropic,
                 base_url: "https://example.invalid".into(),
-                model: "test-model".into(),
+                selected_model: None,
                 credential_ref: None,
-                extra: serde_json::Map::new(),
+                overrides: serde_json::Map::new(),
             }))
-            .expect_err("anthropic is not wired up");
+            .expect("discovery runs before a model is known, so saving must not need one");
 
-        assert!(error.to_string().contains("unsupported_provider_kind"));
-        assert!(runtime.models().is_empty());
+        assert!(
+            runtime.models().is_empty(),
+            "reporting nothing here says no model has been chosen yet, which is a different fact \
+             from reporting no endpoint"
+        );
+        assert!(
+            runtime.endpoint().is_some(),
+            "but the endpoint itself is known"
+        );
     }
 
     #[test]
@@ -685,35 +743,43 @@ mod tests {
         assert!(error.to_string().contains("appSystemPrompt"), "got {error}");
     }
 
+    /// An address that does not answer is a failed negotiation, and the failure is
+    /// reported as one. What it must never be is a turn that looks like it happened.
     #[test]
-    fn a_turn_for_an_unsupported_provider_kind_fails_instead_of_reaching_a_provider() {
+    fn a_turn_against_an_unreachable_endpoint_reports_the_negotiation_failure() {
         let runtime = runtime();
         let mut reporter = CollectingReporter::default();
         runtime.tokio.block_on(runtime.send_turn(
             SendTurnRequest {
                 session_id: "session-1".into(),
                 user_text: "hello".into(),
-                provider: Some(ProviderConfig {
+                provider: Some(EndpointConfig {
                     id: "test".into(),
                     name: "Test".into(),
-                    kind: sujiu_core::ProviderKind::Gemini,
                     base_url: "https://example.invalid".into(),
-                    model: "test-model".into(),
+                    selected_model: Some("test-model".into()),
                     credential_ref: None,
-                    extra: serde_json::Map::new(),
+                    overrides: serde_json::Map::new(),
                 }),
                 api_key: Some("secret".into()),
             },
             &mut reporter,
         ));
 
-        let text = reporter
-            .events
-            .last()
-            .and_then(|event| event.text.clone())
-            .unwrap();
+        let last = reporter.events.last().expect("a turn reports something");
+        let text = last.text.clone().unwrap_or_default();
 
-        assert!(text.contains("unsupported_provider_kind"), "got {text}");
+        assert!(
+            text.contains("nothing can be concluded"),
+            "a turn that reached no protocol has to say why, got {text}"
+        );
+        assert!(
+            !reporter
+                .events
+                .iter()
+                .any(|event| matches!(event.kind, TurnEventKind::TurnCompleted)),
+            "no protocol was ever spoken, so no answer can be claimed"
+        );
     }
 
     #[test]
@@ -739,15 +805,14 @@ mod tests {
         dir
     }
 
-    fn provider() -> ProviderConfig {
-        ProviderConfig {
+    fn endpoint() -> EndpointConfig {
+        EndpointConfig {
             id: "provider-default".into(),
             name: "Local".into(),
-            kind: sujiu_core::ProviderKind::OpenAiCompatible,
             base_url: "https://example.invalid/v1".into(),
-            model: "test-model".into(),
+            selected_model: Some("test-model".into()),
             credential_ref: None,
-            extra: serde_json::Map::new(),
+            overrides: serde_json::Map::new(),
         }
     }
 
@@ -762,9 +827,7 @@ mod tests {
             )
             .expect("runtime");
             let session = runtime.create_session(Some("character-lin"));
-            runtime
-                .set_provider_config(Some(provider()))
-                .expect("provider");
+            runtime.set_endpoint(Some(endpoint())).expect("provider");
             assert!(runtime.directory().is_some());
             assert_eq!(runtime.sessions().len(), 4, "seeded plus the new session");
             drop(runtime);
@@ -778,11 +841,11 @@ mod tests {
         .expect("runtime");
 
         assert_eq!(reopened.sessions().len(), 4, "the new session survived");
-        assert_eq!(reopened.models().len(), 1, "the provider survived");
-        // A model summary is identified by its model name, not by the provider.
+        assert_eq!(reopened.models().len(), 1, "the endpoint survived");
+        // A model summary is identified by its model name, not by who serves it.
         assert_eq!(reopened.models()[0].id, "test-model");
-        assert_eq!(reopened.models()[0].provider_id, "provider-default");
-        assert_eq!(reopened.models()[0].provider_name, "Local");
+        assert_eq!(reopened.models()[0].endpoint_id, "provider-default");
+        assert_eq!(reopened.models()[0].endpoint_label, "Local");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -914,14 +977,13 @@ mod tests {
         // Protecting only the call that discovered the document left the next
         // save free to destroy it, which is the same data loss one step later.
         runtime
-            .set_provider_config(Some(ProviderConfig {
+            .set_endpoint(Some(EndpointConfig {
                 id: "late".into(),
                 name: "Late".into(),
-                kind: sujiu_core::ProviderKind::OpenAiCompatible,
                 base_url: "https://late.example/v1".into(),
-                model: "late-model".into(),
+                selected_model: Some("late-model".into()),
                 credential_ref: None,
-                extra: serde_json::Map::new(),
+                overrides: serde_json::Map::new(),
             }))
             .expect("configuring a provider is still allowed");
         let created = runtime.create_session(None);
@@ -933,6 +995,94 @@ mod tests {
             std::fs::read_to_string(&file).expect("still there"),
             unreadable,
             "a later save must not reach a document the runtime could not read"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A version 2 document holds real transcripts; a version 1 one holds a
+    /// flat list of text messages. They are different shapes, and the
+    /// migration has to know which one it is looking at.
+    ///
+    /// This test exists because the migration briefly sent every older document
+    /// through the version 1 reader, which parsed a transcript without
+    /// complaint and returned a session with no turns in it. Nothing anywhere
+    /// said so: the file loaded, the store was writable, and the conversation
+    /// was simply gone.
+    #[test]
+    fn migrating_an_older_store_keeps_the_conversation_and_the_endpoint() {
+        let dir = scratch_dir("migrate-v2");
+        let file = dir.join("sujiu-runtime.json");
+        let stored = r#"{
+            "version": 2,
+            "characters": [],
+            "sessions": [{
+                "id": "session-precious",
+                "characterId": "character-lin",
+                "transcript": { "turns": [{
+                    "id": "turn-1",
+                    "user": "What is the frequency?",
+                    "steps": [
+                        { "text": null, "toolCalls": [{
+                            "id": "call-1",
+                            "name": "search_context",
+                            "arguments": {},
+                            "result": { "content": "The harbour answers on eleven minutes.",
+                                        "state": "completed" }
+                        }] },
+                        { "text": "Eleven minutes.", "toolCalls": [] }
+                    ]
+                }] }
+            }],
+            "sources": [],
+            "records": [],
+            "providerConfig": {
+                "id": "old-endpoint",
+                "name": "Old",
+                "kind": "open_ai_compatible",
+                "baseUrl": "https://old.example/v1",
+                "model": "old-model",
+                "credentialRef": null,
+                "extra": {}
+            }
+        }"#;
+        std::fs::write(&file, stored).expect("write the stored document");
+
+        let runtime = SujiuRuntime::new(crate::seed::seed()).expect("runtime");
+        runtime
+            .use_directory(dir.to_str().expect("utf-8"))
+            .expect("attach");
+
+        assert!(
+            runtime.storage_protection().is_none(),
+            "a document this build can read must not be protected"
+        );
+
+        let conversation = runtime
+            .conversation_state("session-precious")
+            .expect("the session survived the migration");
+        let text: Vec<&str> = conversation
+            .messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect();
+        assert!(
+            text.iter()
+                .any(|line| line.contains("What is the frequency?")),
+            "the user's turn was dropped by the migration: {text:?}"
+        );
+        assert!(
+            text.iter().any(|line| line.contains("Eleven minutes.")),
+            "the assistant's answer was dropped by the migration: {text:?}"
+        );
+
+        let endpoint = runtime.endpoint().expect("the endpoint was migrated too");
+        assert_eq!(endpoint.base_url, "https://old.example/v1");
+        assert_eq!(endpoint.selected_model.as_deref(), Some("old-model"));
+        assert_eq!(
+            endpoint.protocols(),
+            sujiu_core::Protocol::PRIORITY.to_vec(),
+            "the migration must not leave a vendor behind that would reorder them"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

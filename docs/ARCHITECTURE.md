@@ -285,13 +285,13 @@ Deferred discovery has a prompt-cache cost worth stating plainly: when a search 
 
 Usage is parsed from the stream (`stream_options.include_usage`), so cache behaviour is measurable rather than guesswork. Adapters must not require continuation state on the request: a wire format without a slot for it simply never receives it.
 
-Current concrete transport:
-
-- OpenAI-compatible Chat Completions
-
-Planned adapters reuse the same runtime:
+Current concrete transports:
 
 - OpenAI Responses
+- OpenAI-compatible Chat Completions
+
+Planned adapter reuses the same runtime:
+
 - Anthropic Messages
 - Gemini GenerateContent / function calling
 
@@ -299,7 +299,30 @@ Planned adapters reuse the same runtime:
 
 What an endpoint can do is the endpoint's business, so the runtime asks instead of guessing. Guessing by vendor or model name does not survive contact with the world: a gateway serves any model under any name, a service renames its models, and a name like `reasoner` or `r1` means nothing to the next one. So no capability is read out of a hostname or a model string anywhere in the runtime.
 
-`ProviderConfig` carries only what a user can honestly supply: a provider id, a base URL, a credential reference and a model. The provider layer then works out the rest.
+### The user does not choose a vendor or a protocol
+
+There is no vendor field in the configuration. A user supplies a base URL and a key, and Sujiu works out what is there. The only thing they are then asked to decide is the model, because that is the one choice a machine genuinely cannot make for them.
+
+A hostname may still produce a friendly word to show a person — `api.deepseek.com` shows as "DeepSeek", an unrecognised gateway shows as its hostname. That label decides no protocol, no capability, no continuation and no tool behaviour. A display label that changed how a conversation was spoken would be the same mistake wearing a different hat, so `EndpointConfig::display_label()` is the only place a host is allowed to say anything.
+
+`EndpointConfig` carries only what a user can honestly supply: an endpoint id, a base URL, a credential reference, a chosen model and optional advanced overrides. `selected_model` is optional because discovery runs before a model is known.
+
+### Discovery comes before the model
+
+The order of work is the other way round from what the configuration shape suggests:
+
+```text
+base URL + key
+  -> explore the endpoint
+       |- model listing: what is there, or why not, and a model may still be typed
+       `- protocol negotiation: which wire format answers, best first
+  -> the user picks a model, or types one
+  -> the endpoint and the chosen model are saved
+```
+
+Exploring an endpoint writes nothing to disk. A settings screen asks before anything is saved, so the list it shows is what the endpoint actually offered rather than what an earlier choice left behind. `discover_endpoint` needs nothing but an address and a key: requiring a saved configuration first would put the choice in front of the question it is chosen from.
+
+Model listing and protocol negotiation are independent. A gateway can list nothing and still speak Responses; a gateway can list fifty models and speak only the oldest chat protocol. One of them failing says nothing about the other.
 
 ### Priority
 
@@ -336,13 +359,33 @@ A "not found" phrase only counts when it names an endpoint, a path or a route. A
 
 ### The cache is an optimisation, not a fact
 
-Results are cached by provider id plus a normalized base URL (scheme and host lowercased, one trailing slash removed, the path left alone because `/v1` and `/v2` are different APIs). A cached answer is reused, a transient or inconclusive answer is never cached, and reconfiguring a provider forgets the whole cache: a provider id may have been re-pointed at a different endpoint under the same name, and a stale answer about an endpoint we no longer talk to is worse than no answer.
+Results are cached by endpoint id plus a normalized base URL (scheme and host lowercased, one trailing slash removed, the path left alone because `/v1` and `/v2` are different APIs). A cached answer is reused, a transient or inconclusive answer is never cached, and reconfiguring an endpoint forgets the whole cache: an endpoint id may have been re-pointed at a different address under the same name, and a stale answer about an endpoint we no longer talk to is worse than no answer.
 
-A manual override still exists for a gateway the probe cannot reason about, but it is an advanced compatibility fallback, not the normal path. A platform describes the provider; it does not know that one protocol requires an extension field on tool calls.
+A manual override still exists for a gateway the probe cannot reason about, but it is an advanced compatibility fallback, not the normal path. A platform describes the endpoint; it does not know that one protocol requires an extension field on tool calls.
 
 ### Model discovery is separate
 
-Listing models is a settings-screen convenience and never a step in a conversation. It tries the OpenAI-compatible listing first, then falls back, and every outcome — no listing endpoint, a key without permission, a rate limit, an unreachable host — still leaves manual model entry available. Not having a listing endpoint says nothing about whether the endpoint can chat, and the discovered list never influences which protocol the transcript uses.
+Listing models is a settings-screen convenience and never a step in a conversation. It is a real fallback chain rather than one request: the OpenAI-compatible listing, then the Anthropic-compatible shape (`x-api-key` plus a version header, because some gateways that speak only Anthropic reject `Authorization` outright and answer 401 to a request that should have been asked more politely), then a versioned host-root route for a base that is not already versioned. A response body is read as a list in whichever of the usual shapes it arrives, and the chain moves on only when a route is missing — a rejected key or a rate limit is an answer about this request, and trying the next strategy would spend the user's key again and still report the wrong reason.
+
+Every outcome — no listing endpoint, a key without permission, a rate limit, an unreachable host — still leaves manual model entry available. Not having a listing endpoint says nothing about whether the endpoint can chat, and the discovered list never influences which protocol the transcript uses.
+
+## The Responses adapter
+
+An endpoint that speaks Responses gets Responses, because that transport carries continuation, reasoning and tool state in its own shape rather than in fields bolted onto a chat message. Chat Completions can be *made* to carry all three, but only by inventing places to put them and hoping the endpoint understands.
+
+The differences are concrete:
+
+- the request is a list of `input` items, and one provider-neutral message can be several of them — an assistant message that both spoke and called tools becomes a `message` item plus one `function_call` item per call
+- a tool result is a `function_call_output` item keyed by the same `call_id`, which is what makes the pairing structural rather than conventional
+- tool definitions are flat (`{type, name, description, parameters}`) instead of nested under a `function` key
+- continuation is a real server-side handle: the completed response id is stored as a chainable `ProviderContinuation` and sent back as `previous_response_id`
+- reasoning is an output item the endpoint already holds, so it is deliberately **not** re-sent. Re-sending it as text would mean inventing a field the protocol does not have
+
+A native handle does not replace the transcript. It lets a request skip the part the endpoint already holds, so the handle records how many messages it covers and only that many are dropped from the next request. The transcript stays the portable base, and it is fully re-sent whenever the endpoint, protocol or model changes. A handle from a different identity, or a Chat Completions completion id — which is a label, not a handle — is never accepted as one.
+
+### What a stored document has to survive
+
+Persisted state is versioned and migrated, and the shape of a session has changed twice: a version 1 document stored conversations as a flat list of text messages, a version 2 document stored real transcripts, and a version 3 document keeps those transcripts and stores an endpoint instead of a provider config. The migration has to know which of those it is reading, because a version 2 document read through the version 1 reader parses without complaint and returns a session with no turns — the file loads, the store is writable, and the conversation is simply gone with nothing saying so.
 
 ## Dependency direction
 

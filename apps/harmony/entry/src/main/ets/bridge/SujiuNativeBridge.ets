@@ -12,7 +12,7 @@
 import sujiu from 'libsujiu_napi.so';
 import { SujiuBridge, SessionSummary, CharacterSummary, ModelSummary, ContextSourceSummary,
   ConversationSnapshot, MessageSummary, MessageRole, TurnEvent, TurnEventKind,
-  TurnEventListener, ProviderDraft } from './SujiuBridge';
+  TurnEventListener, ProviderDraft, EndpointExploration, ModelDiscovery } from './SujiuBridge';
 
 interface NativeSession {
   id: string;
@@ -33,9 +33,12 @@ interface NativeCharacter {
 interface NativeModel {
   id: string;
   name: string;
-  providerId: string;
-  providerName: string;
-  kind: string;
+  endpointId: string;
+  /**
+   * A word to show a person. The endpoint's own name, or a friendly one for an
+   * address we recognise. It decides nothing.
+   */
+  endpointLabel: string;
   configured: boolean;
 }
 
@@ -72,12 +75,25 @@ interface NativeSnapshot {
 interface NativeProviderConfig {
   id: string;
   name: string;
-  kind: string;
   baseUrl: string;
-  model: string;
+  selectedModel?: string;
   maxTokens?: number;
   temperature?: number;
   replaysAssistantReasoning?: boolean;
+}
+
+interface NativeModelDiscovery {
+  listing: string;
+  note: string;
+  manualEntryAllowed: boolean;
+  models: NativeModel[];
+}
+
+interface NativeEndpointExploration {
+  protocol: string;
+  protocols: string[];
+  reason?: string;
+  models: NativeModelDiscovery;
 }
 
 interface NativeTurnRequest {
@@ -97,7 +113,7 @@ interface NativeTurnEvent {
 
 interface NativeRuntime {
   coreVersion(): string;
-  providerKinds(): string[];
+  supportedProtocols(): string[];
   listSessions(): NativeSession[];
   listCharacters(query: string): NativeCharacter[];
   listModels(): NativeModel[];
@@ -107,8 +123,13 @@ interface NativeRuntime {
   cancelTurn(): void;
   useDataDirectory(directory: string): Promise<void>;
   dataDirectory(): string | null;
-  /** Applies a provider description. Rejects when the kind is not supported. */
+  /** Applies a provider description. Rejects when the address is blank. */
   configureProvider(draft: NativeProviderConfig): Promise<void>;
+  /**
+   * Asks an endpoint what it can do. Needs an address and a key and nothing
+   * else: no stored endpoint, no chosen model, no vendor named.
+   */
+  discoverEndpoint(baseUrl: string, apiKey: string): NativeEndpointExploration;
   /**
    * Runs a turn and reports each event as JSON.
    *
@@ -184,13 +205,34 @@ function toNativeProvider(draft: ProviderDraft): NativeProviderConfig {
   return {
     id: draft.id,
     name: draft.name,
-    kind: draft.kind,
     baseUrl: draft.baseUrl,
-    model: draft.model,
+    selectedModel: draft.selectedModel,
     maxTokens: draft.maxTokens,
     temperature: draft.temperature,
     replaysAssistantReasoning: draft.replaysAssistantReasoning
   } as NativeProviderConfig;
+}
+
+function toModelDiscovery(value: NativeModelDiscovery): ModelDiscovery {
+  const models: ModelSummary[] = [];
+  for (let i = 0; i < value.models.length; i++) {
+    models.push(toModel(value.models[i]));
+  }
+  return {
+    listing: value.listing,
+    note: value.note,
+    manualEntryAllowed: value.manualEntryAllowed,
+    models: models
+  } as ModelDiscovery;
+}
+
+function toEndpointExploration(value: NativeEndpointExploration): EndpointExploration {
+  return {
+    protocol: value.protocol,
+    protocols: value.protocols,
+    reason: value.reason === undefined ? '' : value.reason,
+    models: toModelDiscovery(value.models)
+  } as EndpointExploration;
 }
 
 function toSession(value: NativeSession): SessionSummary {
@@ -213,7 +255,7 @@ function toModel(value: NativeModel): ModelSummary {
   return {
     id: value.id,
     name: value.name,
-    providerLabel: `${value.providerName} · ${value.kind}`,
+    providerLabel: value.endpointLabel,
     contextLabel: state
   } as ModelSummary;
 }
@@ -478,14 +520,32 @@ export class SujiuNativeBridge implements SujiuBridge {
     }
   }
 
-  /** Provider kinds come from the runtime, not from a hardcoded list here. */
-  supportedProviderKinds(): Promise<string[]> {
-    return Promise.resolve(this.runtime.providerKinds());
+  /** Wire protocols this runtime speaks, best first, from the runtime itself. */
+  supportedProtocols(): Promise<string[]> {
+    return Promise.resolve(this.runtime.supportedProtocols());
+  }
+
+  /**
+   * Works out what an endpoint can do from an address and a key alone.
+   *
+   * The key is passed straight through and not kept, and nothing here is
+   * written down: the settings screen asks this before anything is saved, so
+   * the model list it shows is what the endpoint actually offered rather than
+   * what an earlier choice happened to leave behind.
+   */
+  discoverEndpoint(baseUrl: string, apiKey: string): Promise<EndpointExploration> {
+    try {
+      return Promise.resolve(
+        toEndpointExploration(this.runtime.discoverEndpoint(baseUrl, apiKey))
+      );
+    } catch (error) {
+      return Promise.reject(new Error(`discover_endpoint failed: ${(error as Error).message}`));
+    }
   }
 
   /**
    * Hands the provider description to the runtime, so the model list reflects
-   * the real configuration. A rejected kind surfaces as a rejected promise.
+   * the real configuration. A blank address surfaces as a rejected promise.
    */
   configureProvider(draft: ProviderDraft): Promise<void> {
     return this.runtime

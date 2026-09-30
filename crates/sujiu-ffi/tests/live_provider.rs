@@ -17,7 +17,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use sujiu_core::{ProviderConfig, ProviderKind};
+use sujiu_core::EndpointConfig;
 use sujiu_ffi::events::{TurnEvent, TurnEventKind, TurnEventReporter};
 use sujiu_ffi::runtime::{SendTurnRequest, SujiuRuntime};
 
@@ -68,14 +68,13 @@ fn a_real_turn_streams_back_from_a_live_provider() {
 
     let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
     runtime
-        .set_provider_config(Some(ProviderConfig {
+        .set_endpoint(Some(EndpointConfig {
             id: "live".to_string(),
             name: "Live test".to_string(),
-            kind: ProviderKind::OpenAiCompatible,
             base_url,
-            model: model.clone(),
+            selected_model: Some(model.clone()),
             credential_ref: None,
-            extra: Default::default(),
+            overrides: Default::default(),
         }))
         .expect("provider config");
 

@@ -15,7 +15,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use serde_json::{json, Value};
-use sujiu_core::{ProviderConfig, ProviderKind};
+use sujiu_core::EndpointConfig;
 use sujiu_ffi::events::{TurnEvent, TurnEventKind, TurnEventReporter};
 use sujiu_ffi::runtime::{SendTurnRequest, SujiuRuntime};
 
@@ -46,6 +46,18 @@ fn is_capability_probe(request: &Value) -> bool {
         })
 }
 
+/// Whether a request is the runtime probing for the newer Responses transport.
+///
+/// Negotiation tries that format first, so a scripted server has to be able to
+/// say it does not have it. This mock serves the older chat protocol, and
+/// answering "not here" is what makes the negotiation fall through to it —
+/// which is the whole point of the priority order being data, not a hardcoded
+/// preference. Recognising it by shape keeps that honest: the runtime does not
+/// announce which format it is asking about.
+fn is_responses_probe(request: &Value) -> bool {
+    request["max_output_tokens"].is_number() && request["input"] == json!("ping")
+}
+
 /// Answers a capability probe with the least a completion can be.
 fn write_probe_response(stream: &mut TcpStream) {
     let body = json!({
@@ -57,6 +69,20 @@ fn write_probe_response(stream: &mut TcpStream) {
     let _ = write!(
         stream,
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+}
+
+/// A plain "that route is not here", which is the only answer that may move
+/// negotiation on to the next format.
+fn write_missing_route(stream: &mut TcpStream) {
+    let body = json!({"error": {"message": "unknown endpoint", "type": "invalid_request_error"}})
+        .to_string();
+
+    let _ = write!(
+        stream,
+        "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -83,6 +109,12 @@ impl MockProvider {
                     let _ = probe_tx.send(value);
                     let mut stream = stream;
                     write_probe_response(&mut stream);
+                    continue;
+                }
+                if is_responses_probe(&value) {
+                    let _ = probe_tx.send(value);
+                    let mut stream = stream;
+                    write_missing_route(&mut stream);
                     continue;
                 }
 
@@ -206,14 +238,13 @@ impl TurnEventReporter for Recorder {
 fn runtime_for(base_url: &str) -> SujiuRuntime {
     let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
     runtime
-        .set_provider_config(Some(ProviderConfig {
+        .set_endpoint(Some(EndpointConfig {
             id: "mock".to_string(),
             name: "Mock".to_string(),
-            kind: ProviderKind::OpenAiCompatible,
             base_url: base_url.to_string(),
-            model: "mock-model".to_string(),
+            selected_model: Some("mock-model".to_string()),
             credential_ref: None,
-            extra: Default::default(),
+            overrides: Default::default(),
         }))
         .expect("provider config");
     runtime
@@ -405,23 +436,39 @@ fn a_streamed_turn_negotiates_before_it_streams() {
         &mut sink,
     );
 
-    let probe = provider
+    // Negotiation walks the fixed priority, so the newer transport is asked
+    // about first and this endpoint's "not here" is what moves it on. Both
+    // probes are minimal requests, and neither replays the session.
+    let first = provider
         .next_probe()
-        .expect("the turn should have negotiated the protocol first");
+        .expect("the turn should have asked about the newest protocol first");
     assert!(
-        is_capability_probe(&probe),
-        "a capability probe is a minimal request, not a conversation round: {probe:?}"
+        is_responses_probe(&first),
+        "the priority puts Responses first, because it is the transport that carries continuation \
+         and tool state natively: {first:?}"
     );
-    assert_eq!(
-        probe["messages"].as_array().map(Vec::len),
-        Some(1),
-        "a probe does not replay the session: {probe:?}"
+    assert!(
+        first["input"] == json!("ping"),
+        "a probe does not replay the session: {first:?}"
     );
 
-    // The conversation is a separate request that arrives after the probe.
+    let second = provider
+        .next_probe()
+        .expect("a missing route has to be followed by the next protocol");
+    assert!(
+        is_capability_probe(&second),
+        "the second probe is the one this endpoint can actually serve: {second:?}"
+    );
+    assert_eq!(
+        second["messages"].as_array().map(Vec::len),
+        Some(1),
+        "a probe does not replay the session: {second:?}"
+    );
+
+    // The conversation is a separate request that arrives after the probes.
     let turn = provider.next_request();
     assert!(
-        !is_capability_probe(&turn),
+        !is_capability_probe(&turn) && !is_responses_probe(&turn),
         "the conversation must not be a probe: {turn:?}"
     );
     assert_eq!(turn["stream"], serde_json::json!(true));

@@ -15,7 +15,7 @@ use std::sync::mpsc;
 use std::thread;
 
 use serde_json::{json, Value};
-use sujiu_core::{ProviderConfig, ProviderKind};
+use sujiu_core::EndpointConfig;
 use sujiu_ffi::events::{TurnEvent, TurnEventKind, TurnEventReporter};
 use sujiu_ffi::runtime::{SendTurnRequest, SujiuRuntime};
 
@@ -66,6 +66,15 @@ fn is_capability_probe(request: &Value) -> bool {
         })
 }
 
+/// Whether a request is the runtime probing for the newer Responses transport.
+///
+/// Negotiation tries that format first, so a scripted server has to be able to
+/// say it does not have it. This mock serves the older chat protocol, and
+/// answering "not here" is what makes the negotiation fall through to it.
+fn is_responses_probe(request: &Value) -> bool {
+    request["max_output_tokens"].is_number() && request["input"] == json!("ping")
+}
+
 /// Answers a capability probe with the least a completion can be.
 fn write_probe_response(stream: &mut TcpStream) {
     let body = json!({
@@ -77,6 +86,20 @@ fn write_probe_response(stream: &mut TcpStream) {
     let _ = write!(
         stream,
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+}
+
+/// A plain "that route is not here", which is the only answer that may move
+/// negotiation on to the next format.
+fn write_missing_route(stream: &mut TcpStream) {
+    let body = json!({"error": {"message": "unknown endpoint", "type": "invalid_request_error"}})
+        .to_string();
+
+    let _ = write!(
+        stream,
+        "HTTP/1.1 404 Not Found\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
         body.len(),
         body
     );
@@ -107,6 +130,12 @@ impl ScriptedProvider {
                     let _ = probe_tx.send(value);
                     let mut stream = stream;
                     write_probe_response(&mut stream);
+                    continue;
+                }
+                if is_responses_probe(&value) {
+                    let _ = probe_tx.send(value);
+                    let mut stream = stream;
+                    write_missing_route(&mut stream);
                     continue;
                 }
 
@@ -326,14 +355,13 @@ fn runtime_for(base_url: &str, model: &str) -> SujiuRuntime {
 
 fn configure(runtime: &SujiuRuntime, base_url: &str, model: &str) {
     runtime
-        .set_provider_config(Some(ProviderConfig {
+        .set_endpoint(Some(EndpointConfig {
             id: "mock".to_string(),
             name: "Mock".to_string(),
-            kind: ProviderKind::OpenAiCompatible,
             base_url: base_url.to_string(),
-            model: model.to_string(),
+            selected_model: Some(model.to_string()),
             credential_ref: None,
-            extra: Default::default(),
+            overrides: Default::default(),
         }))
         .expect("provider config");
 }
@@ -346,14 +374,13 @@ fn configure(runtime: &SujiuRuntime, base_url: &str, model: &str) {
 /// it, and a known endpoint gets the same answer without it.
 fn configure_thinking(runtime: &SujiuRuntime, base_url: &str, model: &str) {
     runtime
-        .set_provider_config(Some(ProviderConfig {
+        .set_endpoint(Some(EndpointConfig {
             id: "mock".to_string(),
             name: "Mock".to_string(),
-            kind: ProviderKind::OpenAiCompatible,
             base_url: base_url.to_string(),
-            model: model.to_string(),
+            selected_model: Some(model.to_string()),
             credential_ref: None,
-            extra: serde_json::from_value(json!({
+            overrides: serde_json::from_value(json!({
                 sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY: true
             }))
             .expect("the extra map is a serde value"),
@@ -1159,14 +1186,13 @@ fn a_saved_capability_reaches_the_adapter_through_an_ordinary_turn() {
         SendTurnRequest {
             session_id: session.clone(),
             user_text: "How long between compressor cycles?".to_string(),
-            provider: Some(ProviderConfig {
+            provider: Some(EndpointConfig {
                 id: "mock".to_string(),
                 name: "Mock".to_string(),
-                kind: ProviderKind::OpenAiCompatible,
                 base_url: provider.base_url(),
-                model: "deepseek-chat".to_string(),
+                selected_model: Some("deepseek-chat".to_string()),
                 credential_ref: None,
-                extra: Default::default(),
+                overrides: Default::default(),
             }),
             api_key: Some("test-key".to_string()),
         },
@@ -1185,14 +1211,24 @@ fn a_saved_capability_reaches_the_adapter_through_an_ordinary_turn() {
         "a turn that did not restate the capability must not lose it: {second_round:?}"
     );
 
-    // Negotiation asked the endpoint what it speaks before that first round,
-    // and that request is a minimal probe rather than a conversation turn.
-    let probe = provider
+    // Negotiation walked the protocol priority before that first round, and
+    // every request in the walk is a minimal probe rather than a conversation
+    // round. The first one is the newer transport, which this endpoint refuses,
+    // and the second is the chat protocol it actually serves.
+    let first = provider
         .next_probe()
         .expect("the first turn negotiates the protocol first");
     assert!(
-        is_capability_probe(&probe),
-        "the probe is a minimal request, not a conversation round: {probe:?}"
+        is_responses_probe(&first),
+        "Responses is asked about first because it carries continuation and tool state natively: \
+         {first:?}"
+    );
+    let second = provider
+        .next_probe()
+        .expect("a refused route is followed by the next protocol");
+    assert!(
+        is_capability_probe(&second),
+        "the probe is a minimal request, not a conversation round: {second:?}"
     );
 
     // And the capability is still there for the turns after it.

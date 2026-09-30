@@ -190,6 +190,10 @@ the next format: a rejected key, a rate limit and a service error are all
 temporary refusals, and treating one of them as "this endpoint cannot speak"
 would leave a working provider permanently misclassified.
 
+A user configures an endpoint, not a vendor. They supply a base URL and a key,
+the runtime asks what is there, and the only choice left for them is the model.
+A hostname may produce a friendly word to show a person and decides nothing else.
+
 A compaction summary is part of the world-book keyword scan. The model reads it,
 so the scan has to see it too — otherwise compacting a long conversation would
 quietly stop triggering the lore it used to trigger.

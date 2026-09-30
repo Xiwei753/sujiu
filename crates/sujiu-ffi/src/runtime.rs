@@ -13,12 +13,13 @@ use serde_json::Value;
 use sujiu_ai::{
     register_standard_context_tools, AgentConfig, AgentOutcome, AgentRuntime, AgentStop,
     CancelToken, ContextStore, ContextStoreError, InMemoryContextStore, OpenAiCompatConfig,
-    OpenAiCompatProvider, ProviderContinuation, ToolRegistry,
+    OpenAiCompatProvider, OpenAiResponsesProvider, ProviderContinuation, ResponsesConfig,
+    ToolRegistry,
 };
 use sujiu_core::{
     apply_reasoning_override, Character, ChatMessage, ChatRole, CompactionInput, ContextKind,
-    ContextRecord, ContextSource, EndpointCapabilities, ModelListing, PromptCompiler,
-    ProviderConfig, ProviderIdentity, ProviderKind, Session, Transcript, Turn,
+    ContextRecord, ContextSource, EndpointCapabilities, EndpointConfig, ModelListing,
+    PromptCompiler, Protocol, ProviderIdentity, Session, Transcript, Turn,
     DEFAULT_APP_SYSTEM_PROMPT,
 };
 
@@ -37,7 +38,6 @@ const MAX_TRANSCRIPT_MESSAGES: usize = 200;
 ///
 /// A frontend must only offer these. Accepting a kind it cannot serve would let
 /// a user configure a provider and then fail every turn.
-const SUPPORTED_PROVIDER_KINDS: &[ProviderKind] = &[ProviderKind::OpenAiCompatible];
 
 /// Sampling defaults for a turn, overridable per provider through `extra`.
 const DEFAULT_MAX_TOKENS: u32 = 1024;
@@ -77,9 +77,12 @@ pub struct CharacterSummary {
 pub struct ModelSummary {
     pub id: String,
     pub name: String,
-    pub provider_id: String,
-    pub provider_name: String,
-    pub kind: String,
+    pub endpoint_id: String,
+    /// A word to show a person, derived from the address. It says who answers
+    /// and nothing else: no decision anywhere reads it, because a display label
+    /// that changed how a conversation was spoken would be the same mistake
+    /// wearing a different hat.
+    pub endpoint_label: String,
     pub configured: bool,
 }
 
@@ -108,6 +111,30 @@ impl ModelDiscovery {
     }
 }
 
+/// Everything an unsaved endpoint turned out to be.
+///
+/// The model list and the protocol are two independent questions, and they
+/// are reported as two independent answers: a gateway can list nothing and
+/// still speak Responses, and it can list fifty models and speak only the
+/// oldest chat protocol. One of them failing says nothing about the other.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EndpointExploration {
+    /// The protocol negotiation settled on, or empty when it settled on
+    /// nothing and `reason` says why.
+    pub protocol: String,
+    /// The protocols this endpoint was confirmed to answer for, best first.
+    ///
+    /// Negotiation stops at the first protocol that works, because probing the
+    /// rest would spend the user's own requests to learn about transports this
+    /// build is not going to use. So this is normally a single entry: it says
+    /// what was established, not what might also be there.
+    pub protocols: Vec<String>,
+    /// Why negotiation concluded what it did, when it is not a clean answer.
+    pub reason: Option<String>,
+    pub models: ModelDiscovery,
+}
+
 fn listing_label(listing: ModelListing) -> String {
     match listing {
         ModelListing::Unknown => "unknown",
@@ -125,7 +152,7 @@ fn listing_label(listing: ModelListing) -> String {
 /// The distinction matters because these look alarming and are not: an endpoint
 /// without a model list is usually a gateway, and a key without listing
 /// permission is usually scoped to chat. Both can still hold a conversation.
-fn listing_note(listing: ModelListing, config: &ProviderConfig) -> String {
+fn listing_note(listing: ModelListing, config: &EndpointConfig) -> String {
     let host = config.base_url.trim();
     match listing {
         ModelListing::Unknown => format!(
@@ -199,7 +226,7 @@ pub struct SendTurnRequest {
     pub user_text: String,
     /// Provider to use for this turn, overriding the stored configuration.
     #[serde(default)]
-    pub provider: Option<ProviderConfig>,
+    pub provider: Option<EndpointConfig>,
     /// Credential for this turn. Supplied by the platform secret store per
     /// call and never persisted by the runtime.
     #[serde(default)]
@@ -210,7 +237,7 @@ pub struct SendTurnRequest {
 pub enum TurnError {
     SessionNotFound(String),
     NoProviderConfigured,
-    UnsupportedProviderKind(String),
+    NoUsableProtocol(String),
     MissingCredential,
     ContextStore(ContextStoreError),
 }
@@ -222,8 +249,8 @@ impl std::fmt::Display for TurnError {
             Self::NoProviderConfigured => {
                 write!(formatter, "no_provider_configured")
             }
-            Self::UnsupportedProviderKind(kind) => {
-                write!(formatter, "unsupported_provider_kind: {kind}")
+            Self::NoUsableProtocol(reason) => {
+                write!(formatter, "no_usable_protocol: {reason}")
             }
             Self::MissingCredential => write!(formatter, "missing_credential"),
             Self::ContextStore(error) => write!(formatter, "{error}"),
@@ -240,7 +267,7 @@ struct Inner {
     catalog: Catalog,
     store: Arc<InMemoryContextStore>,
     tools: Arc<ToolRegistry>,
-    provider_config: Option<ProviderConfig>,
+    endpoint: Option<EndpointConfig>,
     storage_state: StorageState,
 }
 
@@ -293,7 +320,7 @@ struct Snapshot {
     sessions: Vec<Session>,
     sources: Vec<ContextSource>,
     records: Vec<ContextRecord>,
-    provider_config: Option<ProviderConfig>,
+    endpoint: Option<EndpointConfig>,
 }
 
 /// A session as version 1 stored it: a flat list of text messages.
@@ -360,6 +387,43 @@ impl LegacySession {
     }
 }
 
+/// The endpoint as version 2 of the document wrote it.
+///
+/// It had a vendor `kind` and a `model`. Both are read here and dropped on the
+/// way in: the kind never decided anything worth keeping, and the model becomes
+/// the selected one. Reading it through `EndpointConfig` instead would fail,
+/// because a v2 file is exactly the kind of document this build has to keep
+/// opening without losing the user's sessions.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyEndpointConfig {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    credential_ref: Option<String>,
+    #[serde(default)]
+    extra: serde_json::Map<String, Value>,
+}
+
+impl LegacyEndpointConfig {
+    fn into_endpoint(self) -> EndpointConfig {
+        EndpointConfig {
+            id: self.id,
+            name: self.name,
+            base_url: self.base_url,
+            selected_model: (!self.model.trim().is_empty()).then_some(self.model),
+            credential_ref: self.credential_ref,
+            overrides: self.extra,
+        }
+    }
+}
+
 /// Version 1 of the document, read only to migrate it.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -373,27 +437,76 @@ struct LegacySnapshot {
     #[serde(default)]
     records: Vec<ContextRecord>,
     #[serde(default)]
-    provider_config: Option<ProviderConfig>,
+    provider_config: Option<LegacyEndpointConfig>,
+}
+
+/// Version 2 of the document.
+///
+/// Only the endpoint moved: a version 2 session was already a real transcript,
+/// with the tool calls and results the older flat shape had nowhere to put. So
+/// its sessions are read as they are. Running them through the version 1
+/// migration instead would silently drop every turn, and the unreadable
+/// continuation event inside one of those turns would be dropped with it,
+/// which is how a store can lose a conversation without ever saying so.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Version2Snapshot {
+    #[serde(default)]
+    characters: Vec<Character>,
+    #[serde(default)]
+    sessions: Vec<Session>,
+    #[serde(default)]
+    sources: Vec<ContextSource>,
+    #[serde(default)]
+    records: Vec<ContextRecord>,
+    #[serde(default)]
+    provider_config: Option<LegacyEndpointConfig>,
+}
+
+impl Version2Snapshot {
+    fn into_snapshot(self) -> Snapshot {
+        Snapshot {
+            version: SNAPSHOT_VERSION,
+            characters: self.characters,
+            sessions: self.sessions,
+            sources: self.sources,
+            records: self.records,
+            endpoint: self
+                .provider_config
+                .map(LegacyEndpointConfig::into_endpoint),
+        }
+    }
 }
 
 /// Read a persisted document, migrating an older shape when necessary.
 fn parse_snapshot(document: &str) -> Option<Snapshot> {
     let value: Value = serde_json::from_str(document).ok()?;
+    let version = value.get("version").and_then(Value::as_u64).unwrap_or(1);
 
-    if value.get("version").and_then(Value::as_u64).unwrap_or(1) < SNAPSHOT_VERSION as u64 {
-        let legacy: LegacySnapshot = serde_json::from_value(value).ok()?;
-        return Some(Snapshot {
-            version: SNAPSHOT_VERSION,
-            characters: legacy.characters,
-            sessions: legacy
-                .sessions
-                .into_iter()
-                .map(LegacySession::into_session)
-                .collect(),
-            sources: legacy.sources,
-            records: legacy.records,
-            provider_config: legacy.provider_config,
-        });
+    // A version 2 document wrote its endpoint under `providerConfig`, and a
+    // version 3 one writes `endpoint`. Reading a v2 file as v3 would find no
+    // endpoint at all and quietly look like a fresh install.
+    if version < 3 {
+        if version < 2 {
+            let legacy: LegacySnapshot = serde_json::from_value(value).ok()?;
+            return Some(Snapshot {
+                version: SNAPSHOT_VERSION,
+                characters: legacy.characters,
+                sessions: legacy
+                    .sessions
+                    .into_iter()
+                    .map(LegacySession::into_session)
+                    .collect(),
+                sources: legacy.sources,
+                records: legacy.records,
+                endpoint: legacy
+                    .provider_config
+                    .map(LegacyEndpointConfig::into_endpoint),
+            });
+        }
+
+        let version2: Version2Snapshot = serde_json::from_value(value).ok()?;
+        return Some(version2.into_snapshot());
     }
 
     serde_json::from_value(value).ok()
@@ -413,7 +526,7 @@ fn next_session_id(sessions: &[Session]) -> String {
 
 /// Document name the runtime keeps its state in.
 const SNAPSHOT_FILE: &str = "sujiu-runtime.json";
-const SNAPSHOT_VERSION: u32 = 2;
+const SNAPSHOT_VERSION: u32 = 3;
 
 /// The stateful runtime exported across the FFI boundary.
 pub struct SujiuRuntime {
@@ -497,16 +610,16 @@ impl SujiuRuntime {
             },
         };
 
-        let provider_config = snapshot
+        let endpoint = snapshot
             .as_ref()
-            .and_then(|snapshot| snapshot.provider_config.clone());
+            .and_then(|snapshot| snapshot.endpoint.clone());
 
         let runtime = Self {
             inner: Mutex::new(Inner {
                 catalog,
                 store,
                 tools: Arc::new(tools),
-                provider_config,
+                endpoint,
                 storage_state,
             }),
             cancel: Mutex::new(None),
@@ -542,7 +655,7 @@ impl SujiuRuntime {
                         characters: snapshot.characters,
                         sessions: snapshot.sessions,
                     };
-                    inner.provider_config = snapshot.provider_config;
+                    inner.endpoint = snapshot.endpoint;
                     inner.store.clear();
                     for source in snapshot.sources {
                         inner.store.add_source(source);
@@ -627,7 +740,7 @@ impl SujiuRuntime {
                 sessions: inner.catalog.sessions.clone(),
                 sources,
                 records,
-                provider_config: inner.provider_config.clone(),
+                endpoint: inner.endpoint.clone(),
             }
         };
 
@@ -636,31 +749,36 @@ impl SujiuRuntime {
         }
     }
 
-    pub fn provider_config(&self) -> Option<ProviderConfig> {
-        self.inner.lock().unwrap().provider_config.clone()
+    pub fn endpoint(&self) -> Option<EndpointConfig> {
+        self.inner.lock().unwrap().endpoint.clone()
     }
 
-    /// Provider kinds a frontend may offer, in a stable order.
-    pub fn supported_provider_kinds() -> Vec<String> {
-        SUPPORTED_PROVIDER_KINDS
+    /// The wire formats this build speaks, in the order it prefers them.
+    ///
+    /// This replaces the old "provider kinds" list. A frontend used to be
+    /// handed a list of vendors to put in a dropdown, which asked the user to
+    /// decide something negotiation decides by asking the endpoint. Nothing
+    /// needs choosing here; the list is only useful for showing what the
+    /// runtime may end up using.
+    pub fn supported_protocols() -> Vec<String> {
+        Protocol::PRIORITY
             .iter()
-            .map(|kind| provider_kind_label(*kind))
+            .map(|p| protocol_label(*p))
             .collect()
     }
 
-    /// Store the provider a frontend configured.
+    /// Store the endpoint a frontend configured.
     ///
-    /// An unsupported kind is rejected here rather than at the first turn, so
-    /// the settings screen learns immediately that it cannot offer it.
-    pub fn set_provider_config(&self, config: Option<ProviderConfig>) -> Result<(), TurnError> {
+    /// There is no kind to validate: an endpoint is whatever the user says it
+    /// is, and the first turn asks it what it speaks. What is validated here
+    /// is only that there is somewhere to send a request.
+    pub fn set_endpoint(&self, config: Option<EndpointConfig>) -> Result<(), TurnError> {
         if let Some(config) = config.as_ref() {
-            if !SUPPORTED_PROVIDER_KINDS.contains(&config.kind) {
-                return Err(TurnError::UnsupportedProviderKind(provider_kind_label(
-                    config.kind,
-                )));
+            if config.base_url.trim().is_empty() {
+                return Err(TurnError::NoProviderConfigured);
             }
         }
-        self.inner.lock().unwrap().provider_config = config;
+        self.inner.lock().unwrap().endpoint = config;
         // A changed endpoint is a different question, so the old answer does
         // not carry over to it.
         self.forget_capabilities_about();
@@ -771,18 +889,29 @@ impl SujiuRuntime {
 
     pub fn models(&self) -> Vec<ModelSummary> {
         let inner = self.inner.lock().unwrap();
-        let Some(config) = inner.provider_config.clone() else {
+        let Some(config) = inner.endpoint.clone() else {
             return Vec::new();
         };
 
-        vec![ModelSummary {
-            id: config.model.clone(),
-            name: config.model.clone(),
-            provider_id: config.id.clone(),
-            provider_name: config.name.clone(),
-            kind: provider_kind_label(config.kind),
-            configured: !config.base_url.trim().is_empty() && !config.model.trim().is_empty(),
-        }]
+        match config
+            .selected_model
+            .as_ref()
+            .filter(|m| !m.trim().is_empty())
+        {
+            Some(chosen) => vec![ModelSummary {
+                id: chosen.clone(),
+                name: chosen.clone(),
+                endpoint_id: config.id.clone(),
+                // The label is the one place a hostname may say something, and
+                // it says it only to a human.
+                endpoint_label: config.display_label(),
+
+                configured: true,
+            }],
+            // A known endpoint that has not chosen a model yet is still an
+            // endpoint, and reporting nothing here would hide it.
+            None => Vec::new(),
+        }
     }
 
     /// Ask the endpoint which models it serves, without deciding anything.
@@ -797,45 +926,113 @@ impl SujiuRuntime {
     /// user type a model would turn a cosmetic limitation into a dead end.
     pub async fn discover_models(&self, api_key: Option<&str>) -> ModelDiscovery {
         let inner = self.inner.lock().unwrap();
-        let Some(config) = inner.provider_config.clone() else {
+        let Some(config) = inner.endpoint.clone() else {
             return ModelDiscovery::without_endpoint(
                 ModelListing::Unknown,
-                "no provider configured",
+                "no endpoint configured yet",
             );
         };
 
+        drop(inner);
+        self.explore(&config, api_key).await
+    }
+
+    /// Explore an endpoint from nothing but a base URL and a key.
+    ///
+    /// This is the whole configuration flow the review asked for: the user
+    /// supplies an address and a credential, and Sujiu works out what is
+    /// there. No endpoint is stored, no model needs to be known, and no vendor
+    /// is named. The only thing the user is afterwards asked to decide is the
+    /// model, because that is the one choice a machine genuinely cannot make
+    /// for them.
+    pub async fn discover_endpoint(&self, base_url: &str, api_key: &str) -> EndpointExploration {
+        let config = EndpointConfig {
+            id: "endpoint".to_string(),
+            name: String::new(),
+            base_url: base_url.to_string(),
+            selected_model: None,
+            credential_ref: None,
+            overrides: serde_json::Map::new(),
+        };
+
+        self.explore_endpoint(&config, Some(api_key)).await
+    }
+
+    /// Explore an endpoint that has **not** been saved yet.
+    ///
+    /// This is the order the user actually works in: type a base URL and a
+    /// key, and find out what is there, before committing to anything. The
+    /// earlier flow made the endpoint un-saveable until a model was already
+    /// known and then asked the very same questions through the saved
+    /// endpoint, so discovery ran last and could never inform the decision it
+    /// was supposed to inform.
+    ///
+    /// Nothing here is written to disk. A settings screen explores, the user
+    /// picks or types a model, and only then is an endpoint stored.
+    pub async fn explore_endpoint(
+        &self,
+        config: &EndpointConfig,
+        api_key: Option<&str>,
+    ) -> EndpointExploration {
+        let models = self.explore(config, api_key).await;
+
+        let negotiation =
+            sujiu_ai::negotiate_protocol(None, config, api_key.unwrap_or_default(), None).await;
+
+        EndpointExploration {
+            protocol: negotiation
+                .selected
+                .map(|protocol| protocol_label(protocol))
+                .unwrap_or_default(),
+            protocols: negotiation
+                .supported
+                .iter()
+                .map(|protocol| protocol_label(*protocol))
+                .collect(),
+            reason: negotiation.failure_explanation(),
+            models,
+        }
+    }
+
+    async fn explore(&self, config: &EndpointConfig, api_key: Option<&str>) -> ModelDiscovery {
         let (listing, discovered) =
-            sujiu_ai::list_models(None, &config, api_key.unwrap_or_default()).await;
+            sujiu_ai::list_models(None, config, api_key.unwrap_or_default()).await;
 
         let mut models = discovered
             .iter()
             .map(|id| ModelSummary {
                 id: id.clone(),
                 name: id.clone(),
-                provider_id: config.id.clone(),
-                provider_name: config.name.clone(),
-                kind: provider_kind_label(config.kind),
-                configured: *id == config.model,
+                endpoint_id: config.id.clone(),
+                endpoint_label: config.display_label(),
+
+                configured: config.selected_model.as_deref() == Some(id.as_str()),
             })
             .collect::<Vec<_>>();
 
-        // The configured model stays selectable even when the endpoint will not
+        // The chosen model stays selectable even when the endpoint will not
         // list anything, otherwise discovery would hide the model the user
         // already chose and is using successfully.
-        if models.is_empty() && !config.model.trim().is_empty() {
-            models.push(ModelSummary {
-                id: config.model.clone(),
-                name: config.model.clone(),
-                provider_id: config.id.clone(),
-                provider_name: config.name.clone(),
-                kind: provider_kind_label(config.kind),
-                configured: true,
-            });
+        if models.is_empty() {
+            if let Some(chosen) = config
+                .selected_model
+                .as_ref()
+                .filter(|model| !model.trim().is_empty())
+            {
+                models.push(ModelSummary {
+                    id: chosen.clone(),
+                    name: chosen.clone(),
+                    endpoint_id: config.id.clone(),
+                    endpoint_label: config.display_label(),
+
+                    configured: true,
+                });
+            }
         }
 
         ModelDiscovery {
             listing: listing_label(listing),
-            note: listing_note(listing, &config),
+            note: listing_note(listing, config),
             manual_entry_allowed: true,
             models,
         }
@@ -1090,23 +1287,20 @@ impl SujiuRuntime {
         // one had — capabilities included. The override is therefore merged
         // onto the stored config, and only a field the override actually
         // carries wins.
-        let config = match (inner.provider_config.clone(), request.provider.clone()) {
-            (_, Some(override_)) if inner.provider_config.is_some() => {
-                merge_provider_config(inner.provider_config.as_ref().unwrap(), &override_)
+        let config = match (inner.endpoint.clone(), request.provider.clone()) {
+            (_, Some(override_)) if inner.endpoint.is_some() => {
+                merge_endpoint(inner.endpoint.as_ref().unwrap(), &override_)
             }
             (_, Some(only)) => only,
             (Some(stored), None) => stored,
             (None, None) => return Err(TurnError::NoProviderConfigured),
         };
 
-        if config.base_url.trim().is_empty() || config.model.trim().is_empty() {
+        // The base URL and a credential are what a request needs. A model is a
+        // choice the user makes after discovery, and refusing a turn before
+        // that would mean the endpoint could never be asked anything at all.
+        if config.base_url.trim().is_empty() {
             return Err(TurnError::NoProviderConfigured);
-        }
-
-        if !SUPPORTED_PROVIDER_KINDS.contains(&config.kind) {
-            return Err(TurnError::UnsupportedProviderKind(provider_kind_label(
-                config.kind,
-            )));
         }
 
         let api_key = request
@@ -1138,11 +1332,14 @@ impl SujiuRuntime {
         // Only replay provider state that belongs to this exact endpoint and
         // model. After a switch this is `None`, and the adapter rebuilds the
         // request from the normalized transcript instead.
+        // The protocol is not in the config any more: it is whatever
+        // negotiation settles on, and until then an unknown protocol means this
+        // identity matches nothing, so no stale provider state is replayed.
         let identity = ProviderIdentity {
-            kind: config.kind,
-            provider_id: config.id.clone(),
+            protocol: Protocol::default(),
+            endpoint_id: config.id.clone(),
             base_url: config.base_url.clone(),
-            model: config.model.clone(),
+            model: config.selected_model.clone().unwrap_or_default(),
         };
         let continuation = session.transcript.continuation_for(&identity).cloned();
 
@@ -1190,17 +1387,56 @@ impl SujiuRuntime {
         let api_key = prepared.api_key;
         let identity = prepared.identity;
 
+        // The adapter is chosen by what the endpoint said it speaks, in the
+        // order the protocol priority fixes. The user is not asked, and neither
+        // is a name: an endpoint that speaks Responses gets Responses, because
+        // that transport carries continuation, reasoning and tool state in its
+        // own shape instead of in fields bolted onto a chat message.
+        if capabilities.protocol == Protocol::OpenAiResponses {
+            return Ok(TurnProvider {
+                provider: Box::new(OpenAiResponsesProvider::new(ResponsesConfig {
+                    base_url: config.base_url.clone(),
+                    identity,
+                    api_key,
+                    model: config
+                        .selected_model
+                        .clone()
+                        .unwrap_or_else(|| "probe".to_string()),
+                    max_output_tokens: Some(
+                        config
+                            .overrides
+                            .get("maxTokens")
+                            .and_then(Value::as_u64)
+                            .map(|value| value as u32)
+                            .unwrap_or(DEFAULT_MAX_TOKENS),
+                    ),
+                    temperature: Some(
+                        config
+                            .overrides
+                            .get("temperature")
+                            .and_then(Value::as_f64)
+                            .map(|value| value as f32)
+                            .unwrap_or(DEFAULT_TEMPERATURE),
+                    ),
+                    capabilities,
+                })),
+            });
+        }
+
         let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
             base_url: config.base_url.clone(),
             identity,
             api_key,
-            model: config.model.clone(),
+            model: config
+                .selected_model
+                .clone()
+                .unwrap_or_else(|| "probe".to_string()),
             // Sampling defaults are provider semantics, so they live here and not
             // in a platform's settings form. A platform may still override them
-            // through `extra`; it just should not have to know the defaults.
+            // through `overrides`; it just should not have to know the defaults.
             max_tokens: Some(
                 config
-                    .extra
+                    .overrides
                     .get("maxTokens")
                     .and_then(Value::as_u64)
                     .map(|value| value as u32)
@@ -1208,7 +1444,7 @@ impl SujiuRuntime {
             ),
             temperature: Some(
                 config
-                    .extra
+                    .overrides
                     .get("temperature")
                     .and_then(Value::as_f64)
                     .map(|value| value as f32)
@@ -1292,7 +1528,7 @@ struct TurnProvider {
 struct PreparedTurn {
     messages: Vec<sujiu_ai::ModelMessage>,
     continuation: Option<ProviderContinuation>,
-    config: ProviderConfig,
+    config: EndpointConfig,
     identity: ProviderIdentity,
     api_key: String,
 }
@@ -1303,18 +1539,18 @@ struct PreparedTurn {
 /// the endpoint and its capabilities, and a platform that restates them
 /// incompletely should not silently drop them. Fields the override genuinely
 /// sets win; the rest are inherited.
-fn merge_provider_config(stored: &ProviderConfig, override_: &ProviderConfig) -> ProviderConfig {
+fn merge_endpoint(stored: &EndpointConfig, override_: &EndpointConfig) -> EndpointConfig {
     let blank = |value: &str| value.trim().is_empty();
 
-    let extra = if override_.extra.is_empty() {
-        stored.extra.clone()
+    let overrides = if override_.overrides.is_empty() {
+        stored.overrides.clone()
     } else {
-        let mut extra = stored.extra.clone();
-        extra.extend(override_.extra.clone());
-        extra
+        let mut overrides = stored.overrides.clone();
+        overrides.extend(override_.overrides.clone());
+        overrides
     };
 
-    ProviderConfig {
+    EndpointConfig {
         id: if blank(&override_.id) {
             stored.id.clone()
         } else {
@@ -1325,22 +1561,23 @@ fn merge_provider_config(stored: &ProviderConfig, override_: &ProviderConfig) ->
         } else {
             override_.name.clone()
         },
-        kind: override_.kind,
         base_url: if blank(&override_.base_url) {
             stored.base_url.clone()
         } else {
             override_.base_url.clone()
         },
-        model: if blank(&override_.model) {
-            stored.model.clone()
-        } else {
-            override_.model.clone()
-        },
+        // A model is a choice, not an inherited property, so `None` here means
+        // "I have not chosen one", not "keep the stored one". A caller that
+        // wants the stored model inherits it by not sending an override at all.
+        selected_model: override_
+            .selected_model
+            .clone()
+            .filter(|m| !m.trim().is_empty()),
         credential_ref: override_
             .credential_ref
             .clone()
             .or_else(|| stored.credential_ref.clone()),
-        extra,
+        overrides,
     }
 }
 
@@ -1348,15 +1585,14 @@ fn merge_provider_config(stored: &ProviderConfig, override_: &ProviderConfig) ->
 mod tests {
     use super::*;
 
-    fn config() -> ProviderConfig {
-        ProviderConfig {
+    fn config() -> EndpointConfig {
+        EndpointConfig {
             id: "stored".into(),
             name: "Stored".into(),
-            kind: ProviderKind::OpenAiCompatible,
             base_url: "https://stored.example/v1".into(),
-            model: "stored-model".into(),
+            selected_model: Some("stored-model".into()).into(),
             credential_ref: Some("stored-key".into()),
-            extra: serde_json::Map::new(),
+            overrides: serde_json::Map::new(),
         }
     }
 
@@ -1365,23 +1601,22 @@ mod tests {
     #[test]
     fn a_partial_per_turn_provider_keeps_what_it_does_not_mention() {
         let mut stored = config();
-        stored.extra.insert(
+        stored.overrides.insert(
             sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY.to_string(),
             serde_json::Value::Bool(true),
         );
 
         // The shape a settings form actually sends back: a name and a model.
-        let override_ = ProviderConfig {
+        let override_ = EndpointConfig {
             id: String::new(),
             name: "Same provider".into(),
-            kind: ProviderKind::OpenAiCompatible,
             base_url: String::new(),
-            model: "another-model".into(),
+            selected_model: Some("another-model".into()),
             credential_ref: None,
-            extra: serde_json::Map::new(),
+            overrides: serde_json::Map::new(),
         };
 
-        let merged = merge_provider_config(&stored, &override_);
+        let merged = merge_endpoint(&stored, &override_);
 
         assert_eq!(merged.base_url, "https://stored.example/v1");
         assert_eq!(merged.id, "stored");
@@ -1390,7 +1625,11 @@ mod tests {
             Some("stored-key"),
             "a turn must not lose the credential the user saved"
         );
-        assert_eq!(merged.model, "another-model", "the model was overridden");
+        assert_eq!(
+            merged.selected_model.as_deref(),
+            Some("another-model"),
+            "the model was overridden"
+        );
         assert_eq!(
             merged.forced_reasoning_replay(),
             Some(true),
@@ -1401,7 +1640,7 @@ mod tests {
     #[test]
     fn a_per_turn_provider_may_still_state_a_capability_of_its_own() {
         let mut stored = config();
-        stored.extra.insert(
+        stored.overrides.insert(
             sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY.to_string(),
             serde_json::Value::Bool(true),
         );
@@ -1409,12 +1648,12 @@ mod tests {
         let mut override_ = config();
         override_.id = "turn".into();
         override_.base_url = "https://other.example/v1".into();
-        override_.extra.insert(
+        override_.overrides.insert(
             sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY.to_string(),
             serde_json::Value::Bool(false),
         );
 
-        let merged = merge_provider_config(&stored, &override_);
+        let merged = merge_endpoint(&stored, &override_);
 
         assert_eq!(merged.base_url, "https://other.example/v1");
         assert_eq!(
@@ -1429,24 +1668,27 @@ mod tests {
         // The per-key case: a turn that sets one extra key must not clear the
         // others, which is what a whole-object replacement would have done.
         let mut stored = config();
-        stored.extra.insert(
+        stored.overrides.insert(
             sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY.to_string(),
             serde_json::Value::Bool(true),
         );
         stored
-            .extra
+            .overrides
             .insert("temperature".to_string(), serde_json::Value::from(0.3));
 
         let mut override_ = config();
         override_
-            .extra
+            .overrides
             .insert("maxTokens".to_string(), serde_json::Value::from(512));
 
-        let merged = merge_provider_config(&stored, &override_);
+        let merged = merge_endpoint(&stored, &override_);
 
-        assert_eq!(merged.extra.get("maxTokens"), Some(&serde_json::json!(512)));
         assert_eq!(
-            merged.extra.get("temperature"),
+            merged.overrides.get("maxTokens"),
+            Some(&serde_json::json!(512))
+        );
+        assert_eq!(
+            merged.overrides.get("temperature"),
             Some(&serde_json::json!(0.3)),
             "an unrelated saved setting is not collateral damage"
         );
@@ -1494,11 +1736,11 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-fn provider_kind_label(kind: sujiu_core::ProviderKind) -> String {
-    match kind {
-        sujiu_core::ProviderKind::OpenAiCompatible => "openai_compatible".to_string(),
-        sujiu_core::ProviderKind::Anthropic => "anthropic".to_string(),
-        sujiu_core::ProviderKind::Gemini => "gemini".to_string(),
+fn protocol_label(protocol: Protocol) -> String {
+    match protocol {
+        Protocol::OpenAiResponses => "openai_responses".to_string(),
+        Protocol::OpenAiChatCompletions => "openai_chat_completions".to_string(),
+        Protocol::AnthropicMessages => "anthropic_messages".to_string(),
     }
 }
 

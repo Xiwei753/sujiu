@@ -31,10 +31,16 @@
 use serde::{Deserialize, Serialize};
 
 /// A wire protocol the runtime can talk to an endpoint with.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Protocol {
     /// The OpenAI Responses API, with its own continuation and item model.
+    ///
+    /// This is the default because a missing protocol on stored state means
+    /// "we do not know where this came from", and an identity we cannot place
+    /// must never be treated as matching a live one. Keeping the default out of
+    /// the priority list is what makes that true.
+    #[default]
     OpenAiResponses,
     /// OpenAI-compatible Chat Completions. The common denominator.
     OpenAiChatCompletions,

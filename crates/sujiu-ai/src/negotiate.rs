@@ -23,7 +23,7 @@ use std::sync::Mutex;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use sujiu_core::{classify, ModelListing, ProbeFailure, ProbeVerdict, Protocol, ProviderConfig};
+use sujiu_core::{classify, EndpointConfig, ModelListing, ProbeFailure, ProbeVerdict, Protocol};
 
 /// What happened when we asked one protocol whether it was there.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -107,8 +107,11 @@ impl Negotiation {
 /// protocol priority order. An endpoint whose best protocol has no adapter yet
 /// is reported as unimplemented rather than quietly downgraded, so the gap is
 /// visible instead of being papered over by a less capable path.
-pub const IMPLEMENTED_PROTOCOLS: &[Protocol] =
-    &[Protocol::OpenAiChatCompletions, Protocol::AnthropicMessages];
+pub const IMPLEMENTED_PROTOCOLS: &[Protocol] = &[
+    Protocol::OpenAiResponses,
+    Protocol::OpenAiChatCompletions,
+    Protocol::AnthropicMessages,
+];
 
 /// Ask an endpoint which protocols it speaks.
 ///
@@ -118,7 +121,7 @@ pub const IMPLEMENTED_PROTOCOLS: &[Protocol] =
 /// network.
 pub async fn negotiate(
     client: Option<&reqwest::Client>,
-    config: &ProviderConfig,
+    config: &EndpointConfig,
     api_key: &str,
     cache: Option<&CapabilityCache>,
 ) -> Negotiation {
@@ -137,7 +140,7 @@ pub async fn negotiate(
         return cached;
     }
 
-    let preferred = config.preferred_protocols();
+    let preferred = config.protocols();
     let mut attempts = Vec::new();
 
     for protocol in &preferred {
@@ -220,26 +223,34 @@ pub async fn negotiate(
 /// at all cannot be used for anything. The reply is classified, never assumed.
 async fn probe(
     client: &reqwest::Client,
-    config: &ProviderConfig,
+    config: &EndpointConfig,
     api_key: &str,
     protocol: Protocol,
 ) -> ProbeVerdict {
     let base = config.base_url.trim_end_matches('/');
     let url = format!("{base}{}", protocol.path());
 
+    // A probe asks what the endpoint speaks, so it must not depend on a model
+    // being chosen yet. Naming a model the user has not picked would answer a
+    // different question, and one that fails for reasons of that model alone.
+    let model = config
+        .selected_model
+        .clone()
+        .unwrap_or_else(|| "probe".to_string());
+
     let body = match protocol {
         Protocol::OpenAiChatCompletions => json!({
-            "model": config.model,
+            "model": model,
             "max_tokens": 1,
             "messages": [{ "role": "user", "content": "ping" }],
         }),
         Protocol::OpenAiResponses => json!({
-            "model": config.model,
+            "model": model,
             "max_output_tokens": 16,
             "input": "ping",
         }),
         Protocol::AnthropicMessages => json!({
-            "model": config.model,
+            "model": model,
             "max_tokens": 1,
             "messages": [{ "role": "user", "content": "ping" }],
         }),
@@ -278,13 +289,130 @@ async fn probe(
 /// route is still perfectly good at chat. The only thing a failed listing may
 /// do is explain itself.
 ///
-/// The strategies are tried in order and the first that answers wins; each one
-/// is the same request shape, because every listed protocol family has a
-/// listing route. `Ok(None)` means "no listing endpoint answered", which is a
-/// normal outcome and not a failure of the credential.
+/// A way of asking an endpoint for its model list.
+///
+/// The chain exists because "where a provider lists its models" varies even
+/// between gateways that speak the same chat protocol: the route, the auth
+/// header and the response shape are all conventions rather than guarantees.
+/// Discovery is a convenience, so when every strategy has been tried and none
+/// answered, manual entry is what the user gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ListingStrategy {
+    /// The OpenAI-compatible convention, and by far the most common: a bearer
+    /// token at `/models` beside the chat route.
+    OpenAiCompatible,
+    /// The Anthropic convention, which authenticates with a header rather than
+    /// a bearer token. Some gateways that speak only the Anthropic protocol
+    /// reject `Authorization` outright and answer 401 to a request that should
+    /// have been asked more politely.
+    AnthropicCompatible,
+    /// A gateway configured as a bare host rather than as `.../v1` will answer
+    /// 404 for `.../models` and 200 for `.../v1/models`. Asking again costs one
+    /// request and saves the user from being told the endpoint has no models.
+    HostRootVersioned,
+}
+
+impl ListingStrategy {
+    /// Every strategy, in the order they are tried.
+    const ALL: [ListingStrategy; 3] = [
+        ListingStrategy::OpenAiCompatible,
+        ListingStrategy::AnthropicCompatible,
+        ListingStrategy::HostRootVersioned,
+    ];
+
+    fn url(self, base: &str) -> Option<String> {
+        let base = base.trim_end_matches('/');
+
+        match self {
+            ListingStrategy::OpenAiCompatible | ListingStrategy::AnthropicCompatible => {
+                Some(format!("{base}/models"))
+            }
+            ListingStrategy::HostRootVersioned => {
+                // Only worth asking when the base URL is not already versioned.
+                // A base that ends in `/v1` would produce the exact request the
+                // first strategy already made, and repeating it to learn the
+                // same thing is a wasted round trip.
+                let root = host_root(base)?;
+                let last = base.rsplit('/').next().unwrap_or_default();
+
+                let already_versioned = last.len() > 1
+                    && last.starts_with('v')
+                    && last[1..]
+                        .chars()
+                        .all(|character| character.is_ascii_digit());
+
+                (!already_versioned).then(|| format!("{root}/v1/models"))
+            }
+        }
+    }
+
+    /// How this strategy authenticates, which is the part a gateway can reject.
+    fn is_anthropic(self) -> bool {
+        matches!(self, ListingStrategy::AnthropicCompatible)
+    }
+
+    /// Whether a failure justifies trying the next strategy.
+    ///
+    /// Only a route that is not there. A rejected key, a rate limit and an
+    /// outage say nothing about the other routes, and answering them by trying
+    /// something else would spend the user's key three times over and still
+    /// report the wrong reason.
+    fn may_fall_through(self, failure: ModelListing) -> bool {
+        matches!(failure, ModelListing::Unavailable)
+    }
+}
+
+/// The models in a listing body, in whichever shape the endpoint wrote them.
+///
+/// A body is accepted when it looks like a list, whatever the envelope is
+/// around it. Refusing an unfamiliar shape would report "no models" for a
+/// gateway that just listed every one of them.
+/// The scheme and host of a base URL, without any path.
+fn host_root(base: &str) -> Option<&str> {
+    let (scheme, rest) = base.split_once("://")?;
+    let host = rest.split('/').next()?;
+    (!host.is_empty()).then_some(&base[..scheme.len() + 3 + host.len()])
+}
+
+fn parse_model_list(body: &Value) -> Vec<String> {
+    let entries = body
+        .get("data")
+        .or_else(|| body.get("models"))
+        .or_else(|| body.get("result"))
+        .and_then(Value::as_array)
+        .or_else(|| body.as_array());
+
+    let Some(entries) = entries else {
+        return Vec::new();
+    };
+
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            // A bare `["gpt-4o", ...]` is a listing too.
+            Value::String(name) => Some(name.clone()),
+            // The usual object entry, under either of the two field names the
+            // conventions use.
+            entry => entry
+                .get("id")
+                .or_else(|| entry.get("name"))
+                .or_else(|| entry.get("model"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+        })
+        .collect()
+}
+
+/// Ask an endpoint what models it serves.
+///
+/// Model discovery is deliberately separate from protocol negotiation. A user
+/// who cannot list models can still type one, and an endpoint with no listing
+/// route is still perfectly good at chat. The only thing a failed listing may
+/// do is explain itself, and a failed listing never says anything about which
+/// protocols the chat routes speak.
 pub async fn list_models(
     client: Option<&reqwest::Client>,
-    config: &ProviderConfig,
+    config: &EndpointConfig,
     api_key: &str,
 ) -> (ModelListing, Vec<String>) {
     let owned;
@@ -296,54 +424,60 @@ pub async fn list_models(
         }
     };
 
-    let base = config.base_url.trim_end_matches('/');
-    let url = format!("{base}/models");
-
     if api_key.is_empty() {
         return (ModelListing::PermissionDenied, Vec::new());
     }
 
-    let response = match client
-        .get(&url)
-        .header("content-type", "application/json")
-        .bearer_auth(api_key)
-        .send()
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => return (listing_failure(&error), Vec::new()),
-    };
+    let mut last = ModelListing::Unavailable;
 
-    let status = response.status().as_u16();
-    let text = response.text().await.unwrap_or_default();
+    for strategy in ListingStrategy::ALL {
+        let Some(url) = strategy.url(&config.base_url) else {
+            continue;
+        };
 
-    if !(200..300).contains(&status) {
-        return (listing_status_failure(status), Vec::new());
-    }
+        let mut request = client.get(&url).header("content-type", "application/json");
 
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        return (ModelListing::Unreachable, Vec::new());
-    };
+        request = if strategy.is_anthropic() {
+            request
+                .header("x-api-key", api_key)
+                .header("anthropic-version", "2023-06-01")
+        } else {
+            request.bearer_auth(api_key)
+        };
 
-    let models = value
-        .get("data")
-        .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(error) => {
+                last = listing_failure(&error);
+                if !strategy.may_fall_through(last) {
+                    return (last, Vec::new());
+                }
+                continue;
+            }
+        };
 
-    if models.is_empty() {
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+
+        if !(200..300).contains(&status) {
+            last = listing_status_failure(status);
+            if !strategy.may_fall_through(last) {
+                return (last, Vec::new());
+            }
+            continue;
+        }
+
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            return (ModelListing::Unreachable, Vec::new());
+        };
+
         // A 200 with nothing in it is a listing route that does not list
-        // anything, which is still "no models here" rather than "no route".
-        return (ModelListing::Available, Vec::new());
+        // anything, which is still "no models here" rather than "no route", and
+        // the other strategies would only find the same empty answer.
+        return (ModelListing::Available, parse_model_list(&value));
     }
 
-    (ModelListing::Available, models)
+    (last, Vec::new())
 }
 
 /// Classify a transport failure so a dropped connection is not read as a
@@ -425,17 +559,16 @@ impl CapabilityCache {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sujiu_core::{apply_reasoning_override, ProviderKind};
+    use sujiu_core::apply_reasoning_override;
 
-    fn config(model: &str) -> ProviderConfig {
-        ProviderConfig {
+    fn config(model: &str) -> EndpointConfig {
+        EndpointConfig {
             id: "provider-1".into(),
             name: "test".into(),
-            kind: ProviderKind::OpenAiCompatible,
             base_url: "https://api.example.com/v1".into(),
-            model: model.into(),
+            selected_model: Some(model.into()),
             credential_ref: None,
-            extra: Default::default(),
+            overrides: Default::default(),
         }
     }
 
@@ -468,6 +601,84 @@ mod tests {
 
         assert!(models.is_empty());
         assert!(listing.allows_manual_entry());
+    }
+
+    #[test]
+    fn a_model_list_is_read_in_whichever_shape_it_arrives() {
+        // The conventions disagree about the envelope, the field name and
+        // whether the entries are objects at all. A gateway that just listed
+        // every model must not be told it listed none.
+        let open_ai = json!({"data": [{"id": "gpt-4o-mini"}, {"id": "gpt-4o"}]});
+        let anthropic = json!({"models": [{"name": "claude-x"}]});
+        let bare = json!(["a", "b"]);
+        let alt_field = json!({"data": [{"model": "m-1"}]});
+
+        assert_eq!(parse_model_list(&open_ai), vec!["gpt-4o-mini", "gpt-4o"]);
+        assert_eq!(parse_model_list(&anthropic), vec!["claude-x"]);
+        assert_eq!(parse_model_list(&bare), vec!["a", "b"]);
+        assert_eq!(parse_model_list(&alt_field), vec!["m-1"]);
+        assert!(parse_model_list(&json!({"error": "nope"})).is_empty());
+    }
+
+    #[test]
+    fn only_a_missing_route_makes_the_next_listing_strategy_worth_trying() {
+        // The same rule the protocol chain follows. A rejected key or a rate
+        // limit is an answer about this request, and trying the next strategy
+        // would spend the user's key again and still report the wrong reason.
+        assert!(ListingStrategy::OpenAiCompatible.may_fall_through(ModelListing::Unavailable));
+        for stop in [
+            ModelListing::PermissionDenied,
+            ModelListing::RateLimited,
+            ModelListing::Unreachable,
+        ] {
+            assert!(!ListingStrategy::OpenAiCompatible.may_fall_through(stop));
+        }
+    }
+
+    #[test]
+    fn the_listing_chain_asks_more_than_one_question() {
+        // A single request to one route is not a fallback chain, and the review
+        // is explicit that it is not. Each strategy must reach a different URL
+        // or authenticate differently, or asking it again wastes a round trip
+        // to learn exactly what the first one already said.
+        let urls: Vec<String> = ListingStrategy::ALL
+            .iter()
+            .filter_map(|strategy| strategy.url("https://gw.example/v1"))
+            .collect();
+
+        assert!(urls.contains(&"https://gw.example/v1/models".to_string()));
+        // The anthropic strategy reaches the same route with a different
+        // credential, which is the part a gateway can actually reject.
+        assert!(ListingStrategy::ALL
+            .iter()
+            .any(|strategy| strategy.is_anthropic()));
+
+        // A base URL that is already versioned has no separate host root worth
+        // asking: `.../v1` and `.../v1/models` are the same request the first
+        // strategy already made, so the strategy must not invent one.
+        assert_eq!(
+            ListingStrategy::HostRootVersioned.url("https://gw.example/v1"),
+            None
+        );
+        assert_eq!(
+            ListingStrategy::HostRootVersioned.url("https://gw.example/v1/"),
+            None
+        );
+        // A base with some other path is a gateway root, and `/v1/models` is
+        // genuinely a different place to look.
+        assert_eq!(
+            ListingStrategy::HostRootVersioned.url("https://gw.example/openai"),
+            Some("https://gw.example/v1/models".to_string())
+        );
+
+        // All three strategies must be reachable for a bare host, or the chain
+        // is shorter than it claims to be.
+        let all: Vec<Option<String>> = ListingStrategy::ALL
+            .iter()
+            .map(|strategy| strategy.url("https://gw.example"))
+            .collect();
+        assert_eq!(all.len(), 3);
+        assert!(all.iter().all(|url| url.is_some()));
     }
 
     #[test]

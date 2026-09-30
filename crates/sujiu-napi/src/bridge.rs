@@ -13,11 +13,11 @@ use std::sync::Arc;
 use napi::bindgen_prelude::{AsyncTask, Result, Task};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
-use sujiu_core::ProviderConfig;
+use sujiu_core::EndpointConfig;
 use sujiu_ffi::events::{TurnEvent, TurnEventReporter};
 use sujiu_ffi::runtime::{
-    CharacterSummary, ContextSourceSummary, ConversationSnapshot, ModelDiscovery, ModelSummary,
-    SendTurnRequest, SessionSummary, SujiuRuntime, ToolCallSummary,
+    CharacterSummary, ContextSourceSummary, ConversationSnapshot, EndpointExploration,
+    ModelDiscovery, ModelSummary, SendTurnRequest, SessionSummary, SujiuRuntime, ToolCallSummary,
 };
 
 /// A live Rust runtime handed to the platform bridge.
@@ -51,9 +51,11 @@ pub struct CharacterSummaryDto {
 pub struct ModelSummaryDto {
     pub id: String,
     pub name: String,
-    pub provider_id: String,
-    pub provider_name: String,
-    pub kind: String,
+    pub endpoint_id: String,
+    /// A word to show a person, derived from the address. It names who answers
+    /// and decides nothing: a gateway behind the same name can serve unrelated
+    /// models, and the runtime never asks it.
+    pub endpoint_label: String,
     pub configured: bool,
 }
 
@@ -78,6 +80,32 @@ impl From<ModelDiscovery> for ModelDiscoveryDto {
                 .into_iter()
                 .map(ModelSummaryDto::from)
                 .collect(),
+        }
+    }
+}
+
+/// What an unsaved endpoint turned out to be.
+///
+/// `protocol` and `models` are two independent answers, and reporting them as
+/// one would be a claim Sujiu cannot make: an endpoint that lists nothing may
+/// still speak the newest protocol, and one that lists fifty models may speak
+/// only the oldest.
+#[napi(object)]
+pub struct EndpointExplorationDto {
+    pub protocol: String,
+    pub protocols: Vec<String>,
+    /// Why no protocol was settled, when none was.
+    pub reason: Option<String>,
+    pub models: ModelDiscoveryDto,
+}
+
+impl From<EndpointExploration> for EndpointExplorationDto {
+    fn from(exploration: EndpointExploration) -> Self {
+        Self {
+            protocol: exploration.protocol,
+            protocols: exploration.protocols,
+            reason: exploration.reason,
+            models: ModelDiscoveryDto::from(exploration.models),
         }
     }
 }
@@ -120,9 +148,14 @@ pub struct ConversationSnapshotDto {
 pub struct ProviderConfigDto {
     pub id: String,
     pub name: String,
-    pub kind: String,
     pub base_url: String,
-    pub model: String,
+    /// The model the user picked, if they have picked one yet.
+    ///
+    /// Optional because exploration runs first: an endpoint is worth asking
+    /// about before anyone has chosen what to ask it. A form that insists on
+    /// a model before it will save is the reason discovery used to have to
+    /// come last.
+    pub selected_model: Option<String>,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
     /// Whether this endpoint needs the assistant reasoning that produced a tool
@@ -180,9 +213,8 @@ impl From<ModelSummary> for ModelSummaryDto {
         Self {
             id: value.id,
             name: value.name,
-            provider_id: value.provider_id,
-            provider_name: value.provider_name,
-            kind: value.kind,
+            endpoint_id: value.endpoint_id,
+            endpoint_label: value.endpoint_label,
             configured: value.configured,
         }
     }
@@ -240,7 +272,7 @@ impl From<ConversationSnapshot> for ConversationSnapshotDto {
 }
 
 impl ProviderConfigDto {
-    fn to_domain(&self) -> ProviderConfig {
+    fn to_domain(&self) -> EndpointConfig {
         let mut extra = serde_json::Map::new();
         if let Some(max_tokens) = self.max_tokens {
             extra.insert("maxTokens".to_string(), max_tokens.into());
@@ -255,15 +287,19 @@ impl ProviderConfigDto {
             );
         }
 
-        ProviderConfig {
+        EndpointConfig {
             id: self.id.clone(),
             name: self.name.clone(),
-            kind: serde_json::from_value(serde_json::Value::String(self.kind.clone()))
-                .unwrap_or(sujiu_core::ProviderKind::OpenAiCompatible),
             base_url: self.base_url.clone(),
-            model: self.model.clone(),
+            // A blank model means "not chosen yet", not "the empty model".
+            selected_model: self
+                .selected_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|model| !model.is_empty())
+                .map(str::to_string),
             credential_ref: None,
-            extra,
+            overrides: extra,
         }
     }
 }
@@ -443,22 +479,48 @@ impl SujiuRuntimeBridge {
         self.runtime.create_session(Some(character_id.as_str()))
     }
 
-    /// Provider kinds the runtime can drive, so a settings screen offers only
-    /// those. A kind it cannot serve would fail every turn.
+    /// The wire formats the runtime speaks, in the order it tries them.
+    ///
+    /// This replaces the list of provider kinds a settings screen used to be
+    /// given. A vendor list asked the user to decide something negotiation
+    /// settles by asking the endpoint, and a name in that list could be wrong
+    /// for the very address the user typed.
     #[napi]
-    pub fn provider_kinds(&self) -> Vec<String> {
-        SujiuRuntime::supported_provider_kinds()
+    pub fn supported_protocols(&self) -> Vec<String> {
+        SujiuRuntime::supported_protocols()
     }
 
-    /// Store the provider a settings screen configured.
+    /// Store the endpoint a settings screen configured.
     ///
-    /// Throws when the kind is not supported, so the screen can tell the user
-    /// immediately instead of at the first turn.
+    /// There is no kind to reject: an address the runtime has never heard of
+    /// is exactly the self-hosted gateway this is meant to support. Whether it
+    /// can be reached, and what it speaks, is what the first turn's
+    /// negotiation answers.
     #[napi]
     pub fn configure_provider(&self, provider: ProviderConfigDto) -> Result<()> {
         self.runtime
-            .set_provider_config(Some(provider.to_domain()))
+            .set_endpoint(Some(provider.to_domain()))
             .map_err(|error| napi::Error::from_reason(format!("{error}")))
+    }
+
+    /// Find out what an endpoint is, from an address and a key and nothing else.
+    ///
+    /// This is the order the user actually works in, and it is why the settings
+    /// screen can be shown a model list before anything has been saved: there is
+    /// no configuration to complete first, and no model to know in advance.
+    /// The model list and the protocol are reported as two independent answers,
+    /// because a gateway can list nothing and still speak Responses.
+    #[napi]
+    pub fn discover_endpoint(
+        &self,
+        base_url: String,
+        api_key: String,
+    ) -> Result<EndpointExplorationDto> {
+        let exploration = self
+            .runtime
+            .tokio
+            .block_on(self.runtime.discover_endpoint(&base_url, &api_key));
+        Ok(EndpointExplorationDto::from(exploration))
     }
 
     /// Sends one turn. The callback receives normalized turn events as JSON.
@@ -490,16 +552,15 @@ mod tests {
         ProviderConfigDto {
             id: "provider-1".into(),
             name: "DeepSeek".into(),
-            kind: "openai_compatible".into(),
             base_url: "https://api.deepseek.com/v1".into(),
-            model: "deepseek-reasoner".into(),
+            selected_model: Some("deepseek-reasoner".into()),
             max_tokens: Some(2048),
             temperature: Some(0.7),
             replays_assistant_reasoning,
         }
     }
 
-    /// A platform only describes the provider: an id, a URL, a model and a
+    /// A platform only describes the endpoint: an id, a URL, a model and a
     /// key. It does not declare which wire protocol the endpoint speaks, and it
     /// must not have to, because that answer goes stale and a form cannot know
     /// it. So the settings form's fields convert to a config that asks the
@@ -509,12 +570,48 @@ mod tests {
         let config = form_fields(None).to_domain();
 
         assert_eq!(config.base_url, "https://api.deepseek.com/v1");
-        assert_eq!(config.model, "deepseek-reasoner");
+        assert_eq!(config.selected_model.as_deref(), Some("deepseek-reasoner"));
         assert_eq!(
             config.forced_reasoning_replay(),
             None,
             "the form stated nothing, so nothing may be inferred from a vendor or model name"
         );
+        assert_eq!(
+            config.protocols(),
+            Protocol::PRIORITY.to_vec(),
+            "there is nothing for a form to choose and nothing to derive from a name"
+        );
+    }
+
+    /// The model may be left unchosen, because exploration happens before
+    /// anyone has picked one. A form that cannot express "not yet" would force
+    /// the user to know the answer before the question could be asked.
+    #[test]
+    fn an_endpoint_crosses_the_bridge_before_a_model_is_chosen() {
+        let config = ProviderConfigDto {
+            selected_model: None,
+            ..form_fields(None)
+        }
+        .to_domain();
+
+        assert!(
+            config.selected_model.is_none(),
+            "no model chosen yet is a real state, not a missing field"
+        );
+        assert!(config.protocols().contains(&Protocol::OpenAiResponses));
+    }
+
+    /// A blank model means the same thing, rather than becoming a request for
+    /// a model whose name is nothing.
+    #[test]
+    fn a_blank_model_is_treated_as_unchosen_rather_than_as_a_name() {
+        let config = ProviderConfigDto {
+            selected_model: Some("   ".into()),
+            ..form_fields(None)
+        }
+        .to_domain();
+
+        assert!(config.selected_model.is_none());
     }
 
     /// The same fields, whatever model name they carry, lead to the same
@@ -525,7 +622,7 @@ mod tests {
     fn no_model_name_decides_what_the_endpoint_speaks() {
         for model in ["deepseek-reasoner", "r1", "thinking-v2", "gpt-4o-mini"] {
             let dto = ProviderConfigDto {
-                model: model.into(),
+                selected_model: Some(model.into()),
                 ..form_fields(None)
             };
             let config = dto.to_domain();
@@ -537,6 +634,33 @@ mod tests {
                 "{model} is a parameter, not an endpoint"
             );
         }
+    }
+
+    /// The display name a user typed is a label and stays one.
+    #[test]
+    fn a_display_name_is_never_part_of_how_the_endpoint_is_asked() {
+        let named = ProviderConfigDto {
+            name: "My own gateway".into(),
+            ..form_fields(None)
+        }
+        .to_domain();
+        let unnamed = ProviderConfigDto {
+            name: "  ".into(),
+            ..form_fields(None)
+        }
+        .to_domain();
+
+        assert_eq!(named.display_label(), "My own gateway");
+        assert_ne!(
+            named.display_label(),
+            unnamed.display_label(),
+            "an unnamed endpoint still shows something a person can recognise"
+        );
+        assert_eq!(
+            named.capability_key(),
+            unnamed.capability_key(),
+            "what the two are asked is decided by where they point, not what they are called"
+        );
     }
 
     /// A platform that does know something the negotiation cannot see may still

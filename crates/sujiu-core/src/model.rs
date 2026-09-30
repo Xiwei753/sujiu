@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::{ChatRole, PromptPlan, ProviderKind};
+use crate::{ChatRole, PromptPlan, Protocol};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -300,19 +300,23 @@ impl ToolCallState {
     }
 }
 
-/// Which provider produced something, in enough detail to tell two endpoints
-/// apart.
+/// Which endpoint produced something, in enough detail to tell two apart.
 ///
-/// Provider kind and model are not enough. Two OpenAI-compatible gateways can
-/// serve the same model name while being entirely different providers, and
-/// replaying one provider's state to the other is exactly the kind of mistake
-/// that is only discovered in production.
+/// The protocol is what matters most, and it is negotiated rather than
+/// configured: the same endpoint answers over Responses on one turn and over
+/// Chat Completions on the next, and provider state from one of those is not
+/// state the other can accept. Model and endpoint are here too, because two
+/// OpenAI-compatible gateways can serve the same model name while being
+/// entirely different services, and replaying one endpoint's state to the other
+/// is exactly the kind of mistake that is only discovered in production.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderIdentity {
-    pub kind: ProviderKind,
-    /// The configured provider id.
+    /// The wire protocol this state belongs to.
     #[serde(default)]
-    pub provider_id: String,
+    pub protocol: Protocol,
+    /// The configured endpoint id.
+    #[serde(default)]
+    pub endpoint_id: String,
     /// The endpoint the request is sent to.
     #[serde(default)]
     pub base_url: String,
@@ -447,11 +451,48 @@ pub struct ProviderContinuation {
 }
 
 impl ProviderContinuation {
+    /// A handle of the given kind, stamped with the endpoint it came from.
+    pub fn new(
+        identity: ProviderIdentity,
+        support: ContinuationSupport,
+        response_id: Option<String>,
+    ) -> Self {
+        Self {
+            identity,
+            support,
+            response_id,
+            state: Map::new(),
+        }
+    }
+
+    /// Record how much of the request this handle already accounts for.
+    ///
+    /// A native handle does not replace the transcript, it lets a request stop
+    /// re-sending the part the endpoint still holds. That only works if the
+    /// handle says *which* part, so the count travels with it. Without a count
+    /// the safe answer is to send everything, which is what a missing one does.
+    pub fn remembering_coverage(mut self, sent_messages: usize) -> Self {
+        self.state
+            .insert(SENT_MESSAGES_KEY.to_owned(), Value::from(sent_messages));
+        self
+    }
+
+    /// How many leading request messages this handle already covers.
+    pub fn sent_messages(&self) -> Option<usize> {
+        self.state
+            .get(SENT_MESSAGES_KEY)
+            .and_then(Value::as_u64)
+            .map(|count| count as usize)
+    }
+
     /// Whether this state may be replayed to `identity` unchanged.
     pub fn is_reusable_for(&self, identity: &ProviderIdentity) -> bool {
         self.support.is_chainable() && &self.identity == identity
     }
 }
+
+/// The state key recording how much of the request a handle covers.
+pub const SENT_MESSAGES_KEY: &str = "sentMessages";
 
 /// Token accounting for one provider response.
 ///
