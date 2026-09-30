@@ -190,13 +190,16 @@ the next format: a rejected key, a rate limit and a service error are all
 temporary refusals, and treating one of them as "this endpoint cannot speak"
 would leave a working provider permanently misclassified.
 
+A status code alone never counts as that evidence. Gateways that route by model
+answer an unresolvable model with the same 404 they use for a path they never
+had, so a bare 404 — empty body, plain text, or a structured error about
+something else — is inconclusive rather than a missing protocol. A 404 that
+names a model this key may not use is reported as exactly that, because the
+fix is a different model and not a different endpoint.
+
 A user configures an endpoint, not a vendor. They supply a base URL and a key,
 the runtime asks what is there, and the only choice left for them is the model.
 A hostname may produce a friendly word to show a person and decides nothing else.
-
-A compaction summary is part of the world-book keyword scan. The model reads it,
-so the scan has to see it too — otherwise compacting a long conversation would
-quietly stop triggering the lore it used to trigger.
 
 A provider config is what a person can honestly fill in: an id, a base URL, a
 credential and a model. Anything more specific to one wire format is negotiated,

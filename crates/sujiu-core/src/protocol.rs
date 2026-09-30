@@ -127,6 +127,11 @@ pub enum ProbeFailure {
     RateLimited,
     /// 5xx, or the connection failed. A service problem, not a capability.
     Unavailable,
+    /// The endpoint answered, and the answer was about the model rather than
+    /// the protocol: retired, not deployed, or not reachable from this key. The
+    /// path exists. The user has to pick a different model, and saying so is
+    /// the difference between a fixable instruction and a dead end.
+    ModelUnavailable,
     /// The endpoint answered with something we could not interpret.
     Malformed,
 }
@@ -148,6 +153,9 @@ impl ProbeFailure {
                 "the endpoint is rate limiting us, so the check did not run"
             }
             ProbeFailure::Unavailable => "the endpoint did not answer, so nothing can be concluded",
+            ProbeFailure::ModelUnavailable => {
+                "the endpoint does not offer that model to this key, so the protocol could not be checked"
+            }
             ProbeFailure::Malformed => "the endpoint answered in a way we could not read",
         }
     }
@@ -161,9 +169,12 @@ pub fn classify(status: Option<u16>, body: &str) -> ProbeVerdict {
 
     match status {
         200..=299 => ProbeVerdict::Supported,
-        // A path the service does not implement. This is the one answer that
-        // legitimately means "try the next protocol".
-        404 | 405 | 501 => ProbeVerdict::Unsupported,
+        // A path the service does not implement, or one whose subject is gone.
+        // 410 belongs here too: it is what services return for a model that has
+        // been retired, and the same reasoning applies. This is the only answer
+        // that may mean "try the next protocol", and only when the body agrees
+        // that it is about a path. See `classify_missing_path`.
+        404 | 405 | 410 | 501 => classify_missing_path(body),
         401 | 403 => ProbeVerdict::Inconclusive(ProbeFailure::Credentials),
         429 => ProbeVerdict::Inconclusive(ProbeFailure::RateLimited),
         400 | 422 => {
@@ -183,6 +194,65 @@ pub fn classify(status: Option<u16>, body: &str) -> ProbeVerdict {
     }
 }
 
+/// Decide what a 404, 405 or 501 says about a *path*.
+///
+/// The status alone is nearly worthless, and reading it as if it were is how a
+/// working endpoint gets thrown away. Services answer 404 for at least three
+/// unrelated things, and on real gateways two of them are byte-for-byte
+/// identical:
+///
+/// - the path is not implemented, named as such in a structured error.
+/// - the path is fine but the *model* is not available to this key, which is a
+///   structured error naming a function, model or deployment.
+/// - neither, and the service replies with its router's own plain-text 404,
+///   which is what most gateways do when a request cannot be routed at all.
+///
+/// That last case is the trap. A gateway that routes by model answers a request
+/// for a model it cannot resolve with the same `404 page not found` it uses for
+/// a path it never had, so plain text is *not* evidence of a missing route: it
+/// is evidence of nothing at all.
+///
+/// So only a body that positively names an unknown endpoint, path or route
+/// counts as route evidence. Everything else is inconclusive, which stops the
+/// walk instead of continuing it. Reporting "this endpoint speaks none of our
+/// protocols" is far worse than saying we could not tell, because the first is
+/// a false statement the user will act on.
+fn classify_missing_path(body: &str) -> ProbeVerdict {
+    if says_endpoint_is_unknown(body) {
+        return ProbeVerdict::Unsupported;
+    }
+
+    if names_a_missing_model(body) {
+        return ProbeVerdict::Inconclusive(ProbeFailure::ModelUnavailable);
+    }
+
+    ProbeVerdict::Inconclusive(ProbeFailure::Malformed)
+}
+
+/// Whether a rejection body names a model, function or deployment we may not use.
+///
+/// This is the answer that most often masquerades as "no such endpoint". It is
+/// worth its own failure so a settings screen can say something true and useful:
+/// the endpoint is fine, this key just cannot reach that model.
+fn names_a_missing_model(body: &str) -> bool {
+    let body = body.to_ascii_lowercase();
+
+    [
+        "model not found",
+        "no such model",
+        "unknown model",
+        "model is not",
+        "reached its end of life",
+        "not found for account",
+        "function not found",
+        "unknown function",
+        "deployment not found",
+        "no function",
+    ]
+    .iter()
+    .any(|phrase| body.contains(phrase))
+}
+
 /// Whether a rejection body clearly says the endpoint is not implemented.
 ///
 /// Some gateways answer an unknown path with 400 rather than 404. That is only
@@ -190,7 +260,7 @@ pub fn classify(status: Option<u16>, body: &str) -> ProbeVerdict {
 ///
 /// The phrases therefore all name an endpoint, route or path, and a bare "not
 /// found" is deliberately not among them. "model not found" and "no such
-/// model" are the most common 400 a usable endpoint returns, and matching
+/// model" are the most common rejection a usable endpoint returns, and matching
 /// either would downgrade a perfectly good endpoint on the first typo.
 fn says_endpoint_is_unknown(body: &str) -> bool {
     let body = body.to_ascii_lowercase();
@@ -348,8 +418,11 @@ mod tests {
 
     #[test]
     fn only_a_missing_endpoint_lets_negotiation_move_on() {
-        assert!(classify(Some(404), "").may_fall_through());
-        assert!(classify(Some(405), "").may_fall_through());
+        // Only a body that says so. A bare status is not a statement about a
+        // path, and treating it as one is how a working endpoint gets dropped.
+        assert!(classify(Some(404), r#"{"error":"unknown endpoint"}"#).may_fall_through());
+        assert!(classify(Some(405), "no such endpoint").may_fall_through());
+        assert!(!classify(Some(404), "").may_fall_through());
 
         // A wrong key, a throttle and an outage are answers about this
         // moment. None of them may permanently downgrade a working endpoint.
@@ -425,14 +498,20 @@ mod tests {
     /// next in the priority order.
     #[test]
     fn only_a_plain_404_says_the_protocol_is_not_there() {
-        // The one shape that really does mean "no such endpoint here".
+        // The one shape that really does mean "no such endpoint here" is a body
+        // that names the missing route. A status on its own is not evidence:
+        // gateways that route by model reuse this same status, and often the
+        // same plain-text body, for a model the key may not reach.
         assert_eq!(
-            classify(Some(404), ""),
+            classify(Some(404), r#"{"error":{"message":"unknown endpoint"}}"#),
             ProbeVerdict::Unsupported,
-            "a 404 on a path this endpoint does not serve is real evidence"
+            "a body naming a missing route is real evidence"
         );
-        assert_eq!(classify(Some(405), ""), ProbeVerdict::Unsupported);
-        assert_eq!(classify(Some(501), ""), ProbeVerdict::Unsupported);
+        assert_eq!(
+            classify(Some(405), "unsupported endpoint"),
+            ProbeVerdict::Unsupported
+        );
+        assert_eq!(classify(Some(501), "no route"), ProbeVerdict::Unsupported);
 
         // Every one of these is a statement about credentials, load or health,
         // never about which protocols the endpoint speaks.
@@ -458,6 +537,73 @@ mod tests {
 
         // A transport that never answered says nothing at all.
         assert!(!classify(None, "").may_fall_through());
+    }
+
+    /// Real bodies, taken from a gateway that was asked in anger.
+    ///
+    /// The service in question serves Chat Completions perfectly well. It
+    /// answers a path it has never heard of with its router's own plain-text
+    /// page, and it answers a model the account cannot reach with a structured
+    /// 404 of the same status. Reading the status alone threw the whole
+    /// endpoint away and told the user there was no protocol to speak.
+    #[test]
+    fn a_404_is_about_a_path_only_when_the_body_says_it_is() {
+        // A body that names the route is the only real evidence, structured or
+        // not, and it is the only thing that may move negotiation on.
+        for body in [
+            r#"{"error":{"message":"unknown endpoint"}}"#,
+            r#"{"detail":"no such endpoint"}"#,
+            "unknown endpoint",
+            "route not found",
+        ] {
+            assert_eq!(
+                classify(Some(404), body),
+                ProbeVerdict::Unsupported,
+                "{body:?} names a missing route, so the next protocol is worth asking"
+            );
+        }
+
+        // A structured error about the model rather than the path. The path
+        // exists; this key just cannot reach that model. Saying anything else
+        // would send the user off to reconfigure a working endpoint.
+        let account_denied = r#"{"status":404,"title":"Not Found","detail":"Function '9b96341b-6b1e-4a2f-9f2e-1f0a3c5d7e91': Not found for account 'FKCIYRgb0abc'"}"#;
+        assert_eq!(
+            classify(Some(404), account_denied),
+            ProbeVerdict::Inconclusive(ProbeFailure::ModelUnavailable),
+            "the endpoint is fine, this key cannot reach that model"
+        );
+        assert_eq!(
+            classify(
+                Some(410),
+                r#"{"type":"about:blank","title":"Gone","status":410,"detail":"The model 'meta/llama-3.3-70b-instruct' has reached its end of life"}"#
+            ),
+            ProbeVerdict::Inconclusive(ProbeFailure::ModelUnavailable),
+            "a retired model is not a missing protocol"
+        );
+
+        // The trap. A gateway that routes by model answers a request it cannot
+        // route with the identical plain text it uses for a path it never had,
+        // so this body is evidence of nothing and must not be read either way.
+        for body in ["404 page not found", "", "<html>404 Not Found</html>"] {
+            let verdict = classify(Some(404), body);
+            assert!(
+                !verdict.may_fall_through(),
+                "{body:?} is ambiguous: claiming the protocol is missing would be a lie"
+            );
+        }
+    }
+
+    /// A missing model is the one failure a user can act on without changing
+    /// their endpoint, so it must not be dressed up as anything else.
+    #[test]
+    fn a_model_we_may_not_use_is_named_as_such() {
+        let failure = ProbeFailure::ModelUnavailable;
+        assert!(!failure.is_transient(), "retrying will not grant access");
+        assert!(
+            failure.describe().contains("model"),
+            "the reason has to say what is actually wrong: {}",
+            failure.describe()
+        );
     }
 
     #[test]

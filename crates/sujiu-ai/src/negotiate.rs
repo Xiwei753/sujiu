@@ -233,9 +233,19 @@ async fn probe(
     // A probe asks what the endpoint speaks, so it must not depend on a model
     // being chosen yet. Naming a model the user has not picked would answer a
     // different question, and one that fails for reasons of that model alone.
+    //
+    // A probe has to name a model, and one has not always been chosen yet.
+    //
+    // The placeholder used to be a trap, because a gateway that routes by model
+    // answers "no such model" with the same 404 it uses for a missing path, so
+    // the probe would conclude that a working endpoint speaks none of our
+    // protocols. The fix belongs in how the *answer* is read rather than in
+    // what we ask: a 404 that does not name a route is inconclusive, and a
+    // placeholder that is answered at all still proves the protocol is served.
     let model = config
         .selected_model
         .clone()
+        .filter(|model| !model.trim().is_empty())
         .unwrap_or_else(|| "probe".to_string());
 
     let body = match protocol {

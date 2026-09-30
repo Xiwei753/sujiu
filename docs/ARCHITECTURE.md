@@ -345,17 +345,34 @@ The single most important rule: **only evidence that a path does not exist may m
 | Response | Verdict | Why |
 | --- | --- | --- |
 | 2xx | supported | the only positive evidence |
-| 404, 405, 501 | unsupported | the path is not there |
+| 404, 405, 410, 501 **and** a body naming an unknown endpoint, path or route | unsupported | the service says the route is unknown |
+| 404, 405, 410, 501 **and** a body naming a model, function or deployment we may not use | inconclusive, model unavailable | the path is fine; this key cannot reach that model |
+| 404 with anything else, including an empty body and plain text | inconclusive, malformed | see below |
 | 400/422 naming an unknown endpoint, path or route | unsupported | the service says the route is unknown |
 | 400/422 saying anything else | inconclusive | usually a bad request, or a typo'd model |
 | 401, 403 | inconclusive, credentials | a key problem, never a protocol fact |
 | 429 | inconclusive, rate limited | must never downgrade a protocol |
 | 5xx, timeout, connect failure | inconclusive, unavailable | transient by nature |
-| unparseable body | inconclusive, malformed | a proxy may have answered instead |
 
 Negotiation also stops on an inconclusive verdict rather than walking on: asking the next protocol after a rate limit is asking a throttled service more questions.
 
-A "not found" phrase only counts when it names an endpoint, a path or a route. A bare "not found" is deliberately excluded, because `model not found` is the most common 400 a perfectly usable endpoint returns, and reading it as a missing route would downgrade a working provider on the first typo.
+A "not found" phrase only counts when it names an endpoint, a path or a route. A bare "not found" is deliberately excluded, because `model not found` is the most common rejection a perfectly usable endpoint returns, and reading it as a missing route would downgrade a working provider on the first typo.
+
+### A 404 status is not evidence on its own
+
+This one was found by asking a real gateway, and it is worth writing down because the obvious implementation is wrong in a way no test invented in advance would have caught.
+
+Services answer 404 for at least three unrelated things, and on real gateways two of them are byte-for-byte identical:
+
+- the path is not implemented, named as such in a structured error
+- the path is fine, but the model is retired, not deployed, or not reachable from this key
+- neither, and the service replies with its router's own plain-text page
+
+The third case is the trap. A gateway that **routes by model** answers a request for a model it cannot resolve with the very same `404 page not found` it uses for a path it never had. Reading the status alone therefore reports that a working endpoint speaks none of our protocols, and the user is sent off to reconfigure something that was never broken.
+
+So only a body that positively names a missing route counts, and everything else is inconclusive. That costs a walk it would otherwise have taken, and it buys a truthful answer: "we could not tell" is recoverable, "this endpoint speaks none of our protocols" is a false statement the user will act on.
+
+A probe must still name a model, and before a model is chosen there is none to name. The placeholder that stands in for it is safe *because* of the rule above rather than in spite of it: a service that answers a request at all has still proved the protocol is served, and a service that does not produces an inconclusive verdict instead of a false one. The fix belongs in how the answer is read, not in what we ask.
 
 ### The cache is an optimisation, not a fact
 
