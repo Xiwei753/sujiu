@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Character, Conversation, Participant, Persona, PromptContext, PromptProfile, Transcript,
-    WorldBook,
+    WorldBook, WorldBookBudget,
 };
 
 /// Everything the app stores, as domain entities.
@@ -195,6 +195,7 @@ impl Library {
             participants: participants.into_iter().map(|(p, _)| p).collect(),
             characters,
             world_books,
+            world_book_budget: WorldBookBudget::default(),
             history: &conversation.transcript,
             user_input,
         }
@@ -233,6 +234,7 @@ pub fn standalone_context<'a>(
         participants,
         characters,
         world_books: world_books.iter().collect(),
+        world_book_budget: WorldBookBudget::default(),
         history,
         user_input,
     }

@@ -4,9 +4,12 @@ use serde::{Deserialize, Serialize};
 ///
 /// The role a model speaks in is not a UI concept: it decides which wire field a
 /// provider adapter writes, so it belongs to the shared runtime.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatRole {
+    /// The default because a fixed instruction that names no side is addressed
+    /// to the model, and the model is not the one who has to act on it.
+    #[default]
     System,
     Developer,
     User,

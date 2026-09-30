@@ -23,6 +23,11 @@ pub struct Persona {
     pub description: String,
     /// Extra user-side instruction, kept separate from the description so a
     /// profile can append to it without rewriting the persona itself.
+    ///
+    /// Sent as a user-role message. Who the user *is* is a system-side fact
+    /// about the conversation; what the user *wants asked of the model* is the
+    /// user speaking, and collapsing the two into one system paragraph is how a
+    /// persona's instruction ends up attributed to somebody else.
     #[serde(default)]
     pub user_prompt: String,
     /// World books this persona brings to a conversation by default.
@@ -57,10 +62,11 @@ impl Persona {
         }
     }
 
-    /// The text injected into the prompt, or an empty string when there is
-    /// nothing to say. Both parts are included because a persona is the one
-    /// place a persona description and its instruction belong together.
-    pub fn prompt_text(&self) -> String {
+    /// Who the user is, as the system side of the conversation states it.
+    ///
+    /// Empty when there is nothing to say, so a caller can pass it straight to a
+    /// prompt segment and let that decide whether there is a message at all.
+    pub fn system_text(&self) -> String {
         let mut parts = Vec::new();
         if !self.name.trim().is_empty() {
             parts.push(format!("Persona: {}", self.name.trim()));
@@ -68,10 +74,29 @@ impl Persona {
         if !self.description.trim().is_empty() {
             parts.push(format!("About the user:\n{}", self.description.trim()));
         }
-        if !self.user_prompt.trim().is_empty() {
-            parts.push(self.user_prompt.trim().to_owned());
-        }
         parts.join("\n\n")
+    }
+
+    /// What the user wants asked of the model, in the user's own voice.
+    pub fn user_text(&self) -> &str {
+        self.user_prompt.trim()
+    }
+
+    /// Both halves as one block of text, for callers that can only show prose —
+    /// the context projection, mainly.
+    ///
+    /// The prompt compiler does not use this: it sends the two halves with
+    /// their own roles. This exists so the searchable copy of a persona says
+    /// everything the prompt does, and the two cannot drift apart.
+    pub fn prompt_text(&self) -> String {
+        let system = self.system_text();
+        let user = self.user_text();
+        match (system.is_empty(), user.is_empty()) {
+            (true, true) => String::new(),
+            (true, false) => user.to_owned(),
+            (false, true) => system,
+            (false, false) => format!("{system}\n\n{user}"),
+        }
     }
 }
 fn persona_schema_version() -> u32 {

@@ -154,6 +154,12 @@ A prompt profile and a transcript are deliberately not projected: both already
 reach the model through prompt assembly, and a searchable copy would only give
 the model a second, worse route to the same content.
 
+The projection is also what makes a budgeted-out world-book entry recoverable.
+An entry the prompt compiler left out this turn is not lost and not forgotten —
+it is still in the book, still projected into a source, and reachable through
+`search_context`. Dropping it from one request is a size decision, and the
+context protocol is where the rest of the book lives.
+
 ## Tool discovery
 
 The three core context tools are intentionally small enough to remain available

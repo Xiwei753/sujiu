@@ -25,10 +25,13 @@ pub use model::{
 };
 pub use persona::{Persona, PERSONA_SCHEMA_VERSION};
 pub use prompt::{
-    CacheContinuity, PromptCompiler, PromptContext, PromptPlan, PromptSegment, PromptSource,
-    DEFAULT_APP_SYSTEM_PROMPT,
+    CacheContinuity, DroppedWorldBookEntry, PromptCompiler, PromptContext, PromptPlan,
+    PromptSegment, PromptSource, WorldBookBudget, WorldBookDropReason, DEFAULT_APP_SYSTEM_PROMPT,
+    DEFAULT_MAX_WORLD_BOOK_CHARS, DEFAULT_MAX_WORLD_BOOK_ENTRIES,
 };
-pub use prompt_profile::{PromptProfile, PromptProfileSegment, PROMPT_PROFILE_SCHEMA_VERSION};
+pub use prompt_profile::{
+    PromptPosition, PromptProfile, PromptProfileSegment, PROMPT_PROFILE_SCHEMA_VERSION,
+};
 pub use protocol::{
     classify, EndpointCapabilities, ModelListing, ProbeFailure, ProbeVerdict, Protocol,
 };

@@ -113,6 +113,16 @@ The final answer is the **last** assistant step, not the only assistant content 
 
 A `Turn` therefore holds the user message plus an ordered list of `AssistantStep`s, and each step holds its text, its reasoning (kept separate from visible text), its tool calls, its provider continuation and its token usage.
 
+### A step records who spoke
+
+A conversation can hold several characters, so "assistant" is not an identity: two answers from two participants stored as two anonymous assistant messages cannot be told apart afterwards, and a later group chat would need another transcript migration to fix it. Each step therefore carries the `character_id` of the participant it spoke for.
+
+The speaker is set when the step is **born**, from `AgentConfig.speaker`, not stamped afterwards. That is the prompt-cache rule applied to an identity: rewriting a step that was already sent changes the wire shape of history that a provider has read.
+
+`None` is a real answer rather than a missing field. Choosing between participants is a speaking-order policy, and this runtime has not got one, so the only speaker it ever picks is a conversation's single participant. With zero or several, it stores `None` instead of a guess.
+
+A protocol's ability to carry the id is the adapter's call. Chat Completions has a `name` field and gets the speaker there; Responses has no such field, and the adapter sends nothing rather than inventing one or putting the id into text the model did not write. The transcript keeps the speaker either way.
+
 ### Call and result pairing is structural
 
 A tool call and its result are one nested record, so an unpaired call cannot be represented:
@@ -173,7 +183,7 @@ Compaction also has to leave **what the model can see** and **what the world boo
 
 ### One assistant message, whatever it carries
 
-A step's visible text, its provider sidecar and its tool calls are three properties of **one** assistant message, so the model layer has one shape for it: `ModelMessage::Assistant { content, reasoning, calls }`.
+A step's visible text, its speaker, its provider sidecar and its tool calls are four properties of **one** assistant message, so the model layer has one shape for it: `ModelMessage::Assistant { content, speaker, reasoning, calls }`.
 
 They used to be split, with the sidecar hanging off a tool-calling variant. That is what let a thinking model that reasoned and then answered a question — no tool call at all — lose its reasoning on the next turn, because the variant that carried reasoning was never emitted. Content, sidecar and calls are independent here; the adapter decides which of them the negotiated protocol can actually express.
 
@@ -299,18 +309,21 @@ told every turn.
 ## Prompt pipeline
 
 ```text
-App system prompt (or the conversation's PromptProfile system prompt)
-  -> BeforeCharacter world book
-  -> each participant's character system prompt
-  -> each participant's character definition
-  -> persona
-  -> AfterCharacter world book
-  -> example dialogue
-  -> format rules + extra profile segments
+App system prompt (or the conversation's PromptProfile system prompt)   [system]
+  -> BeforeCharacter world book                                         [system]
+  -> each participant's character system prompt                         [system]
+  -> each participant's character definition                            [system]
+  -> persona: who the user is                                           [system]
+  -> persona: what the user asks of the model                            [user]
+  -> AfterCharacter world book                                          [system]
+  -> example dialogue                                                  [system]
+  -> format rules                                                      [system]
+  -> profile user prompt                                                [user]
+  -> extra profile segments, by declared position and role
   -> prompt block          <- cacheable; each piece at its semantic position
   -> conversation history  <- verbatim transcript, append-only
   -> NearHistory world book
-  -> post-history instruction
+  -> post-history instruction, then the profile's post-history segments
   -> current user input
   -> PromptPlan
   -> sujiu-ai
@@ -320,6 +333,52 @@ App system prompt (or the conversation's PromptProfile system prompt)
 ```
 
 `priority` means client-side retention/ordering priority. It is not presented as a magic model attention weight.
+
+### A fixed instruction speaks from the side it belongs to
+
+Role and position are stored on a profile segment rather than assumed, because
+"a fixed prompt segment" is not one thing. A format rule is a system
+instruction. A refusal rule belongs after the transcript, where it can still see
+the turn it applies to. A standing user request is the user's own message.
+
+Folding all of them into one block of system text at the top is what made
+`PromptProfile.user_prompt` a dead field: the content existed and nothing could
+carry it. A `PromptProfileSegment` therefore declares a `role` and a
+`position` (`Prefix` or `PostHistory`), and the compiler sends it as a message
+of that role at that position. A persona is split the same way — who the user is
+is the system's account of the conversation, what the user asks for is the user
+speaking. A system message that speaks for the user is a message that
+misattributes it.
+
+`PromptPosition` is deliberately coarser than a world-book position: it answers
+which side of the conversation the text is on, not where in a lore block it
+belongs. A segment with no declared role or position reads as system/prefix,
+which is what a segment was before those fields existed.
+
+### How much lore one request may carry
+
+World books are injected directly now, so "how much" is a decision the runtime
+makes: a book that matches two hundred entries cannot all go into every prompt,
+and a runtime that either sends everything or sends nothing is not making a
+decision. `WorldBookBudget` bounds it — an entry count and a character count,
+both client-side limits on what is pushed into a request, not claims about model
+attention.
+
+Constant entries go first: the book's author marked them always-on, and an
+instruction conditional on a keyword scan is not what they asked for. They are
+still bounded, and a dropped constant is reported with `constant: true`,
+because a book whose constant entries alone exceed the budget is a fact about
+the book rather than a budget decision. Keyed hits then compete by priority. An
+entry too long for what remains of the character budget is **skipped, never
+truncated**: half a lore entry is a fact the model cannot use, and a partial one
+costs the same as a whole one.
+
+The kept entries stay in priority order regardless of which pass chose them —
+deciding *what* to send must not silently relocate what was always going to be
+sent. And what was left out is reported on the plan in
+`dropped_world_book_entries` rather than quietly omitted, so a request that sent
+less lore is distinguishable from one that sent all of it. A dropped entry is
+still in the book and still one `search_context` away.
 
 ### Three layers, and only the third is a tool
 
@@ -642,9 +701,17 @@ chat
   turn_completed         steps, tool calls
   turn_cancelled
   turn_failed            the stage it failed in
+storage
+  save_failed            what could not be written, and that the previous generation is still live
 ```
 
 `turn_failed` carries the stage rather than only a message, because "it stopped working" and "the model returned something unreadable" are different bugs and the same user report.
+
+`save_failed` is a stage of its own because a failed write is the one failure
+with no other symptom: the turn succeeded, the answer is on screen, and nothing
+anywhere says the conversation was not kept. It is logged and returned rather
+than swallowed, because a write that fails quietly leaves the manifest claiming
+a document was saved.
 
 ### Persistence is separate from the conversation
 
@@ -671,12 +738,12 @@ A native handle does not replace the transcript. It lets a request skip the part
 Persistence follows the domain, not a single blob:
 
 ```text
-sujiu-library.json                       manifest: ids, endpoint, stored context
-conversations/<conversation-id>/conversation.json
-characters/<character-id>.json
-personas/<persona-id>.json
-worldbooks/<world-book-id>.json
-prompt_profiles/<profile-id>.json
+sujiu-library.json                       manifest: generation, ids, endpoint, stored context
+generations/gen-<n>/conversations/<conversation-id>/conversation.json
+generations/gen-<n>/characters/<character-id>.json
+generations/gen-<n>/personas/<persona-id>.json
+generations/gen-<n>/worldbooks/<world-book-id>.json
+generations/gen-<n>/prompt_profiles/<profile-id>.json
 ```
 
 A conversation owns a directory. Everything else is a file per entity, because
@@ -684,11 +751,18 @@ those entities are independent and may be shared between conversations. There is
 no `characters/<id>/chats/…`: a character is not the root, and a world book
 filed under a character could not outlive it.
 
-The manifest is written **last**. An interrupted save therefore leaves a manifest
-that still lists what was actually written, rather than one that points at
-documents which do not exist yet. Projected context sources are filtered out on
-save, so the projection never accumulates in the manifest as if it were stored
-data.
+The manifest is written **last**, and it names the generation it describes. That
+is the whole transaction: a save writes a complete new generation directory,
+then one atomic write switches the manifest over, then the previous generation
+is removed. Any failure before the switch leaves the previous generation
+complete and still the live one — a crash cannot produce a manifest that points
+at a mixture of new and old files, which is what overwriting documents in place
+would do.
+
+Projected context sources are filtered out on save, so the projection never
+accumulates in the manifest as if it were stored data. A save that cannot write
+a document returns the error instead of reporting success, and the manifest is
+never written after a failed step.
 
 ### What a stored document has to survive
 

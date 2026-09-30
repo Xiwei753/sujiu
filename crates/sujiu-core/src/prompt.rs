@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    model::ModelMessage, Character, ChatRole, Persona, PromptProfile, Transcript, WorldBook,
-    WorldBookEntry, WorldBookPosition,
+    model::ModelMessage, Character, ChatRole, Persona, PromptPosition, PromptProfile, Transcript,
+    WorldBook, WorldBookEntry, WorldBookPosition,
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -11,9 +11,17 @@ pub enum PromptSource {
     AppSystem,
     /// A prompt profile's own system prompt, which replaces the app one.
     ProfileSystem,
+    /// A prompt profile's user-side instruction, sent as a user message.
+    ProfileUser,
+    /// One of a prompt profile's own extra segments, at the role and position
+    /// that segment declares.
+    ProfileSegment,
     CharacterSystem,
     CharacterDefinition,
+    /// Who the user is, as the system side of the conversation states it.
     Persona,
+    /// What the persona asks of the model, in the user's own voice.
+    PersonaUser,
     FormatRules,
     WorldBook,
     ExampleDialogue,
@@ -59,6 +67,11 @@ pub const DEFAULT_APP_SYSTEM_PROMPT: &str = "You are Sujiu, an AI role-play clie
 ///   near-history world-book entries, the post-history instruction and the new
 ///   user message.
 ///
+/// The world-book entries inside `prefix` and `suffix` are also the ones that
+/// fit the request's budget. Anything that matched and did not fit is listed in
+/// `dropped_world_book_entries`, so a request that quietly sent less lore than
+/// the last one can be told apart from a request that sent all of it.
+///
 /// The suffix is why a request is not always append-only. Last turn's
 /// near-history entry, post-history instruction and user message sat at the very
 /// end; once the assistant has answered, the new turn's copy of them moves down
@@ -72,7 +85,67 @@ pub struct PromptPlan {
     pub history: Vec<ModelMessage>,
     /// Turn-local content for this request, after the history.
     pub suffix: Vec<PromptSegment>,
+    /// World-book entries that matched this turn and did not fit its budget.
+    ///
+    /// Reported rather than dropped silently, because a lore entry the runtime
+    /// chose not to send is a fact about this request, not an absence. Every
+    /// entry here is still one `search_context` call away — the budget decides
+    /// what is *pushed* into a prompt, never what *exists* in the book.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_world_book_entries: Vec<DroppedWorldBookEntry>,
 }
+
+/// One world-book entry left out of a request, and which limit left it out.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DroppedWorldBookEntry {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    /// Whether the book's author marked this entry as always-on.
+    ///
+    /// Worth keeping: a dropped keyed entry is a budget decision, while a
+    /// dropped constant entry means the book asks for more than the budget
+    /// allows, which is a fact about the book.
+    #[serde(default)]
+    pub constant: bool,
+    pub reason: WorldBookDropReason,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldBookDropReason {
+    /// Too many entries already fit.
+    EntryLimit,
+    /// The character budget was spent first.
+    CharLimit,
+}
+
+/// How much of a world book one request's prompt may carry.
+///
+/// World books are injected directly now, which makes "how much" the runtime's
+/// problem: a book that matches two hundred entries cannot all go into every
+/// prompt, and a runtime that either sends everything or sends nothing is not
+/// making a decision. These are client-side limits on what is pushed into a
+/// request — not a claim about model attention.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorldBookBudget {
+    /// How many entries may be injected in one request.
+    pub max_entries: usize,
+    /// How many characters of entry text may be injected in one request.
+    pub max_chars: usize,
+}
+
+impl Default for WorldBookBudget {
+    fn default() -> Self {
+        Self {
+            max_entries: DEFAULT_MAX_WORLD_BOOK_ENTRIES,
+            max_chars: DEFAULT_MAX_WORLD_BOOK_CHARS,
+        }
+    }
+}
+
+pub const DEFAULT_MAX_WORLD_BOOK_ENTRIES: usize = 24;
+pub const DEFAULT_MAX_WORLD_BOOK_CHARS: usize = 6_000;
 
 /// How one request continues the previous request's cache prefix.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -152,13 +225,12 @@ impl PromptPlan {
             return CacheContinuity::Unchanged;
         }
 
-        // Everything before this index is the prompt block. A shared count equal
-        // to the block length means the block survived intact and the break sits
-        // at its edge, which is the history's or the turn-local tail's business
-        // rather than the block's.
-        let block_len = previous.prefix.len();
-
-        if self.shared_prefix_messages(previous) < block_len {
+        // A changed prompt block is a break, whatever shape the change has. It
+        // used to be measured as "fewer shared messages than the previous block
+        // was long", which cannot see a block that merely grew: everything the
+        // previous request sent is still a prefix of this one, and the block is
+        // still different. Comparing the blocks is the direct question.
+        if self.prefix != previous.prefix {
             return if self.broke_on_the_world_book(previous) {
                 CacheContinuity::BrokeAtWorldBook
             } else {
@@ -185,10 +257,15 @@ impl PromptPlan {
             }
         }
 
-        // One block ran out of segments before the other.
+        // One block ran out of segments before the other, so the difference is
+        // at the edge and the extra segments are what changed. A world-book
+        // entry that appeared at the end of the block is still a world-book
+        // break, and looking only at the zipped pairs would call it a prompt
+        // block break instead.
         self.prefix
             .iter()
-            .chain(previous.prefix.iter())
+            .skip(previous.prefix.len())
+            .chain(previous.prefix.iter().skip(self.prefix.len()))
             .any(|segment| segment.source == PromptSource::WorldBook)
     }
 }
@@ -279,6 +356,10 @@ pub struct PromptContext<'a> {
     pub characters: Vec<&'a Character>,
     /// Every world book bound to this conversation, already resolved.
     pub world_books: Vec<&'a WorldBook>,
+    /// How much of the world books may go into this request. Defaults to
+    /// [`WorldBookBudget::default`]; a caller that knows its books are small,
+    /// or that has a context window to fill, sets it explicitly.
+    pub world_book_budget: WorldBookBudget,
     /// The transcript of everything already said, passed through unchanged.
     pub history: &'a Transcript,
     pub user_input: &'a str,
@@ -303,9 +384,16 @@ impl<'a> PromptContext<'a> {
             participants: vec![crate::Participant::character(character.id.clone())],
             characters: vec![character],
             world_books: world_books.iter().collect(),
+            world_book_budget: WorldBookBudget::default(),
             history,
             user_input,
         }
+    }
+
+    /// Set the world-book budget for this request.
+    pub fn with_world_book_budget(mut self, budget: WorldBookBudget) -> Self {
+        self.world_book_budget = budget;
+        self
     }
 
     /// The name a participant is presented under.
@@ -343,6 +431,13 @@ impl PromptCompiler {
         // is the entries the scan actually hit.
         let mut active_entries = active_entries(context.world_books.iter().copied(), &scan_text);
         active_entries.sort_by_key(|entry| entry.priority);
+
+        // ... and then the budget decides how much of what matched may actually
+        // be sent. Entries that matched but did not fit are reported on the plan
+        // rather than quietly left out: they are still in the book, still
+        // projected into the context store, and one search away from this turn.
+        let (active_entries, dropped_world_book_entries) =
+            fit_world_book_budget(&active_entries, context.world_book_budget);
 
         // The prompt block is assembled in semantic order, which is also the
         // order its meaning requires: a before-character entry really does come
@@ -413,16 +508,27 @@ impl PromptCompiler {
             );
         }
 
-        push_non_empty(
-            &mut prefix,
-            ChatRole::System,
-            &context
-                .persona
-                .map(Persona::prompt_text)
-                .unwrap_or_default(),
-            PromptSource::Persona,
-            92,
-        );
+        // A persona is two things said by two different parties, and they are
+        // sent as two messages. Who the user is belongs to the system's account
+        // of the conversation; what the user asks of the model is the user
+        // speaking, and a system message that speaks for the user is a message
+        // that misattributes it.
+        if let Some(persona) = context.persona {
+            push_non_empty(
+                &mut prefix,
+                ChatRole::System,
+                &persona.system_text(),
+                PromptSource::Persona,
+                92,
+            );
+            push_non_empty(
+                &mut prefix,
+                ChatRole::User,
+                persona.user_text(),
+                PromptSource::PersonaUser,
+                91,
+            );
+        }
 
         push_world_book(
             &mut prefix,
@@ -451,15 +557,35 @@ impl PromptCompiler {
             80,
         );
 
+        // The profile's own user-side instruction, as a user message. Kept out of
+        // the system prompt on purpose: it is what the user asked for, and the
+        // system prompt is not the user.
+        push_non_empty(
+            &mut prefix,
+            ChatRole::User,
+            &context
+                .prompt_profile
+                .map(|profile| profile.user_prompt.as_str())
+                .unwrap_or_default(),
+            PromptSource::ProfileUser,
+            78,
+        );
+
+        // Extra segments keep the role and position they declare, in the order
+        // the profile lists them. Anything that belongs after the transcript is
+        // pushed there instead, so "where does this go" is answered by the
+        // profile rather than by a convention nobody can see.
         for profile in context.prompt_profile.into_iter() {
             for segment in &profile.segments {
-                push_non_empty(
-                    &mut prefix,
-                    ChatRole::System,
-                    &segment.content,
-                    PromptSource::ProfileSystem,
-                    75,
-                );
+                if segment.position == PromptPosition::Prefix {
+                    push_non_empty(
+                        &mut prefix,
+                        segment.role,
+                        &segment.content,
+                        PromptSource::ProfileSegment,
+                        75,
+                    );
+                }
             }
         }
 
@@ -517,6 +643,20 @@ impl PromptCompiler {
             98,
         );
 
+        for profile in context.prompt_profile.into_iter() {
+            for segment in &profile.segments {
+                if segment.position == PromptPosition::PostHistory {
+                    push_non_empty(
+                        &mut suffix,
+                        segment.role,
+                        &segment.content,
+                        PromptSource::ProfileSegment,
+                        97,
+                    );
+                }
+            }
+        }
+
         push_non_empty(
             &mut suffix,
             ChatRole::User,
@@ -529,6 +669,7 @@ impl PromptCompiler {
             prefix,
             history,
             suffix,
+            dropped_world_book_entries,
         }
     }
 
@@ -544,6 +685,71 @@ impl PromptCompiler {
         extended.extend(produced.iter().cloned());
         extended
     }
+}
+
+/// Decide what may be sent, and report what was left behind.
+///
+/// Constant entries go first: the book's author marked them as always-on, and an
+/// instruction that is conditional on a keyword scan is not what they asked for.
+/// They are still bounded — a book whose constant entries alone exceed the
+/// budget is a book asking for more than a prompt can carry, and the plan says
+/// so through `constant: true` rather than quietly sending less than promised.
+///
+/// Keyed hits then compete by priority, lowest number first, which is the same
+/// order the prompt already used. An entry that is too long for what remains of
+/// the character budget is skipped rather than truncated: half a lore entry is
+/// a fact the model cannot use, and a partial one costs the same as a whole one.
+///
+/// The kept entries are returned in their original priority order regardless of
+/// which pass chose them. Choosing *what* to send must not silently relocate the
+/// entries that were always going to be sent: an entry's position in the prompt
+/// is part of its meaning, and a cache break caused by a budget is already
+/// declared as one.
+fn fit_world_book_budget<'a>(
+    entries: &[&'a WorldBookEntry],
+    budget: WorldBookBudget,
+) -> (Vec<&'a WorldBookEntry>, Vec<DroppedWorldBookEntry>) {
+    let mut chosen = vec![false; entries.len()];
+    let mut dropped: Vec<DroppedWorldBookEntry> = Vec::new();
+    let mut count = 0usize;
+    let mut chars = 0usize;
+
+    for constant in [true, false] {
+        for (index, entry) in entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.constant == constant)
+        {
+            let length = entry.content.chars().count();
+            let over_entries = count >= budget.max_entries;
+            let over_chars = chars.saturating_add(length) > budget.max_chars;
+            if over_entries || over_chars {
+                dropped.push(DroppedWorldBookEntry {
+                    id: entry.id.clone(),
+                    name: entry.name.clone(),
+                    constant,
+                    reason: if over_entries {
+                        WorldBookDropReason::EntryLimit
+                    } else {
+                        WorldBookDropReason::CharLimit
+                    },
+                });
+                continue;
+            }
+            chosen[index] = true;
+            count += 1;
+            chars += length;
+        }
+    }
+
+    let kept = entries
+        .iter()
+        .zip(chosen)
+        .filter(|(_, keep)| *keep)
+        .map(|(entry, _)| *entry)
+        .collect();
+
+    (kept, dropped)
 }
 
 /// The entries of every bound world book that apply to what has been said.
@@ -1525,5 +1731,597 @@ mod binding_tests {
 
         assert!(id != "conversation-2");
         assert!(!library.conversations.iter().any(|item| item.id == id));
+    }
+}
+
+/// A fixed instruction has to be sent from the side of the conversation it
+/// belongs to, or the model is being told a falsehood about who is speaking.
+mod role_tests {
+    use super::*;
+    use crate::{Library, ModelRole, Persona, PromptProfile, PromptProfileSegment};
+    use serde_json::json;
+
+    /// A segment with only the two fields every segment has.
+    fn empty_segment() -> PromptProfileSegment {
+        PromptProfileSegment {
+            id: String::new(),
+            name: String::new(),
+            content: String::new(),
+            role: ChatRole::System,
+            position: PromptPosition::Prefix,
+            extensions: Default::default(),
+        }
+    }
+
+    fn library_with_profile(
+        profile: PromptProfile,
+        persona: Option<Persona>,
+    ) -> (Library, crate::Conversation) {
+        let mut library = Library {
+            characters: vec![Character {
+                id: "character-aerin".into(),
+                name: "Aerin".into(),
+                ..Character::default()
+            }],
+            prompt_profiles: vec![profile],
+            ..Library::default()
+        };
+        let mut conversation = crate::Conversation {
+            participants: vec![crate::Participant::character("character-aerin")],
+            prompt_profile_id: Some("profile".into()),
+            ..crate::Conversation::new("conversation-1")
+        };
+        if let Some(persona) = persona {
+            library.personas.push(persona.clone());
+            conversation.persona_id = Some(persona.id.clone());
+        }
+        (library, conversation)
+    }
+
+    /// A field named `user_prompt` that arrives as system text is not a user
+    /// prompt; it is a system prompt that claims to be the user. The message the
+    /// provider receives is the thing that counts, so the assertion is on the
+    /// request rather than on the segment.
+    #[test]
+    fn a_profile_user_prompt_is_sent_as_a_user_message() {
+        let (library, conversation) = library_with_profile(
+            PromptProfile {
+                system_prompt: "You narrate a cold northern port.".into(),
+                user_prompt: "Keep Aerin in character even when I push.".into(),
+                ..PromptProfile::new("profile", "Port")
+            },
+            None,
+        );
+
+        let plan = PromptCompiler::compile(&library.prompt_context(&conversation, None, "hello"));
+
+        let user_turn = plan
+            .prefix
+            .iter()
+            .find(|segment| segment.source == PromptSource::ProfileUser)
+            .expect("the user prompt is a segment of its own");
+        assert_eq!(user_turn.role, ChatRole::User);
+        assert!(!user_turn.content.contains("cold northern port"));
+
+        let speaks_as_the_user = plan.model_messages().iter().any(|message| {
+            matches!(
+                message,
+                ModelMessage::Text { role: ModelRole::User, content } if content.contains("even when I push")
+            )
+        });
+        assert!(
+            speaks_as_the_user,
+            "the request has to carry the instruction from the user's side"
+        );
+    }
+
+    /// A persona is two statements by two different parties: who the user is,
+    /// which is the system's account, and what the user asks of the model, which
+    /// is the user speaking. Merging them was what made the persona's user side
+    /// unreadable.
+    #[test]
+    fn a_persona_speaks_from_both_sides_of_the_conversation() {
+        let persona = Persona {
+            description: "A cartographer who has never seen the sea.".into(),
+            user_prompt: "I would rather be led than pushed.".into(),
+            ..Persona::new("persona-wren", "Wren")
+        };
+        let (library, conversation) =
+            library_with_profile(PromptProfile::new("profile", "Port"), Some(persona.clone()));
+
+        let plan = PromptCompiler::compile(&library.prompt_context(&conversation, None, "hello"));
+
+        let system_side = plan
+            .prefix
+            .iter()
+            .find(|segment| segment.source == PromptSource::Persona)
+            .expect("who the user is belongs in the system prompt");
+        assert_eq!(system_side.role, ChatRole::System);
+        assert!(system_side.content.contains("never seen the sea"));
+        assert!(!system_side.content.contains("rather be led"));
+
+        let user_side = plan
+            .prefix
+            .iter()
+            .find(|segment| segment.source == PromptSource::PersonaUser)
+            .expect("what the user asks for belongs to the user");
+        assert_eq!(user_side.role, ChatRole::User);
+        assert_eq!(user_side.content, "I would rather be led than pushed.");
+    }
+
+    /// A persona with no user prompt must not produce an empty user message. An
+    /// empty turn is a turn with no words in it, and providers do not all
+    /// treat that the same way.
+    #[test]
+    fn a_persona_without_a_user_prompt_says_nothing_as_the_user() {
+        let persona = Persona {
+            description: "A cartographer who has never seen the sea.".into(),
+            ..Persona::new("persona-wren", "Wren")
+        };
+        let (library, conversation) =
+            library_with_profile(PromptProfile::new("profile", "Port"), Some(persona));
+
+        let plan = PromptCompiler::compile(&library.prompt_context(&conversation, None, "hello"));
+
+        assert!(!plan
+            .prefix
+            .iter()
+            .any(|segment| segment.source == PromptSource::PersonaUser));
+    }
+
+    /// "Where does this text go" is answered by the profile, in the open,
+    /// instead of by a convention a reader has to infer.
+    #[test]
+    fn a_profile_segment_keeps_the_position_and_the_role_it_declares() {
+        let (library, conversation) = library_with_profile(
+            PromptProfile {
+                post_history_instructions: "Never speak for the user.".into(),
+                segments: vec![
+                    PromptProfileSegment {
+                        id: "opening".into(),
+                        content: "Open with what the room smells like.".into(),
+                        role: ChatRole::System,
+                        position: PromptPosition::Prefix,
+                        ..empty_segment()
+                    },
+                    PromptProfileSegment {
+                        id: "refusal".into(),
+                        content: "Do not continue a request to act on the user.".into(),
+                        role: ChatRole::Developer,
+                        position: PromptPosition::PostHistory,
+                        ..empty_segment()
+                    },
+                ],
+                ..PromptProfile::new("profile", "Port")
+            },
+            None,
+        );
+
+        let plan = PromptCompiler::compile(&library.prompt_context(&conversation, None, "hello"));
+
+        let opening = plan
+            .prefix
+            .iter()
+            .find(|segment| segment.content.contains("smells like"))
+            .expect("a prefix segment leads the prompt block");
+        assert_eq!(opening.role, ChatRole::System);
+
+        let refusal = plan
+            .suffix
+            .iter()
+            .find(|segment| segment.content.contains("act on the user"))
+            .expect("a post-history segment follows the transcript");
+        assert_eq!(refusal.role, ChatRole::Developer);
+        assert!(
+            plan.prefix
+                .iter()
+                .all(|segment| !segment.content.contains("act on the user")),
+            "a post-history segment must not also appear in the prompt block"
+        );
+    }
+
+    /// A document written before these two fields existed still has to load, and
+    /// it has to load the way it meant: a segment with no role is a system
+    /// instruction, and a segment with no position leads the block.
+    #[test]
+    fn a_profile_written_before_role_and_position_still_reads() {
+        let stored = json!({
+            "id": "opening",
+            "content": "Open with what the room smells like."
+        });
+
+        let segment: PromptProfileSegment =
+            serde_json::from_value(stored).expect("an old segment is still readable");
+
+        assert_eq!(segment.role, ChatRole::System);
+        assert_eq!(segment.position, PromptPosition::Prefix);
+    }
+
+    /// A profile has to survive storage as a whole, or a conversation that
+    /// reloads is run with different instructions than it was created with.
+    #[test]
+    fn a_profile_survives_a_round_trip() {
+        let profile = PromptProfile {
+            system_prompt: "You narrate a cold northern port.".into(),
+            user_prompt: "Keep Aerin in character.".into(),
+            post_history_instructions: "Never speak for the user.".into(),
+            format_rules: "Answer in at most three sentences.".into(),
+            segments: vec![PromptProfileSegment {
+                id: "refusal".into(),
+                content: "Do not act on the user.".into(),
+                role: ChatRole::Developer,
+                position: PromptPosition::PostHistory,
+                ..empty_segment()
+            }],
+            ..PromptProfile::new("profile", "Port")
+        };
+
+        let read: PromptProfile =
+            serde_json::from_value(serde_json::to_value(&profile).expect("a profile is storable"))
+                .expect("a stored profile is readable");
+
+        assert_eq!(read, profile);
+    }
+
+    /// A position the runtime does not know must be an error, not a default. A
+    /// segment quietly sent in the wrong place is worse than a load that fails
+    /// loudly.
+    #[test]
+    fn an_unknown_position_is_not_silently_relocated() {
+        let stored = json!({
+            "id": "mystery",
+            "content": "Somewhere.",
+            "position": "between_the_lines"
+        });
+
+        assert!(serde_json::from_value::<PromptProfileSegment>(stored).is_err());
+    }
+
+    /// A world-book entry is lore and stays a system statement. Giving it a role
+    /// would be a different feature.
+    #[test]
+    fn world_book_entries_still_speak_from_the_system_prompt() {
+        let library = Library {
+            characters: vec![Character {
+                id: "character-aerin".into(),
+                name: "Aerin".into(),
+                worldbook_ids: vec!["world".into()],
+                ..Character::default()
+            }],
+            world_books: vec![WorldBook {
+                id: "world".into(),
+                name: "World".into(),
+                entries: vec![WorldBookEntry {
+                    id: "black-tower".into(),
+                    name: "Black Tower".into(),
+                    content: "The Black Tower stands north of the capital.".into(),
+                    keys: vec!["Black Tower".into()],
+                    enabled: true,
+                    constant: true,
+                    priority: 0,
+                    position: WorldBookPosition::AfterCharacter,
+                    extensions: Default::default(),
+                }],
+                ..WorldBook::default()
+            }],
+            ..Library::default()
+        };
+        let conversation = crate::Conversation {
+            participants: vec![crate::Participant::character("character-aerin")],
+            ..crate::Conversation::new("conversation-1")
+        };
+
+        let plan = PromptCompiler::compile(&library.prompt_context(&conversation, None, "hello"));
+
+        let lore = plan
+            .prefix
+            .iter()
+            .find(|segment| segment.source == PromptSource::WorldBook)
+            .expect("a constant entry is active on every turn");
+        assert_eq!(lore.role, ChatRole::System);
+    }
+}
+
+/// How much of a world book one request may carry, and what it says when it
+/// cannot carry all of it.
+mod budget_tests {
+    use super::*;
+    use crate::{Library, WorldBookEntry};
+
+    fn entry(id: &str, priority: i32, constant: bool, chars: usize) -> WorldBookEntry {
+        WorldBookEntry {
+            id: id.into(),
+            name: id.into(),
+            // The id leads the text so a test can say which entry was sent, and
+            // the filler decides how much of the character budget it spends.
+            content: format!("{id}:{}", "x".repeat(chars)),
+            keys: if constant {
+                Vec::new()
+            } else {
+                vec!["port".into()]
+            },
+            enabled: true,
+            constant,
+            priority,
+            position: WorldBookPosition::AfterCharacter,
+            extensions: Default::default(),
+        }
+    }
+
+    fn library_with(entries: Vec<WorldBookEntry>) -> (Library, crate::Conversation) {
+        let library = Library {
+            characters: vec![Character {
+                id: "character-aerin".into(),
+                name: "Aerin".into(),
+                worldbook_ids: vec!["world".into()],
+                ..Character::default()
+            }],
+            world_books: vec![WorldBook {
+                id: "world".into(),
+                name: "World".into(),
+                entries,
+                ..WorldBook::default()
+            }],
+            ..Library::default()
+        };
+        let conversation = crate::Conversation {
+            participants: vec![crate::Participant::character("character-aerin")],
+            ..crate::Conversation::new("conversation-1")
+        };
+        (library, conversation)
+    }
+
+    fn plan_with_budget(
+        library: &Library,
+        conversation: &crate::Conversation,
+        budget: WorldBookBudget,
+    ) -> PromptPlan {
+        let context = library
+            .prompt_context(conversation, None, "take me to the port")
+            .with_world_book_budget(budget);
+        PromptCompiler::compile(&context)
+    }
+
+    /// The ids of the entries this request actually carried, in prompt order.
+    fn sent_ids(plan: &PromptPlan) -> Vec<String> {
+        plan.prefix
+            .iter()
+            .filter(|segment| segment.source == PromptSource::WorldBook)
+            .filter_map(|segment| segment.content.split(':').next().map(String::from))
+            .collect()
+    }
+
+    fn is_sent(plan: &PromptPlan, id: &str) -> bool {
+        sent_ids(plan).iter().any(|sent| sent == id)
+    }
+
+    /// The character length of everything a request carried from the world book.
+    fn sent_chars(plan: &PromptPlan) -> usize {
+        plan.prefix
+            .iter()
+            .filter(|segment| segment.source == PromptSource::WorldBook)
+            .map(|segment| segment.content.chars().count())
+            .sum()
+    }
+
+    /// The runtime is now the thing that pushes lore into every request, so
+    /// "how much" has to be a decision it makes. Without a cap, a book that
+    /// matches two hundred entries ships two hundred entries every turn.
+    #[test]
+    fn too_many_matching_entries_leave_out_the_low_priority_ones() {
+        let (library, conversation) = library_with(vec![
+            entry("first", 10, false, 10),
+            entry("second", 20, false, 10),
+            entry("third", 30, false, 10),
+        ]);
+
+        let plan = plan_with_budget(
+            &library,
+            &conversation,
+            WorldBookBudget {
+                max_entries: 2,
+                max_chars: 1_000,
+            },
+        );
+
+        assert_eq!(sent_ids(&plan).len(), 2);
+        assert!(is_sent(&plan, "first"));
+        assert!(is_sent(&plan, "second"));
+        assert!(!is_sent(&plan, "third"));
+        assert_eq!(plan.dropped_world_book_entries.len(), 1);
+        assert_eq!(plan.dropped_world_book_entries[0].id, "third");
+        assert_eq!(
+            plan.dropped_world_book_entries[0].reason,
+            WorldBookDropReason::EntryLimit
+        );
+    }
+
+    /// A character budget is spent by whichever entries have priority, and the
+    /// plan has to say which limit did it: an entry cap and a character cap are
+    /// different problems for whoever wrote the book.
+    #[test]
+    fn an_entry_too_long_for_what_is_left_is_skipped_rather_than_truncated() {
+        let (library, conversation) = library_with(vec![
+            entry("long", 10, false, 500),
+            entry("short", 20, false, 10),
+        ]);
+
+        let plan = plan_with_budget(
+            &library,
+            &conversation,
+            WorldBookBudget {
+                max_entries: 10,
+                max_chars: 100,
+            },
+        );
+
+        assert!(!is_sent(&plan, "long"));
+        assert!(is_sent(&plan, "short"));
+        assert_eq!(plan.dropped_world_book_entries.len(), 1);
+        assert_eq!(plan.dropped_world_book_entries[0].id, "long");
+        assert_eq!(
+            plan.dropped_world_book_entries[0].reason,
+            WorldBookDropReason::CharLimit
+        );
+        // A partial entry is text the model cannot use, and it costs the same as
+        // a whole one, so nothing that was sent is cut short.
+        assert_eq!(sent_chars(&plan), "short:xxxxxxxxxx".chars().count());
+    }
+
+    /// A constant entry is not conditional on anything, so being left out
+    /// because of a budget is a fact about the book and not a budget decision.
+    /// The two are reported differently for that reason.
+    #[test]
+    fn a_constant_entry_outranks_a_keyed_one_however_low_its_priority() {
+        let (library, conversation) = library_with(vec![
+            entry("constant", 900, true, 10),
+            entry("keyed", 1, false, 10),
+        ]);
+
+        let plan = plan_with_budget(
+            &library,
+            &conversation,
+            WorldBookBudget {
+                max_entries: 1,
+                max_chars: 1_000,
+            },
+        );
+
+        assert!(is_sent(&plan, "constant"));
+        assert!(!is_sent(&plan, "keyed"));
+        assert_eq!(plan.dropped_world_book_entries[0].id, "keyed");
+        assert!(!plan.dropped_world_book_entries[0].constant);
+    }
+
+    /// A book whose constant entries alone exceed the budget cannot be
+    /// honoured. That is worth saying out loud instead of sending less than the
+    /// book promised.
+    #[test]
+    fn a_dropped_constant_entry_is_reported_as_one() {
+        let (library, conversation) = library_with(vec![
+            entry("always-one", 1, true, 10),
+            entry("always-two", 2, true, 10),
+        ]);
+
+        let plan = plan_with_budget(
+            &library,
+            &conversation,
+            WorldBookBudget {
+                max_entries: 1,
+                max_chars: 1_000,
+            },
+        );
+
+        assert!(is_sent(&plan, "always-one"));
+        assert_eq!(plan.dropped_world_book_entries.len(), 1);
+        assert!(plan.dropped_world_book_entries[0].constant);
+    }
+
+    /// Deciding what to send must not move what was always going to be sent. An
+    /// entry's position in the prompt is part of its meaning.
+    #[test]
+    fn the_budget_keeps_its_order_and_only_changes_membership() {
+        let (library, conversation) = library_with(vec![
+            entry("late-but-constant", 500, true, 10),
+            entry("early-keyed", 1, false, 10),
+            entry("later-keyed", 2, false, 10),
+        ]);
+
+        let plan = plan_with_budget(
+            &library,
+            &conversation,
+            WorldBookBudget {
+                max_entries: 2,
+                max_chars: 1_000,
+            },
+        );
+
+        assert_eq!(
+            sent_ids(&plan),
+            vec!["early-keyed".to_string(), "late-but-constant".to_string()]
+        );
+    }
+
+    /// Nothing dropped is nothing to report, and a plan that always carries a
+    /// list of names has a list that always has to be checked.
+    #[test]
+    fn an_ordinary_request_reports_nothing_dropped() {
+        let (library, conversation) = library_with(vec![entry("only", 10, true, 10)]);
+
+        let plan = plan_with_budget(&library, &conversation, WorldBookBudget::default());
+
+        assert!(plan.dropped_world_book_entries.is_empty());
+        assert!(
+            serde_json::to_value(&plan)
+                .expect("a plan is storable")
+                .get("dropped_world_book_entries")
+                .is_none(),
+            "an empty list should not be written at all"
+        );
+    }
+
+    /// A plan stored before the budget existed still has to load. The list is
+    /// about what a request left behind, and a plan that cannot be read is worse
+    /// than one that reports nothing dropped.
+    #[test]
+    fn a_plan_written_before_the_budget_still_reads() {
+        let stored = serde_json::json!({
+            "prefix": [],
+            "history": [],
+            "suffix": []
+        });
+
+        let plan: PromptPlan =
+            serde_json::from_value(stored).expect("an old plan is still readable");
+
+        assert!(plan.dropped_world_book_entries.is_empty());
+    }
+
+    /// Changing what fits changes the prompt block, so it has to be reported the
+    /// same way any other world-book change is: a declared break, not a hidden
+    /// one.
+    #[test]
+    fn a_budget_that_changed_between_two_turns_is_a_declared_break() {
+        let (library, conversation) = library_with(vec![
+            entry("first", 10, false, 10),
+            entry("second", 20, false, 10),
+        ]);
+
+        let roomy = plan_with_budget(
+            &library,
+            &conversation,
+            WorldBookBudget {
+                max_entries: 5,
+                max_chars: 1_000,
+            },
+        );
+        let tight = plan_with_budget(
+            &library,
+            &conversation,
+            WorldBookBudget {
+                max_entries: 1,
+                max_chars: 1_000,
+            },
+        );
+
+        assert_eq!(
+            roomy.cache_continuity_with(&tight),
+            CacheContinuity::BrokeAtWorldBook
+        );
+    }
+
+    /// The defaults have to be a real limit, not a number that only looks
+    /// careful.
+    #[test]
+    fn the_default_budget_bounds_an_enormous_book() {
+        let entries: Vec<WorldBookEntry> = (0..200)
+            .map(|index| entry(&format!("entry-{index}"), index, false, 200))
+            .collect();
+        let (library, conversation) = library_with(entries);
+
+        let plan = plan_with_budget(&library, &conversation, WorldBookBudget::default());
+
+        assert!(sent_ids(&plan).len() <= DEFAULT_MAX_WORLD_BOOK_ENTRIES);
+        assert!(!plan.dropped_world_book_entries.is_empty());
     }
 }
