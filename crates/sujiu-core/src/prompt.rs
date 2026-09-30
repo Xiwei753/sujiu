@@ -497,6 +497,52 @@ mod tests {
         }));
     }
 
+    /// The compacted summary is part of what the model can see, so it has to be
+    /// part of what the world book is scanned against. Otherwise a long
+    /// conversation silently changes which lore entries trigger the moment it
+    /// gets compacted, and the summary is the only place the old detail lives.
+    #[test]
+    fn a_compacted_summary_keeps_triggering_lore_that_only_it_still_mentions() {
+        let mut transcript = Transcript::default();
+
+        // Only the OLD turn mentions the tower. If the retained turn mentioned
+        // it too, the keyword would still match the live history and the test
+        // would pass whether or not the summary is scanned.
+        let mut old = Turn::new("turn-0", "Where do we go from here?");
+        old.steps.push(crate::transcript::AssistantStep {
+            text: Some("We should visit the Black Tower before dawn.".into()),
+            ..crate::transcript::AssistantStep::default()
+        });
+        transcript.push(old);
+
+        let mut kept = Turn::new("turn-1", "And then?");
+        kept.steps.push(crate::transcript::AssistantStep {
+            text: Some("The road is long.".into()),
+            ..crate::transcript::AssistantStep::default()
+        });
+        transcript.push(kept);
+
+        transcript.compact(1, |_, _| {
+            "Earlier the pair agreed to visit the Black Tower before dawn.".to_string()
+        });
+
+        // The only turn that mentioned the tower is now only in the summary.
+        assert_eq!(transcript.turns.len(), 1);
+        assert!(!transcript.turns[0].steps[0]
+            .text
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Black Tower"));
+        assert!(transcript.scan_text().contains("Black Tower"));
+
+        let plan = PromptCompiler::compile(None, &lore_character(), &transcript, "Carry on.");
+
+        assert!(plan.segments().iter().any(|segment| {
+            segment.source == PromptSource::WorldBook
+                && segment.content.contains("north of the capital")
+        }));
+    }
+
     #[test]
     fn unrelated_world_book_entry_stays_out() {
         let plan = PromptCompiler::compile(

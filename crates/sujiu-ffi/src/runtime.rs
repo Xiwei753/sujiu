@@ -418,27 +418,41 @@ impl SujiuRuntime {
 
     /// Point the runtime at a directory a platform chose, restoring a document
     /// there if one exists. The directory is created if it is missing.
+    ///
+    /// A document that cannot be read is left exactly as it is. Overwriting it
+    /// with an empty catalog would destroy the only copy of a session because
+    /// one value in it was not understood, and a store that cannot be read yet
+    /// is a store whose contents are still worth keeping.
     pub fn use_directory(&self, path: &str) -> Result<(), String> {
         let storage = FileStorage::new(path).map_err(|error| error.to_string())?;
+        let mut write_back = true;
         if let Some(document) = storage.load(SNAPSHOT_FILE) {
-            if let Some(snapshot) = parse_snapshot(&document) {
-                let mut inner = self.inner.lock().unwrap();
-                inner.catalog = Catalog {
-                    characters: snapshot.characters,
-                    sessions: snapshot.sessions,
-                };
-                inner.provider_config = snapshot.provider_config;
-                inner.store.clear();
-                for source in snapshot.sources {
-                    inner.store.add_source(source);
+            match parse_snapshot(&document) {
+                Some(snapshot) => {
+                    let mut inner = self.inner.lock().unwrap();
+                    inner.catalog = Catalog {
+                        characters: snapshot.characters,
+                        sessions: snapshot.sessions,
+                    };
+                    inner.provider_config = snapshot.provider_config;
+                    inner.store.clear();
+                    for source in snapshot.sources {
+                        inner.store.add_source(source);
+                    }
+                    for record in snapshot.records {
+                        inner.store.add_record(record);
+                    }
                 }
-                for record in snapshot.records {
-                    inner.store.add_record(record);
-                }
+                // Keep what is there. A directory that has content this build
+                // cannot read is not an empty directory, and replacing it with
+                // the seed would destroy the only copy.
+                None => write_back = false,
             }
         }
         *self.storage.lock().unwrap() = Arc::new(storage);
-        self.persist();
+        if write_back {
+            self.persist();
+        }
         Ok(())
     }
 
@@ -930,15 +944,14 @@ impl SujiuRuntime {
             ),
             supports_developer_role: false,
             // Whether the replay of assistant reasoning is a requirement of the
-            // endpoint rather than a preference. It defaults to off because
-            // sending a field a service does not know is worse than omitting
-            // one, and a thinking-mode transport that requires it can declare
-            // it without the adapter guessing.
+            // endpoint. It is answered by the provider layer from the endpoint
+            // and model the user configured, so the capability works on the
+            // same path a real configuration takes. A platform that wants to
+            // override it for a gateway in front of a known endpoint can, and
+            // the key is named in the shared core rather than invented here.
             requires_reasoning_content_for_tool_calls: config
-                .extra
-                .get("requiresReasoningContentForToolCalls")
-                .and_then(Value::as_bool)
-                .unwrap_or(false),
+                .capabilities()
+                .replays_assistant_reasoning,
         });
 
         Ok((

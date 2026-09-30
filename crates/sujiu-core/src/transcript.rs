@@ -48,6 +48,56 @@ impl TurnState {
     }
 }
 
+/// Reads a step's continuation event, accepting the older shape.
+///
+/// State written before the event was a persistable thing stored only the
+/// handle a round produced, so a stored `null` meant "this round said nothing"
+/// and a stored object meant "this round produced this". Both are still
+/// readable; anything genuinely new is read as an event.
+fn de_continuation_event<'de, D>(
+    deserializer: D,
+) -> Result<crate::model::ContinuationUpdate, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let stored = Option::<Value>::deserialize(deserializer)?;
+
+    let Some(stored) = stored else {
+        return Ok(crate::model::ContinuationUpdate::Unchanged);
+    };
+
+    if let Ok(event) = serde_json::from_value::<crate::model::ContinuationUpdate>(stored.clone()) {
+        return Ok(event);
+    }
+
+    // A document written before continuation events were named stored the bare
+    // handle. Only a value that is recognisably a handle is read that way: every
+    // field of `ProviderContinuation` is optional, so asking it to read an
+    // unrecognised shape yields an empty handle rather than an error, and an
+    // empty handle is a different answer to "what should happen to the handle"
+    // than the one the provider gave.
+    let reads_as_a_handle = stored
+        .as_object()
+        .map(|fields| {
+            ["identity", "support", "response_id", "state"]
+                .iter()
+                .any(|field| fields.contains_key(*field))
+        })
+        .unwrap_or(false);
+
+    if reads_as_a_handle {
+        return serde_json::from_value::<crate::model::ProviderContinuation>(stored)
+            .map(crate::model::ContinuationUpdate::Replace)
+            .map_err(D::Error::custom);
+    }
+
+    Err(D::Error::custom(format!(
+        "unrecognised continuation event: {stored}"
+    )))
+}
+
 /// One tool call and its result.
 ///
 /// The result lives inside the call on purpose: that makes an unpaired call
@@ -124,13 +174,20 @@ pub struct AssistantStep {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     /// Reasoning content, kept apart from visible text because it is not part
-    /// of the conversation the user reads.
+    /// of the conversation the user reads. It remembers which provider
+    /// produced it, because that decides whether it may be replayed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning: Option<String>,
+    pub reasoning: Option<crate::model::ReasoningSidecar>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRecord>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub continuation: Option<crate::model::ProviderContinuation>,
+    /// What this round said should happen to the continuation handle.
+    ///
+    /// The whole event is stored, not just the handle it produced. A provider
+    /// that drops the handle has told us something: storing only the handle
+    /// would turn that answer into silence, and the next turn would search
+    /// backwards and find the dead handle this step retired.
+    #[serde(default, deserialize_with = "de_continuation_event")]
+    pub continuation: crate::model::ContinuationUpdate,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::model::TokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,12 +293,19 @@ impl Turn {
         self.steps.iter().flat_map(|step| step.tool_calls.iter())
     }
 
-    /// The continuation state of the last step that produced any.
-    pub fn continuation(&self) -> Option<&crate::model::ProviderContinuation> {
+    /// The last thing any step in this turn said about continuation.
+    ///
+    /// A step that said nothing is not an answer, so the search keeps going
+    /// backwards. A step that said "clear" is an answer, and it is returned
+    /// rather than skipped, because a retired handle must not be rediscovered.
+    pub fn continuation_event(&self) -> Option<&crate::model::ContinuationUpdate> {
         self.steps
             .iter()
             .rev()
-            .find_map(|step| step.continuation.as_ref())
+            .find_map(|step| match step.continuation {
+                crate::model::ContinuationUpdate::Unchanged => None,
+                _ => Some(&step.continuation),
+            })
     }
 
     /// This turn as provider-neutral model messages, in wire order.
@@ -449,7 +513,20 @@ impl Transcript {
     }
 
     /// The text a keyword scan should see: everything the model was shown.
+    ///
+    /// The compacted summary counts, because the model is shown it. Leaving it
+    /// out would make a world-book entry stop matching at the exact moment the
+    /// conversation got long enough to compact, which is a change in what the
+    /// model is told triggered by something that changed nothing about the
+    /// world. Archived raw turns do not count: they are no longer in the
+    /// prompt, and the summary is what stands in for them.
     pub fn scan_text(&self) -> String {
+        let summary = self
+            .compacted
+            .as_ref()
+            .map(|compacted| compacted.summary.trim())
+            .filter(|summary| !summary.is_empty());
+
         self.turns
             .iter()
             .flat_map(|turn| {
@@ -460,6 +537,7 @@ impl Transcript {
                         .filter(|text| !text.trim().is_empty()),
                 )
             })
+            .chain(summary)
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -470,6 +548,10 @@ impl Transcript {
     /// for a transport that cannot resume from provider state at all. Either
     /// way the runtime falls back to the normalized transcript instead of
     /// sending state the provider never asked for.
+    ///
+    /// The search stops at the first event a provider ever gave, whatever that
+    /// event was. A handle it replaced is superseded, and a handle it cleared
+    /// is dead, so neither is a reason to keep looking for an older one.
     pub fn continuation_for(
         &self,
         identity: &crate::model::ProviderIdentity,
@@ -477,7 +559,12 @@ impl Transcript {
         self.turns
             .iter()
             .rev()
-            .find_map(Turn::continuation)
+            .find_map(Turn::continuation_event)
+            .and_then(|event| match event {
+                crate::model::ContinuationUpdate::Replace(continuation) => Some(continuation),
+                crate::model::ContinuationUpdate::Clear => None,
+                crate::model::ContinuationUpdate::Unchanged => None,
+            })
             .filter(|continuation| continuation.is_reusable_for(identity))
     }
 
@@ -687,10 +774,12 @@ mod tests {
         }
     }
 
+    use crate::model::ContinuationUpdate;
+
     #[test]
     fn continuation_state_is_only_reusable_for_the_same_provider_endpoint_and_model() {
         let mut turn = tool_turn();
-        turn.steps[0].continuation = Some(ProviderContinuation {
+        turn.steps[0].continuation = ContinuationUpdate::Replace(ProviderContinuation {
             identity: identity(
                 ProviderKind::OpenAiCompatible,
                 "provider-a",
@@ -745,7 +834,7 @@ mod tests {
     #[test]
     fn a_transport_without_native_continuation_never_replays_its_response_id() {
         let mut turn = tool_turn();
-        turn.steps[0].continuation = Some(ProviderContinuation {
+        turn.steps[0].continuation = ContinuationUpdate::Replace(ProviderContinuation {
             identity: identity(
                 ProviderKind::OpenAiCompatible,
                 "provider-a",
@@ -769,6 +858,80 @@ mod tests {
                 "model-a"
             ))
             .is_none());
+    }
+
+    /// A provider that dropped its handle said so, and that answer has to
+    /// survive the session boundary. Searching backwards past it would hand the
+    /// next turn a handle the provider has already disowned.
+    #[test]
+    fn a_cleared_handle_is_not_resurrected_from_an_earlier_step() {
+        let mut turn = tool_turn();
+        turn.steps[0].continuation = ContinuationUpdate::Replace(ProviderContinuation {
+            identity: identity(
+                ProviderKind::OpenAiCompatible,
+                "provider-a",
+                "https://a.example/v1",
+                "model-a",
+            ),
+            support: ContinuationSupport::ResponseId,
+            response_id: Some("resp-1".into()),
+            state: Default::default(),
+        });
+        // A later round of the same turn.
+        turn.steps[1].continuation = ContinuationUpdate::Clear;
+
+        let mut transcript = Transcript::default();
+        transcript.push(turn);
+
+        let identity = identity(
+            ProviderKind::OpenAiCompatible,
+            "provider-a",
+            "https://a.example/v1",
+            "model-a",
+        );
+        assert!(
+            transcript.continuation_for(&identity).is_none(),
+            "a handle the provider dropped must not come back"
+        );
+    }
+
+    /// The clear is only real if it survives being written to disk and read
+    /// back, which is the boundary where the first version of this lost it.
+    #[test]
+    fn a_cleared_handle_stays_cleared_across_a_snapshot() {
+        let mut turn = tool_turn();
+        turn.steps[0].continuation = ContinuationUpdate::Replace(ProviderContinuation {
+            identity: identity(
+                ProviderKind::OpenAiCompatible,
+                "provider-a",
+                "https://a.example/v1",
+                "model-a",
+            ),
+            support: ContinuationSupport::ResponseId,
+            response_id: Some("resp-1".into()),
+            state: Default::default(),
+        });
+        turn.steps[1].continuation = ContinuationUpdate::Clear;
+
+        let mut transcript = Transcript::default();
+        transcript.push(turn);
+
+        let restored: Transcript = serde_json::from_value(
+            serde_json::to_value(&transcript).expect("transcript serializes"),
+        )
+        .expect("transcript parses back");
+        let identity = identity(
+            ProviderKind::OpenAiCompatible,
+            "provider-a",
+            "https://a.example/v1",
+            "model-a",
+        );
+
+        assert!(matches!(
+            restored.turns[0].continuation_event(),
+            Some(ContinuationUpdate::Clear)
+        ));
+        assert!(restored.continuation_for(&identity).is_none());
     }
 
     #[test]

@@ -832,4 +832,45 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A store this build cannot read is still somebody's conversation.
+    ///
+    /// Attaching a directory used to write the seed back unconditionally, so a
+    /// single value the runtime did not understand cost the user every session
+    /// in the file, with no error anywhere.
+    #[test]
+    fn a_document_the_runtime_cannot_read_is_left_alone() {
+        let dir = scratch_dir("unreadable");
+        let file = dir.join("sujiu-runtime.json");
+        // A stored continuation event from a shape this build does not know.
+        let unreadable = r#"{
+            "version": 2,
+            "characters": [],
+            "sessions": [{
+                "id": "session-precious",
+                "transcript": { "turns": [{
+                    "id": "turn-1",
+                    "user": "Do not lose this",
+                    "steps": [{ "text": "Kept.", "continuation": { "retire": {} } }]
+                }] }
+            }],
+            "sources": [],
+            "records": [],
+            "providerConfig": null
+        }"#;
+        std::fs::write(&file, unreadable).expect("write the stored document");
+
+        let runtime = SujiuRuntime::new(crate::seed::seed()).expect("runtime");
+        runtime
+            .use_directory(dir.to_str().expect("utf-8"))
+            .expect("attach");
+
+        assert_eq!(
+            std::fs::read_to_string(&file).expect("still there"),
+            unreadable,
+            "a document that could not be read must not be replaced by the seed"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

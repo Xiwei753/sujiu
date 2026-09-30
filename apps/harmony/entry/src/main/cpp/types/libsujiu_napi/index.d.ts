@@ -85,6 +85,14 @@ export interface ProviderConfig {
   model: string;
   maxTokens?: number;
   temperature?: number;
+  /**
+   * States that this endpoint requires a previous assistant tool call to be
+   * replayed together with the reasoning that produced it. Optional on purpose:
+   * most endpoints do not need it, and a known thinking-mode service is
+   * recognised from `baseUrl` and `model` without it. Send it only to describe
+   * a capability, never a protocol field name.
+   */
+  replaysAssistantReasoning?: boolean;
 }
 
 /**

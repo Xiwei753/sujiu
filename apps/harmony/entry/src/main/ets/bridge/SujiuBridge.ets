@@ -102,6 +102,16 @@ export interface ProviderDraft {
    */
   maxTokens?: number;
   temperature?: number;
+  /**
+   * States that this endpoint requires a previous assistant tool call to be
+   * replayed together with the reasoning that produced it.
+   *
+   * Optional on purpose: a known thinking-mode service is recognised from the
+   * endpoint and model alone, so a settings form does not have to know that this
+   * is a protocol requirement. Set it only to describe a capability the runtime
+   * cannot infer, and never a wire field name.
+   */
+  replaysAssistantReasoning?: boolean;
 }
 
 export interface SujiuBridge {

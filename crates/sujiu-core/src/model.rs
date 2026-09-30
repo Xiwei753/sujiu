@@ -53,8 +53,8 @@ pub enum ModelMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<String>,
         calls: Vec<ToolCall>,
-        /// The reasoning the model produced alongside those calls, kept
-        /// provider-neutral.
+        /// The reasoning the model produced alongside those calls, with the
+        /// provider that produced it.
         ///
         /// Several thinking-mode transports reject a request whose previous
         /// assistant tool call arrives without the reasoning that produced it,
@@ -65,7 +65,7 @@ pub enum ModelMessage {
         /// that does not know the field leaves it behind instead of guessing
         /// a name for it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        reasoning: Option<String>,
+        reasoning: Option<ReasoningSidecar>,
     },
     ToolResult {
         call_id: String,
@@ -305,6 +305,42 @@ pub struct ProviderIdentity {
     pub model: String,
 }
 
+/// Reasoning a model produced, together with the provider it came from.
+///
+/// Ordinary visible assistant text is portable: the next provider can read it
+/// and continue. Provider reasoning is not. It is wire metadata whose field
+/// name and meaning belong to one protocol, so it carries its origin and is
+/// only put back on the wire for that same provider. A bare string would let a
+/// switch hand one provider's reasoning to another under a field name the
+/// second one may not even accept.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReasoningSidecar {
+    /// The reasoning text as the provider sent it.
+    pub content: String,
+    /// The provider that produced this reasoning.
+    #[serde(default)]
+    pub identity: ProviderIdentity,
+}
+
+impl ReasoningSidecar {
+    pub fn new(content: impl Into<String>, identity: ProviderIdentity) -> Self {
+        Self {
+            content: content.into(),
+            identity,
+        }
+    }
+
+    /// Whether this reasoning may be replayed to `identity`.
+    ///
+    /// The same provider config, endpoint and model is the only case treated
+    /// as safe. A provider behind a different gateway is a different protocol
+    /// as far as this text is concerned, even when both speak the same dialect
+    /// of the same API.
+    pub fn is_replayable_for(&self, identity: &ProviderIdentity) -> bool {
+        !self.content.trim().is_empty() && self.identity == *identity
+    }
+}
+
 /// Whether a wire format can resume from provider state at all.
 ///
 /// A transport that replays the whole conversation every time has nothing to
@@ -444,6 +480,11 @@ pub struct AssistantTurn {
     pub tool_calls: Vec<ToolCall>,
     #[serde(default)]
     pub finish_reason: Option<String>,
+    /// The reasoning this provider produced, already stamped with the provider
+    /// that produced it. The provider fills it in rather than the caller,
+    /// because provenance is the one thing the caller cannot know.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningSidecar>,
     /// What a provider needs to continue this exact response, if anything. It
     /// travels with the transcript instead of being dropped, so a later turn
     /// can replay it to the same provider and model.

@@ -247,8 +247,12 @@ impl<'a> AgentRuntime<'a> {
 
             let step = AssistantStep {
                 text: produced.text,
-                reasoning: observed.take_reasoning(),
-                continuation: produced.continuation.produced(),
+                reasoning: produced.reasoning,
+                // The event, not the handle it produced. A provider that
+                // dropped the handle has said so, and that answer has to
+                // survive the session boundary or the next turn will find the
+                // retired handle again.
+                continuation: produced.continuation,
                 usage: produced.usage,
                 finish_reason: produced.finish_reason,
                 ..AssistantStep::default()
@@ -458,26 +462,20 @@ fn outcome(
     }
 }
 
-/// Forwards events to the caller's sink while keeping the reasoning text.
+/// Forwards events to the caller's sink.
 ///
-/// Reasoning arrives as a stream of deltas, so the transcript can only learn
-/// what the model thought if something collects them. Keeping it here is also
-/// what stops it from being mistaken for visible assistant text.
+/// Reasoning used to be collected here, because a stream only ever delivers
+/// it as deltas. It no longer is: the provider that parsed the deltas is the
+/// one that knows which provider they came from, so it assembles the sidecar
+/// itself and reports it on the turn. Reconstructing the text here would have
+/// thrown that provenance away.
 struct ObservedSink<'a> {
     inner: &'a mut dyn StreamSink,
-    reasoning: String,
 }
 
 impl<'a> ObservedSink<'a> {
     fn new(inner: &'a mut dyn StreamSink) -> Self {
-        Self {
-            inner,
-            reasoning: String::new(),
-        }
-    }
-
-    fn take_reasoning(&mut self) -> Option<String> {
-        (!self.reasoning.is_empty()).then(|| std::mem::take(&mut self.reasoning))
+        Self { inner }
     }
 }
 
@@ -487,7 +485,6 @@ impl StreamSink for ObservedSink<'_> {
     }
 
     fn on_reasoning_delta(&mut self, delta: &str) {
-        self.reasoning.push_str(delta);
         self.inner.on_reasoning_delta(delta);
     }
 
@@ -856,7 +853,7 @@ mod tests {
         let runtime = AgentRuntime::new(&provider, &tools, AgentConfig::default());
         let mut sink = RecordingSink::default();
 
-        runtime
+        let outcome = runtime
             .run_streaming(
                 user_message("what happened?"),
                 Some(chainable(identity, "session-0")),
@@ -871,6 +868,19 @@ mod tests {
             requests[1].continuation.is_none(),
             "a handle the provider dropped must not be replayed: {:?}",
             requests[1].continuation
+        );
+        drop(requests);
+
+        // The next user turn reads the transcript, not this request list, so
+        // the clear has to be written onto the step too.
+        assert!(
+            matches!(
+                outcome.turn.steps[0].continuation,
+                ContinuationUpdate::Clear
+            ),
+            "the clear must be recorded on the step, or the next turn searches \
+             past it and finds the handle that was live before it: {:?}",
+            outcome.turn.steps[0].continuation
         );
     }
 

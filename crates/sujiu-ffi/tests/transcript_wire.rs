@@ -274,8 +274,12 @@ fn configure(runtime: &SujiuRuntime, base_url: &str, model: &str) {
         .expect("provider config");
 }
 
-/// Points a runtime at an endpoint that declares it needs assistant reasoning
-/// replayed alongside a tool call, which is what a thinking-mode service does.
+/// Points a runtime at a thinking-mode endpoint by declaring the capability.
+///
+/// The mock server is a loopback address, so no known endpoint profile applies
+/// and the capability has to be stated. This is the product-level capability
+/// key, not an adapter flag: the settings form and the bridge can both carry
+/// it, and a known endpoint gets the same answer without it.
 fn configure_thinking(runtime: &SujiuRuntime, base_url: &str, model: &str) {
     runtime
         .set_provider_config(Some(ProviderConfig {
@@ -286,7 +290,7 @@ fn configure_thinking(runtime: &SujiuRuntime, base_url: &str, model: &str) {
             model: model.to_string(),
             credential_ref: None,
             extra: serde_json::from_value(json!({
-                "requiresReasoningContentForToolCalls": true
+                sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY: true
             }))
             .expect("the extra map is a serde value"),
         }))
@@ -1007,7 +1011,7 @@ fn replayed_reasoning_survives_a_restart() {
     let session;
     {
         let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
-        runtime.use_directory(&directory.to_string_lossy());
+        let _ = runtime.use_directory(&directory.to_string_lossy());
         configure_thinking(&runtime, &provider.base_url(), "deepseek-chat");
         session = runtime.create_session(Some("character-wen"));
         run_turn(&runtime, &session, "What happened to the old king?");
@@ -1017,7 +1021,7 @@ fn replayed_reasoning_survives_a_restart() {
 
     {
         let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
-        runtime.use_directory(&directory.to_string_lossy());
+        let _ = runtime.use_directory(&directory.to_string_lossy());
         configure_thinking(&runtime, &provider.base_url(), "deepseek-chat");
         run_turn(&runtime, &session, "Who took the throne?");
         let second = provider.next_request();
@@ -1101,6 +1105,98 @@ fn a_second_compaction_is_given_the_older_turns_and_the_previous_summary() {
     assert!(
         prompt_text.contains("The station runs unattended."),
         "{prompt_text}"
+    );
+
+    drop(runtime);
+    drop(provider.server);
+}
+
+/// A handle the provider retired has to stay retired across a restart.
+///
+/// The document below is the shape a transport with real continuation support
+/// would leave behind: a turn whose first round replaced the handle and whose
+/// second round cleared it. Chat Completions cannot produce that state itself,
+/// because it has nowhere to put a handle, so the state is written the way such
+/// a transport would have written it and then read back through the real
+/// snapshot path.
+///
+/// What is being proved is that the session boundary preserves the *event*. If
+/// loading or storing normalised `clear` into silence, the next turn would
+/// search backwards, find the handle the clear retired, and believe it was
+/// still live. The event surviving the round trip is exactly what stops that.
+#[test]
+fn a_handle_the_provider_retired_stays_retired_across_a_restart() {
+    let provider = ScriptedProvider::start(vec![Step::Text("The line is dead. For now.")]);
+    let directory = scratch_dir("cleared-handle-restart");
+    let session = "session-cleared-handle";
+
+    let document = json!({
+        "version": 2,
+        "characters": [],
+        "sessions": [{
+            "id": session,
+            "characterId": "character-lin",
+            "transcript": {
+                "turns": [{
+                    "id": "turn-1",
+                    "user": "Is anyone there?",
+                    "state": "completed",
+                    "steps": [
+                        {
+                            "text": "Looking.",
+                            "tool_calls": [],
+                            "continuation": { "replace": {
+                                "identity": {
+                                    "kind": "open_ai_compatible",
+                                    "provider_id": "chainable",
+                                    "base_url": "https://chainable.example/v1",
+                                    "model": "model-a"
+                                },
+                                "support": "response_id",
+                                "response_id": "resp-retired"
+                            } }
+                        },
+                        {
+                            "text": "Still here.",
+                            "tool_calls": [],
+                            "continuation": "clear"
+                        }
+                    ]
+                }]
+            },
+            "metadata": {}
+        }],
+        "sources": [],
+        "records": [],
+        "providerConfig": null
+    });
+    std::fs::write(directory.join("sujiu-runtime.json"), document.to_string())
+        .expect("write the stored session");
+
+    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    let _ = runtime.use_directory(&directory.to_string_lossy());
+    configure(&runtime, &provider.base_url(), "model-a");
+
+    run_turn(&runtime, session, "Say something.");
+    let _ = provider.next_request();
+
+    // The runtime rewrites the document on every persisted turn, so reading it
+    // back now shows what the session boundary kept.
+    let stored: Value = serde_json::from_str(
+        &std::fs::read_to_string(directory.join("sujiu-runtime.json")).expect("read back"),
+    )
+    .expect("the stored document is still valid json");
+
+    let steps = &stored["sessions"][0]["transcript"]["turns"][0]["steps"];
+    assert_eq!(
+        steps[0]["continuation"]["replace"]["response_id"], "resp-retired",
+        "the handle that was produced is still recorded: {stored}"
+    );
+    assert_eq!(
+        steps[1]["continuation"], "clear",
+        "the answer that retired it has to survive being stored and reloaded, \
+         otherwise the next turn finds the dead handle and believes it is live: \
+         {stored}"
     );
 
     drop(runtime);

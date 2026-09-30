@@ -178,8 +178,21 @@ the positions their meaning asks for.
 
 Thinking-mode endpoints additionally require the reasoning that produced an
 assistant tool call to be sent back with it, or they reject the request. The
-step keeps that reasoning, and it is replayed only where the endpoint declared
-the requirement.
+step keeps that reasoning and carries the provider that produced it, so it is
+replayed only to that same endpoint; another provider gets the normalized
+transcript, whose visible text is portable, without a sidecar that belongs to a
+foreign protocol. Whether to replay at all is answered by the provider layer from
+the endpoint and model, so no settings form has to know the field name.
+
+A compaction summary is part of the world-book keyword scan. The model reads it,
+so the scan has to see it too — otherwise compacting a long conversation would
+quietly stop triggering the lore it used to trigger.
+
+State a provider produced and has to be carried forward — a tool call and its
+result, a continuation handle or the fact that the provider dropped it, a
+reasoning sidecar — may not be dropped, resurrected from stale state, or sent to
+the wrong provider just because the generic transcript, the UI, or the platform
+config layer has no field for it.
 
 A tool loop that stops early — cancelled, out of rounds, or cut short by a
 provider error — still commits the rounds that finished, so the calls the model

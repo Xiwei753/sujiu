@@ -126,13 +126,15 @@ A second compaction must **not** silently overwrite the first summary. The summa
 
 `Transcript::compaction_input(keep_recent)` and the FFI's `SujiuRuntime::compaction_input` expose that material directly, and `CompactionInput::to_prompt_text` renders it for a summarizer prompt. Without it a caller can only see the turns being archived *now*, so it has no way to write a cumulative summary and would quietly drop the older half of the conversation. Documenting "must be cumulative" is not enough when the caller cannot see what it must be cumulative over.
 
+Compaction also has to leave **what the model can see** and **what the world book can trigger on** in agreement. The summary is put into the model's history, so if `Transcript::scan_text()` ignored it, a long conversation would silently change its lore semantics the moment it was compacted: the model would read "Black Tower" in the summary while no world-book entry could match it. `scan_text` therefore includes the compacted summary. The archived raw turns are still not scanned, because they genuinely left the prompt and are reached through the context protocol instead.
+
 ### Reasoning is replayed when the endpoint needs it
 
 An assistant step keeps the reasoning it was produced with. Thinking-mode transports such as DeepSeek reject a request whose earlier assistant tool call comes back without the reasoning that produced it, so a step's reasoning has to travel with the assistant message on the next request.
 
-`ModelMessage::AssistantToolCalls` therefore carries an optional provider-neutral `reasoning` sidecar, and `AssistantStep::model_messages()` fills it from the step. The **wire field name** is the adapter's business, decided by a capability flag rather than guessed: `OpenAiCompatConfig::requires_reasoning_content_for_tool_calls`, set from the provider config's `requiresReasoningContentForToolCalls`, emits `reasoning_content` only where the endpoint asked for it.
+`ModelMessage::AssistantToolCalls` therefore carries an optional provider-neutral `reasoning` sidecar, and `AssistantStep::model_messages()` fills it from the step. The **wire field name** is the adapter's business, decided by a capability flag rather than guessed: `OpenAiCompatConfig::requires_reasoning_content_for_tool_calls` emits `reasoning_content` only where the endpoint asked for it. That flag is set from `ProviderConfig::capabilities()`, which answers the question from the endpoint and model the user configured rather than from a field only a test can fill; see [Assistant reasoning carries its provider](#assistant-reasoning-carries-its-provider).
 
-That flag is also what stops one provider's reasoning metadata from reaching another. An endpoint that never declared the requirement is not sent a field it does not know, and a blank sidecar is dropped rather than sent as an empty string. The reasoning is deliberately left out of the flat text view in `PromptPlan::segments()`, because that text is what the world book is scanned against and private reasoning should not match keywords.
+The flag alone does not stop one provider's reasoning from reaching another — that is the sidecar's identity, covered in the next section. A blank sidecar is dropped rather than sent as an empty string. The reasoning is deliberately left out of the flat text view in `PromptPlan::segments()`, because that text is what the world book is scanned against and private reasoning should not match keywords.
 
 ### Provider continuation state
 
@@ -151,7 +153,19 @@ Continuation is also **chained within a turn**. Round 2 continues from round 1's
 
 `Option<ProviderContinuation>` cannot express `Clear`, so a provider that had just lost the ability to resume would have been handed a dead handle for the rest of the turn.
 
+The event is also **persisted** on the step. Chaining correctly inside one turn is not enough: if only `Replace` is written down, a later `Clear` degrades to "nothing" and the next user turn's `find_map` walks past it and resurrects the dead handle. So a step stores the whole `ContinuationUpdate`, and `Transcript::continuation_for` stops at the first event a provider ever gave, whatever that event was — a replaced handle is superseded and a cleared one is dead.
+
+A stored event that cannot be read is an **error**, not an empty handle. Every field of `ProviderContinuation` is optional, so reading an unrecognised shape with it would silently produce a blank handle — a different answer to "what should happen to the handle" than the one the provider gave. Documents written before continuation events were named are still read, but only when the value is recognisably a bare handle. For the same reason, `use_directory` never writes back a document it could not parse: a directory with content this build cannot read is not an empty directory, and replacing it with the seed would destroy the only copy.
+
 Chat Completions has no continuation concept, so the adapter records the completion id for reference but marks the state `ContinuationSupport::Unsupported`, which makes it permanently ineligible for replay. The field exists so adapters such as OpenAI Responses, which do have a `previous_response_id`, can use it.
+
+### Assistant reasoning carries its provider
+
+A thinking-mode endpoint may reject a request whose previous assistant tool call returns without the reasoning that produced it, so the reasoning is stored on the step and replayed. It is a `ReasoningSidecar { content, identity }`, not a bare string.
+
+The identity matters: visible assistant text is portable across providers, provider reasoning is not. Handing one provider's reasoning to another under our own field name would put a foreign protocol's text where the endpoint expects its own. The wire field is only restored when the sidecar's identity matches the endpoint being called, and otherwise the reasoning stays in the transcript for diagnostics while the request replays the normalized transcript alone.
+
+Whether to replay at all is a **provider capability**, not a protocol detail the settings form should know. `ProviderConfig::capabilities()` answers it from the endpoint and model the user configured, so a DeepSeek thinking endpoint works without anyone filling in a hidden field. A platform only describes the provider, so an advanced override is allowed as an optional `replaysAssistantReasoning` that the bridge passes through — but the profile is what makes the feature reachable.
 
 ### 4. sujiu-ffi
 

@@ -77,6 +77,7 @@ interface NativeProviderConfig {
   model: string;
   maxTokens?: number;
   temperature?: number;
+  replaysAssistantReasoning?: boolean;
 }
 
 interface NativeTurnRequest {
@@ -462,7 +463,8 @@ export class SujiuNativeBridge implements SujiuBridge {
         baseUrl: draft.baseUrl,
         model: draft.model,
         maxTokens: draft.maxTokens,
-        temperature: draft.temperature
+        temperature: draft.temperature,
+        replaysAssistantReasoning: draft.replaysAssistantReasoning
       } as NativeProviderConfig)
       .then(() => {
         this.draft = draft;

@@ -100,6 +100,14 @@ pub struct ProviderConfigDto {
     pub model: String,
     pub max_tokens: Option<u32>,
     pub temperature: Option<f64>,
+    /// Whether this endpoint needs the assistant reasoning that produced a tool
+    /// call sent back with it.
+    ///
+    /// Optional because most endpoints do not, and a known thinking-mode
+    /// service is recognised without it. A platform only describes the provider
+    /// it was given; the protocol requirement is the runtime's answer, so this
+    /// is a stated capability rather than something a form has to know about.
+    pub replays_assistant_reasoning: Option<bool>,
 }
 
 #[napi(object)]
@@ -214,6 +222,12 @@ impl ProviderConfigDto {
         }
         if let Some(temperature) = self.temperature {
             extra.insert("temperature".to_string(), temperature.into());
+        }
+        if let Some(replays) = self.replays_assistant_reasoning {
+            extra.insert(
+                sujiu_core::REPLAYS_ASSISTANT_REASONING_KEY.to_string(),
+                replays.into(),
+            );
         }
 
         ProviderConfig {
@@ -424,5 +438,105 @@ impl SujiuRuntimeBridge {
     #[napi]
     pub fn cancel_turn(&self) {
         self.runtime.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProviderConfigDto;
+
+    /// The replay of assistant reasoning is a property of the endpoint, so it
+    /// has to be answerable from the endpoint and model a settings form
+    /// collects. A user pointing Sujiu at a thinking-mode service cannot type a
+    /// hidden `extra` key, so a capability only reachable that way is a feature
+    /// no real user can turn on.
+    ///
+    /// This drives the real path: the fields the bridge sends, the conversion
+    /// the bridge performs, and the runtime's answer.
+    #[test]
+    fn a_thinking_endpoint_is_recognised_from_the_fields_the_settings_form_sends() {
+        let from_the_form = ProviderConfigDto {
+            id: "provider-1".into(),
+            name: "DeepSeek".into(),
+            kind: "openai_compatible".into(),
+            base_url: "https://api.deepseek.com/v1".into(),
+            model: "deepseek-reasoner".into(),
+            max_tokens: Some(2048),
+            temperature: Some(0.7),
+            replays_assistant_reasoning: None,
+        };
+
+        let config = from_the_form.to_domain();
+
+        assert!(config.capabilities().replays_assistant_reasoning);
+    }
+
+    /// An ordinary chat endpoint has no such requirement and must not be handed
+    /// a reasoning block it does not understand.
+    #[test]
+    fn an_ordinary_chat_endpoint_is_left_alone() {
+        let chat = ProviderConfigDto {
+            id: "provider-1".into(),
+            name: "DeepSeek".into(),
+            kind: "openai_compatible".into(),
+            base_url: "https://api.deepseek.com/v1".into(),
+            model: "deepseek-chat".into(),
+            max_tokens: None,
+            temperature: None,
+            replays_assistant_reasoning: None,
+        };
+
+        assert!(!chat.to_domain().capabilities().replays_assistant_reasoning);
+    }
+
+    /// Another vendor's gateway serving a model of the same name is a different
+    /// endpoint and must not inherit its protocol requirements.
+    #[test]
+    fn another_gateways_reasoning_endpoint_is_not_given_the_requirement() {
+        let elsewhere = ProviderConfigDto {
+            id: "provider-1".into(),
+            name: "Gateway".into(),
+            kind: "openai_compatible".into(),
+            base_url: "https://gateway.example.com/v1".into(),
+            model: "deepseek-reasoner".into(),
+            max_tokens: None,
+            temperature: None,
+            replays_assistant_reasoning: None,
+        };
+
+        assert!(
+            !elsewhere
+                .to_domain()
+                .capabilities()
+                .replays_assistant_reasoning
+        );
+    }
+
+    /// A platform that does know the requirement can still say so, and an
+    /// override has to be able to switch the answer in both directions.
+    #[test]
+    fn a_stated_capability_overrides_what_the_runtime_inferred() {
+        let base = ProviderConfigDto {
+            id: "provider-1".into(),
+            name: "Gateway".into(),
+            kind: "openai_compatible".into(),
+            base_url: "https://gateway.example.com/v1".into(),
+            model: "reasoner-x".into(),
+            max_tokens: None,
+            temperature: None,
+            replays_assistant_reasoning: None,
+        };
+
+        let on = ProviderConfigDto {
+            replays_assistant_reasoning: Some(true),
+            ..base
+        };
+        assert!(on.to_domain().capabilities().replays_assistant_reasoning);
+
+        let off = ProviderConfigDto {
+            replays_assistant_reasoning: Some(false),
+            ..on
+        };
+        assert!(!off.to_domain().capabilities().replays_assistant_reasoning);
     }
 }

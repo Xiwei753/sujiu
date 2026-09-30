@@ -11,14 +11,17 @@ pub use character::Character;
 pub use context::{ContextKind, ContextRecord, ContextScope, ContextSource};
 pub use model::{
     AssistantTurn, ContinuationSupport, ContinuationUpdate, ModelMessage, ModelRole,
-    ProviderContinuation, ProviderIdentity, ProviderRequest, TokenUsage, ToolAnnotations, ToolCall,
-    ToolCallState, ToolContent, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
+    ProviderContinuation, ProviderIdentity, ProviderRequest, ReasoningSidecar, TokenUsage,
+    ToolAnnotations, ToolCall, ToolCallState, ToolContent, ToolDefinition, ToolDiscovery,
+    ToolOutput, ToolResult,
 };
 pub use prompt::{
     CacheContinuity, PromptCompiler, PromptPlan, PromptSegment, PromptSource,
     DEFAULT_APP_SYSTEM_PROMPT,
 };
-pub use provider::{ProviderConfig, ProviderKind};
+pub use provider::{
+    ProviderCapabilities, ProviderConfig, ProviderKind, REPLAYS_ASSISTANT_REASONING_KEY,
+};
 pub use session::{ChatMessage, ChatRole, Session};
 pub use transcript::{
     model_messages_from_transcript, validate_pairing, AssistantStep, CompactedTurns,

@@ -6,7 +6,7 @@
 
 pub use sujiu_core::model::{
     messages_from_prompt_plan, AssistantTurn, ContinuationSupport, ContinuationUpdate,
-    ModelMessage, ModelRole, ProviderContinuation, ProviderIdentity, ProviderRequest, TokenUsage,
-    ToolAnnotations, ToolCall, ToolCallState, ToolContent, ToolDefinition, ToolDiscovery,
-    ToolOutput, ToolResult,
+    ModelMessage, ModelRole, ProviderContinuation, ProviderIdentity, ProviderRequest,
+    ReasoningSidecar, TokenUsage, ToolAnnotations, ToolCall, ToolCallState, ToolContent,
+    ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
 };
