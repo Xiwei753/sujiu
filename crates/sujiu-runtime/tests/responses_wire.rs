@@ -1184,6 +1184,27 @@ fn a_long_conversation_is_compacted_by_the_kernel_without_breaking_pairing() {
         material(&summaries[0])
     );
 
+    // And the turn the first summary already stands for must not be back in the
+    // request. That is the difference between a summary that accumulates and a
+    // summarizer that re-reads the whole conversation on every compaction: the
+    // bill grows with the session instead of with the new turns, and eventually
+    // the summarizer is the thing that runs out of context — which fails
+    // compaction permanently, right when the conversation needs it.
+    assert!(
+        summaries[1..]
+            .iter()
+            .all(|request| !material(request).contains("shift 0 and the water")),
+        "archived history the summary already carries must not be re-billed: {:?}",
+        material(&summaries[1])
+    );
+    assert!(
+        summaries[1..].iter().all(|request| {
+            material(request).contains("The station runs unattended; the water")
+        }),
+        "what replaced it is what travels forward: {:?}",
+        material(&summaries[1])
+    );
+
     // Nothing was deleted. Compaction moves turns out of the prompt; the
     // transcript is still the whole conversation, every call still has its
     // result, and the state still says they completed.

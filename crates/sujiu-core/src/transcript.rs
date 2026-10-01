@@ -558,14 +558,18 @@ pub struct CompactedTurns {
 ///
 /// A summary produced from only the turns being archived *now* would drop
 /// everything older out of the model's view, so the input always carries the
-/// previous summary and every turn archived so far.
+/// previous summary next to them. The already-archived raw turns are
+/// deliberately absent: they are what `previous_summary` was written from, and
+/// including them again would make the summarizer request — and its bill —
+/// grow with the entire conversation on every compaction, until the summarizer
+/// is the thing that runs out of context.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CompactionInput {
     /// The summary that already stands in for the archived turns, empty before
     /// the first compaction.
     pub previous_summary: String,
-    /// Every turn a new summary has to cover: the already-archived ones first,
-    /// then the ones this compaction would move.
+    /// The turns this compaction is moving, and the only raw turns a new summary
+    /// has to read.
     pub turns: Vec<Turn>,
 }
 
@@ -786,33 +790,29 @@ impl Transcript {
     /// state leaves the prompt with them: a provider must not be asked to resume
     /// from turns the model can no longer see.
     ///
-    /// The summarizer is handed *every* archived turn plus the summary that
-    /// already stood in for them, so a second compaction can produce a summary
-    /// of the whole compacted history. Overwriting the previous summary with a
-    /// summary of only the newly archived turns would silently drop everything
-    /// older out of the model's view.
+    /// The summarizer is handed the summary that already stands for the archived
+    /// history plus the turns being archived *now*, and nothing else. The
+    /// already-archived raw turns stay in [`Transcript::compacted`] for the UI
+    /// and for exact retrieval, but they do not go back into the summarizer
+    /// request: `previous_summary` is already what they were folded into, so
+    /// resending them would charge for the whole conversation again on every
+    /// compaction, forever.
     ///
     /// Returns `false` when there is nothing old enough to compact, which keeps a
     /// caller from rewriting a history that did not need rewriting.
     /// What a caller has to summarize in order to compact this transcript.
     ///
-    /// Exposing it matters: an upper layer that only ever sees the turns being
-    /// archived *now* cannot write a summary of the whole compacted history, and
-    /// would silently overwrite the summary that stood in for the older turns.
-    /// The input always carries the previous summary and every already-archived
-    /// turn, so a cumulative summary is something the caller can actually build.
+    /// Exposing it matters. An upper layer that only ever sees the turns being
+    /// archived *now* cannot know what the summary it is replacing already said,
+    /// so it cannot extend it; and one that only ever sees `previous_summary`
+    /// cannot fold the new turns in. The input carries exactly the two pieces
+    /// that together make a cumulative summary: what is already known, and what
+    /// is newly arriving.
     pub fn compaction_input(&self, keep_recent: usize) -> Option<CompactionInput> {
         let keep_from = self.turns.len().saturating_sub(keep_recent);
         if keep_from == 0 {
             return None;
         }
-
-        let mut turns: Vec<Turn> = self
-            .compacted
-            .as_ref()
-            .map(|archived| archived.turns.clone())
-            .unwrap_or_default();
-        turns.extend(self.turns[..keep_from].iter().cloned());
 
         Some(CompactionInput {
             previous_summary: self
@@ -820,7 +820,7 @@ impl Transcript {
                 .as_ref()
                 .map(|archived| archived.summary.clone())
                 .unwrap_or_default(),
-            turns,
+            turns: self.turns[..keep_from].to_vec(),
         })
     }
 
@@ -835,18 +835,16 @@ impl Transcript {
         }
 
         let moved: Vec<Turn> = self.turns.drain(..keep_from).collect();
-        let mut to_summarize: Vec<Turn> = self
-            .compacted
-            .as_ref()
-            .map(|archived| archived.turns.clone())
-            .unwrap_or_default();
-        to_summarize.extend(moved.iter().cloned());
         let previous_summary = self
             .compacted
             .as_ref()
             .map(|archived| archived.summary.clone())
             .unwrap_or_default();
-        let summary = summarize(&to_summarize, &previous_summary);
+        // Only the turns leaving the prompt, and only against the summary they
+        // extend. The turns already in `compacted` are represented by that
+        // summary, and handing them back would make every compaction re-bill the
+        // entire history.
+        let summary = summarize(&moved, &previous_summary);
 
         let archived = self.compacted.get_or_insert_with(CompactedTurns::default);
         archived.turns.extend(moved);
@@ -1465,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn a_second_compaction_summarizes_every_archived_turn_not_only_the_new_ones() {
+    fn a_second_compaction_is_given_the_summary_it_extends_and_only_the_new_turns() {
         let mut transcript = Transcript::default();
         for index in 1..=4 {
             let mut turn = Turn::new(&format!("turn-{index}"), &format!("question {index}"));
@@ -1482,10 +1480,11 @@ mod tests {
         let archived = transcript.compacted.as_ref().expect("archived turns");
         // Both compactions archived turns, and neither was deleted.
         assert_eq!(archived.turns.len(), 2);
-        // The summarizer saw the whole compacted history, not just this round's
-        // share of it, so overwriting the summary cannot drop older history out
-        // of the model's view.
-        assert_eq!(archived.summary, "first: 1 turns then 2 more");
+        // The second summarizer was handed one new turn and the summary it
+        // extends. Had it also been handed turn-1 again — which the summary
+        // already stands for — every compaction would re-bill the whole
+        // conversation and grow until the summarizer ran out of context.
+        assert_eq!(archived.summary, "first: 1 turns then 1 more");
     }
 
     #[test]

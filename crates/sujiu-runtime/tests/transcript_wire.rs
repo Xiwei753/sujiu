@@ -1249,7 +1249,7 @@ fn a_saved_capability_reaches_the_adapter_through_an_ordinary_turn() {
 /// otherwise the new summary cannot mention them and the older half of the
 /// conversation silently leaves the model's view.
 #[test]
-fn a_second_compaction_is_given_the_older_turns_and_the_previous_summary() {
+fn a_second_compaction_is_given_the_previous_summary_and_only_the_new_turns() {
     const SEARCH_TWO: Step =
         Step::Calls(&[("call-1", "search_context", r#"{"query":"blinking light"}"#)]);
     let provider = ScriptedProvider::start(vec![
@@ -1289,8 +1289,10 @@ fn a_second_compaction_is_given_the_older_turns_and_the_previous_summary() {
         .compact_session(&session, 1, "The light is a caller holding the line.")
         .expect("compact"));
 
-    // A second compaction must be given the archived turn too, not only the
-    // newly moved one.
+    // A second compaction is given the summary it extends and the turn that is
+    // newly leaving the prompt. The already-archived turn is what that summary
+    // was written from, so handing it back would re-bill the whole conversation
+    // on every compaction and grow until the summarizer ran out of context.
     let second_input = runtime
         .compaction_input(&session, 0)
         .expect("compaction input")
@@ -1301,8 +1303,8 @@ fn a_second_compaction_is_given_the_older_turns_and_the_previous_summary() {
     );
     assert_eq!(
         second_input.turns.len(),
-        2,
-        "both turns a new summary must cover: {:?}",
+        1,
+        "only the turn that is actually moving: {:?}",
         second_input.turns
     );
     let prompt_text = second_input.to_prompt_text();
@@ -1314,6 +1316,11 @@ fn a_second_compaction_is_given_the_older_turns_and_the_previous_summary() {
     assert!(
         prompt_text.contains("The station runs unattended."),
         "{prompt_text}"
+    );
+    assert!(
+        !prompt_text.contains("blinking"),
+        "the archived turn is represented by the summary now, and re-reading it would be \
+         paying for the same history again: {prompt_text}"
     );
 
     drop(runtime);
