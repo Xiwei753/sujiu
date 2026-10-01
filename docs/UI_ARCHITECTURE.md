@@ -778,6 +778,29 @@ through a callback — there is nothing for the generator to produce a type from
 It is named `RuntimeTurnEventPayload` rather than `Native*` so that it cannot be
 mistaken for a generated declaration later.
 
+#### What checks this, and what cannot
+
+Two different failures are involved, and one tool covers neither on its own.
+
+| Failure | Caught by |
+|---|---|
+| A Rust export changed, declaration never regenerated | `scripts/check-bindings.sh`, in CI |
+| The bridge calls something the declaration does not declare | the ArkTS compiler; `scripts/check-arkts-contract.py` in CI |
+| Argument types, return types, DTO fields | the ArkTS compiler only |
+| The compiler is not reading the declaration at all | `scripts/check-harmony-types.sh` |
+
+The last row is the one that is invisible by construction. If the folder-package
+association in §5.1 is removed, the app still builds, every native call is `any`,
+and the bridge may disagree with Rust in any way. Nothing in a green build says
+so; only the SDK's `is not verified` line does.
+
+CI cannot run the compiler — the Command Line Tools are a 7 GB install — so
+`check-bindings.sh` asserts the association statically and checks method
+existence, while the type-level half is `scripts/check-harmony-types.sh`, which
+AGENTS.md §15.4a puts in the verification order. That split is a compromise
+forced by the runner, not a claim that the static check is a type checker: it
+cannot see a wrong argument type, and it says so in its own header.
+
 ### 5.3 The C ABI in `sujiu-runtime/src/lib.rs`
 
 That file also exports a coarse C ABI of about twenty-five `sujiu_*` functions,

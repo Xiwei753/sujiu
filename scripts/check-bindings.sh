@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# Fail when a committed binding declaration no longer matches the Rust exports.
+# Fail when a committed binding declaration no longer matches the Rust exports,
+# or when the HarmonyOS bridge stops reading that declaration.
 #
 # CI runs this so a Rust DTO change that was never regenerated is a failed job,
-# not a device failure: the ArkTS bridge reads a declaration nobody compiles
-# against, so nothing else would notice it going stale.
+# not a device failure. The ArkTS compiler reads the committed declaration, but
+# only on a machine that has the HarmonyOS Command Line Tools, which is a 7 GB
+# install a CI runner does not have — so the part of the check that needs a
+# compiler is `scripts/check-harmony-types.sh`, run locally.
 #
 # The Kotlin bindings are generated at build time and are deliberately not
 # checked here; the compile that consumes them is the check.
@@ -67,6 +70,11 @@ fi
 
 if cmp -s "$generated" "$committed"; then
   echo "The committed ArkTS declaration matches the napi exports."
+  # Only now. Comparing the bridge to a declaration that is already known to be
+  # stale would report a mismatch against the wrong file, and the stale
+  # declaration is the finding — it is fixed by regenerating, not by editing the
+  # bridge to match it.
+  "$repo_root/scripts/check-arkts-contract.py"
   exit 0
 fi
 

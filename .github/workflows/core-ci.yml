@@ -10,9 +10,13 @@ on:
       - "scripts/harmony-runtime-fingerprint.sh"
       - "scripts/generate-bindings.sh"
       - "scripts/check-bindings.sh"
+      - "scripts/check-arkts-contract.py"
+      - "scripts/check-harmony-types.sh"
       - "scripts/harmony-cross-env.sh"
       - "apps/harmony/entry/libs/**"
       - "apps/harmony/entry/src/main/cpp/types/**"
+      - "apps/harmony/entry/oh-package.json5"
+      - "apps/harmony/entry/src/main/ets/**"
       - "apps/android/**"
       - ".github/workflows/core-ci.yml"
   pull_request:
@@ -24,9 +28,13 @@ on:
       - "scripts/harmony-runtime-fingerprint.sh"
       - "scripts/generate-bindings.sh"
       - "scripts/check-bindings.sh"
+      - "scripts/check-arkts-contract.py"
+      - "scripts/check-harmony-types.sh"
       - "scripts/harmony-cross-env.sh"
       - "apps/harmony/entry/libs/**"
       - "apps/harmony/entry/src/main/cpp/types/**"
+      - "apps/harmony/entry/oh-package.json5"
+      - "apps/harmony/entry/src/main/ets/**"
       - "apps/android/**"
       - ".github/workflows/core-ci.yml"
 
@@ -56,16 +64,25 @@ jobs:
       - name: Check the staged runtime library against its sources
         run: scripts/check-harmony-runtime.sh
 
-  # The HarmonyOS type declaration is a committed build output. Nothing
-  # compiles it, because the SDK does not verify a NAPI module, so a Rust
-  # export that changed without regenerating would reach a device as a
-  # contract the bridge disagrees with. This job fails instead.
+  # The HarmonyOS type declaration is a committed build output, and a Rust
+  # export that changed without regenerating would reach a device as a contract
+  # the bridge disagrees with. This job fails instead.
   #
   # It needs only a Rust toolchain and Node. napi-rs derives the declaration
   # from the #[napi] attributes while it compiles, and the text does not depend
   # on the target, so this does not cross compile. The NDK is only needed for
   # the loadable module a device runs, which is a committed build output that
   # the harmony-runtime job above already covers by fingerprint.
+  #
+  # check-bindings.sh also checks that the bridge still reads that declaration.
+  # The ArkTS compiler does read it, but only because the native module is
+  # declared as a local folder package; without that association the SDK types
+  # every native import as `any`, the app still builds, and nothing about the
+  # bridge is checked at all. That failure is invisible by construction, so it
+  # is asserted statically here. What needs a real compiler — argument types,
+  # return types, DTO fields — cannot run here, because the Command Line Tools
+  # are a 7 GB install a runner does not have; that is
+  # scripts/check-harmony-types.sh, and AGENTS.md puts it in the order.
   bindings-harmony:
     runs-on: ubuntu-latest
     steps:

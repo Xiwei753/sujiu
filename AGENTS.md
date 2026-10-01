@@ -348,9 +348,16 @@ real bug, not as a matter of taste:
    scripts/check-bindings.sh
    ```
 
+   For HarmonyOS, a green `check-bindings.sh` is necessary but not sufficient:
+   it proves the declaration matches Rust, and the compiler still has to be
+   reading it. That is `scripts/check-harmony-types.sh` (see §15.4a), and a
+   binding is not verified until both have run.
+
 6. **CI must fail on binding drift.** `scripts/check-bindings.sh` regenerates
    beside the committed artifact and diffs it. A check that repairs what it is
-   checking reports success for a repository it has already changed.
+   checking reports success for a repository it has already changed. The same
+   script also asserts that the HarmonyOS bridge still reads that declaration,
+   because a declaration nothing reads is as good as a stale one.
 
 7. **Never add a second hand-written bridge contract to make something run.**
    A preview bridge is acceptable while no native library is linked; it must
@@ -495,6 +502,51 @@ to confirm the installed version's exact flags.
 
 Do not report HarmonyOS code as verified merely because Rust/Android/Desktop builds pass. A HarmonyOS change is not build-verified until the ArkTS/Hvigor build succeeds.
 
+### 15.4a A green HarmonyOS build can still have checked nothing
+
+This is the one HarmonyOS failure that a build cannot report, so it gets its own step.
+
+The ArkTS compiler reads the generated N-API declaration **only if the native module is declared as a local folder package**. Two files are required, and neither works alone:
+
+```text
+apps/harmony/entry/src/main/cpp/types/libsujiu_napi/oh-package.json5
+  { "name": "libsujiu_napi.so", "types": "./index.d.ts", "version": "" }
+
+apps/harmony/entry/oh-package.json5
+  "dependencies": { "libsujiu_napi.so": "file:./src/main/cpp/types/libsujiu_napi" }
+```
+
+Without the `dependencies` entry the app **still builds**. Every import from
+`libsujiu_napi.so` is typed as `any`, so the bridge can disagree with Rust in any
+way at all and compile anyway. The only evidence is one SDK line reading
+`Currently module for 'libsujiu_napi.so' is not verified`, which reads like a
+limitation of the SDK rather than a misconfigured project. This repository
+shipped exactly that state and concluded the SDK could not consume the
+declaration, which was wrong.
+
+Do not accept a bare `devecocli build` as proof that the bridge is type-checked.
+Run:
+
+```bash
+scripts/check-harmony-types.sh
+```
+
+It compiles the app **and** fails when that warning appears, because a green
+build with an unverified module proves less than it appears to. It also fails on
+a real compile error, and prints the SDK's own wording so the cause is not
+guessed at.
+
+`scripts/check-arkts-contract.py` asserts the association statically and runs in
+CI, because the Command Line Tools are a 7 GB install a runner does not have. It
+covers what needs no compiler — the wiring, that every native call the bridge
+makes still exists in the declaration, and that no hand-written `Native*`
+contract has come back. Argument types, return types and DTO fields need the real
+compiler, which is why `scripts/check-harmony-types.sh` is not optional after
+touching `SujiuNativeBridge.ets`.
+
+If the association was just added, remove `entry/oh_modules/` before rebuilding so
+ohpm reinstalls the package.
+
 ### 15.5 Device connection and run
 
 List devices first:
@@ -605,14 +657,21 @@ For HarmonyOS changes, use this order:
 ```text
 read issue / AGENTS.md
   -> inspect apps/harmony project metadata
-  -> devecocli build --modules entry --build-mode debug
   -> scripts/check-harmony-runtime.sh     # only when Rust changed
+  -> scripts/check-bindings.sh            # only when an #[napi] export changed
+  -> scripts/check-harmony-types.sh       # compiles AND proves the compiler reads the declaration
   -> devecocli device list
   -> devecocli run --module entry [--device ...]
   -> exercise the changed UI/flow
   -> inspect devecocli log / crash output
   -> only then report the HarmonyOS path verified
 ```
+
+`scripts/check-harmony-types.sh` wraps the `devecocli build` that used to be the
+third step, and adds the assertion a bare build cannot make — see §15.4a. Running
+`devecocli build` directly is still allowed for iterating, but a bare green build
+is not evidence that the bridge was type-checked, so it does not stand in for this
+step when reporting verification.
 
 The build is the step that proves the ArkTS compiles. `devecocli check lint` is
 listed here for completeness but currently inspects nothing on this machine (see
