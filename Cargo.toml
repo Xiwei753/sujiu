@@ -3,8 +3,9 @@ members = [
     "crates/sujiu-core",
     "crates/sujiu-codec",
     "crates/sujiu-ai",
-    "crates/sujiu-ffi",
-  "crates/sujiu-napi",
+    "crates/sujiu-runtime",
+    "crates/sujiu-napi",
+    "crates/sujiu-uniffi",
 ]
 resolver = "2"
 

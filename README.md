@@ -22,7 +22,7 @@ crates/
   sujiu-core/    Pure Rust domain model and prompt compiler
   sujiu-ai/      Provider adapters, conversation loop and tool runtime
   sujiu-codec/   SillyTavern / external format compatibility
-  sujiu-ffi/     Stable cross-language boundary
+  sujiu-runtime/     Stable cross-language boundary
   sujiu-napi/    NAPI module so ArkTS can call the boundary directly
 docs/
   ARCHITECTURE.md
@@ -114,7 +114,7 @@ cargo test --workspace
 ```
 
 The HarmonyOS frontend drives the real runtime today: `sujiu-napi` wraps
-`sujiu-ffi` as a NAPI module, and `SujiuNativeBridge` implements the shared
+`sujiu-runtime` as a NAPI module, and `SujiuNativeBridge` implements the shared
 bridge contract on top of it. The native library is a committed build output, so
 it has to be rebuilt whenever Rust changes:
 

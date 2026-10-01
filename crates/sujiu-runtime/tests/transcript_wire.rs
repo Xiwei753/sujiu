@@ -16,9 +16,9 @@ use std::thread;
 
 use serde_json::{json, Value};
 use sujiu_core::{ChatRole, EndpointConfig};
-use sujiu_ffi::documents;
-use sujiu_ffi::events::{TurnEvent, TurnEventKind, TurnEventReporter};
-use sujiu_ffi::runtime::{SendTurnRequest, SujiuRuntime};
+use sujiu_runtime::documents;
+use sujiu_runtime::events::{TurnEvent, TurnEventKind, TurnEventReporter};
+use sujiu_runtime::runtime::{SendTurnRequest, SujiuRuntime};
 
 /// One scripted answer. The server hands these out in order.
 #[derive(Clone)]
@@ -349,7 +349,7 @@ impl TurnEventReporter for CancellingReporter<'_> {
 }
 
 fn runtime_for(base_url: &str, model: &str) -> SujiuRuntime {
-    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
     configure(&runtime, base_url, model);
     runtime
 }
@@ -390,7 +390,7 @@ fn configure_thinking(runtime: &SujiuRuntime, base_url: &str, model: &str) {
 }
 
 fn thinking_runtime_for(base_url: &str, model: &str) -> SujiuRuntime {
-    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
     configure_thinking(&runtime, base_url, model);
     runtime
 }
@@ -728,7 +728,7 @@ fn a_turn_that_failed_mid_loop_still_survives_a_restart() {
 
     {
         let provider = ScriptedProvider::start(vec![SEARCH, Step::Http(503)]);
-        let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
         runtime.use_directory(&path).expect("directory");
         configure(&runtime, &provider.base_url(), "mock-model");
         session = runtime.create_session(Some("character-lin"));
@@ -740,7 +740,7 @@ fn a_turn_that_failed_mid_loop_still_survives_a_restart() {
     // A brand new runtime, reading the same directory from disk.
     {
         let provider = ScriptedProvider::start(vec![Step::Text("Still here.")]);
-        let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
         runtime.use_directory(&path).expect("reopen");
         configure(&runtime, &provider.base_url(), "mock-model");
 
@@ -866,7 +866,7 @@ fn a_persisted_turn_still_reaches_the_model_after_a_reopen() {
     let base_url = provider.base_url();
 
     let session = {
-        let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
         runtime
             .use_directory(directory.to_str().expect("utf-8 path"))
             .expect("directory");
@@ -879,7 +879,7 @@ fn a_persisted_turn_still_reaches_the_model_after_a_reopen() {
     };
 
     // A new runtime over the same directory is what a relaunch looks like.
-    let reopened = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    let reopened = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
     reopened
         .use_directory(directory.to_str().expect("utf-8 path"))
         .expect("directory");
@@ -1111,7 +1111,7 @@ fn replayed_reasoning_survives_a_restart() {
     let directory = scratch_dir("reasoning-restart");
     let session;
     {
-        let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
         let _ = runtime.use_directory(&directory.to_string_lossy());
         configure_thinking(&runtime, &provider.base_url(), "deepseek-chat");
         session = runtime.create_session(Some("character-wen"));
@@ -1121,7 +1121,7 @@ fn replayed_reasoning_survives_a_restart() {
     }
 
     {
-        let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
         let _ = runtime.use_directory(&directory.to_string_lossy());
         configure_thinking(&runtime, &provider.base_url(), "deepseek-chat");
         run_turn(&runtime, &session, "Who took the throne?");
@@ -1382,7 +1382,7 @@ fn a_handle_the_provider_retired_stays_retired_across_a_restart() {
     std::fs::write(directory.join("sujiu-runtime.json"), document.to_string())
         .expect("write the stored session");
 
-    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
     let _ = runtime.use_directory(&directory.to_string_lossy());
     configure(&runtime, &provider.base_url(), "model-a");
 
@@ -1524,20 +1524,22 @@ fn a_table_top_sends_every_participant_without_inventing_a_main_character() {
 fn a_conversation_keeps_the_bindings_it_was_created_with() {
     let directory = scratch_dir("conversation-bindings");
     let storage = std::sync::Arc::new(
-        sujiu_ffi::storage::FileStorage::new(&directory).expect("a data directory"),
+        sujiu_runtime::storage::FileStorage::new(&directory).expect("a data directory"),
     );
-    let runtime =
-        sujiu_ffi::runtime::SujiuRuntime::new_persistent(sujiu_ffi::seed::seed(), storage.clone())
-            .expect("runtime");
+    let runtime = sujiu_runtime::runtime::SujiuRuntime::new_persistent(
+        sujiu_runtime::seed::seed(),
+        storage.clone(),
+    )
+    .expect("runtime");
 
-    let id = runtime.create_conversation(&sujiu_ffi::runtime::CreateConversationRequest {
+    let id = runtime.create_conversation(&sujiu_runtime::runtime::CreateConversationRequest {
         participants: vec![
-            sujiu_ffi::runtime::ParticipantRequest {
+            sujiu_runtime::runtime::ParticipantRequest {
                 character_id: "character-shen".to_string(),
                 role: Some(sujiu_core::ParticipantRole::Narrator),
                 display_name: None,
             },
-            sujiu_ffi::runtime::ParticipantRequest {
+            sujiu_runtime::runtime::ParticipantRequest {
                 character_id: "character-wen".to_string(),
                 role: None,
                 display_name: None,
@@ -1575,8 +1577,8 @@ fn a_conversation_keeps_the_bindings_it_was_created_with() {
     drop(runtime);
 
     // And it survives a reopen, from the conversation's own directory.
-    let reopened = sujiu_ffi::runtime::SujiuRuntime::new_persistent(
-        sujiu_ffi::runtime::Seed::default(),
+    let reopened = sujiu_runtime::runtime::SujiuRuntime::new_persistent(
+        sujiu_runtime::runtime::Seed::default(),
         storage,
     )
     .expect("runtime");
@@ -1656,16 +1658,16 @@ fn a_speaker_survives_closing_and_reopening_a_conversation() {
     let provider = ScriptedProvider::start(vec![Step::Text("Take the tunnel, not the bridge.")]);
     let directory = scratch_dir("speaker-round-trip");
     let storage = std::sync::Arc::new(
-        sujiu_ffi::storage::FileStorage::new(&directory).expect("a data directory"),
+        sujiu_runtime::storage::FileStorage::new(&directory).expect("a data directory"),
     );
-    let runtime =
-        SujiuRuntime::new_persistent(sujiu_ffi::seed::seed(), storage.clone()).expect("runtime");
+    let runtime = SujiuRuntime::new_persistent(sujiu_runtime::seed::seed(), storage.clone())
+        .expect("runtime");
     configure(&runtime, &provider.base_url(), "mock-model");
 
     run_turn(&runtime, "session-1", "How do we get out of here?");
     drop(runtime);
 
-    let reopened = SujiuRuntime::new_persistent(sujiu_ffi::runtime::Seed::default(), storage)
+    let reopened = SujiuRuntime::new_persistent(sujiu_runtime::runtime::Seed::default(), storage)
         .expect("runtime");
     let answer = last_assistant(&reopened, "session-1");
     assert_eq!(answer.text, "Take the tunnel, not the bridge.");
@@ -1685,7 +1687,10 @@ fn a_speaker_survives_closing_and_reopening_a_conversation() {
 /// Which one that is matters: a seeded conversation already has turns, so a
 /// test about an answer it just produced has to look at the end rather than
 /// count every bubble on the screen.
-fn last_assistant(runtime: &SujiuRuntime, session_id: &str) -> sujiu_ffi::runtime::MessageSummary {
+fn last_assistant(
+    runtime: &SujiuRuntime,
+    session_id: &str,
+) -> sujiu_runtime::runtime::MessageSummary {
     let state = runtime.conversation_state(session_id).expect("state");
     state
         .messages

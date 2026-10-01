@@ -17,7 +17,7 @@ use std::thread;
 
 use serde_json::{json, Value};
 use sujiu_core::EndpointConfig;
-use sujiu_ffi::runtime::{SendTurnRequest, SujiuRuntime};
+use sujiu_runtime::runtime::{SendTurnRequest, SujiuRuntime};
 
 /// What the endpoint says about one route.
 ///
@@ -191,7 +191,7 @@ fn write_route(mut stream: &TcpStream, route: &Route) {
 }
 
 fn runtime() -> SujiuRuntime {
-    SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime")
+    SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime")
 }
 
 fn models(ids: &[&str]) -> Value {
@@ -629,7 +629,7 @@ fn a_responses_capable_endpoint_is_chosen_over_the_older_one() {
     let session = runtime.create_session(Some("character-lin"));
     let mut recorder = Recorder::default();
     runtime.tokio.block_on(runtime.send_turn(
-        sujiu_ffi::runtime::SendTurnRequest {
+        sujiu_runtime::runtime::SendTurnRequest {
             session_id: session.clone(),
             user_text: "Say something.".to_string(),
             provider: None,
@@ -662,9 +662,9 @@ struct Recorder {
     failed: bool,
 }
 
-impl sujiu_ffi::events::TurnEventReporter for Recorder {
-    fn report(&mut self, event: sujiu_ffi::events::TurnEvent) {
-        if event.kind == sujiu_ffi::events::TurnEventKind::TurnFailed {
+impl sujiu_runtime::events::TurnEventReporter for Recorder {
+    fn report(&mut self, event: sujiu_runtime::events::TurnEvent) {
+        if event.kind == sujiu_runtime::events::TurnEventKind::TurnFailed {
             self.failed = true;
         }
     }
@@ -859,11 +859,11 @@ fn the_answers_survive_a_restart() {
         absent(),
         answers(),
     );
-    let storage: std::sync::Arc<dyn sujiu_ffi::storage::AppStorage> =
-        std::sync::Arc::new(sujiu_ffi::storage::MemoryStorage::new());
+    let storage: std::sync::Arc<dyn sujiu_runtime::storage::AppStorage> =
+        std::sync::Arc::new(sujiu_runtime::storage::MemoryStorage::new());
 
     {
-        let runtime = SujiuRuntime::new_persistent(sujiu_ffi::seed::seed(), storage.clone())
+        let runtime = SujiuRuntime::new_persistent(sujiu_runtime::seed::seed(), storage.clone())
             .expect("runtime");
         runtime
             .tokio
@@ -875,7 +875,7 @@ fn the_answers_survive_a_restart() {
     }
 
     let restarted =
-        SujiuRuntime::new_persistent(sujiu_ffi::seed::seed(), storage).expect("runtime");
+        SujiuRuntime::new_persistent(sujiu_runtime::seed::seed(), storage).expect("runtime");
     let remembered =
         restarted
             .tokio
@@ -910,7 +910,7 @@ fn a_directory_named_after_the_runtime_is_still_read_back() {
     .expect("a cache left by an earlier launch");
 
     // Born with process-only storage, exactly as a platform runtime is.
-    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
     runtime
         .use_directory(root.to_str().expect("a path"))
         .expect("naming a directory is allowed");

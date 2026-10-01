@@ -1152,15 +1152,20 @@ impl SujiuRuntime {
     /// listing permission is still a key that can chat; refusing to let the
     /// user type a model would turn a cosmetic limitation into a dead end.
     pub async fn discover_models(&self, api_key: Option<&str>) -> ModelDiscovery {
-        let inner = self.inner.lock().unwrap();
-        let Some(config) = inner.endpoint.clone() else {
+        // Read the endpoint through the synchronous accessor instead of locking
+        // here. A `MutexGuard` that is still in scope across the `await` below
+        // makes this future un-`Send`, which a multi-threaded runtime refuses to
+        // poll; it is also a lock held across a network round trip, which is a
+        // stall for every other caller of the runtime while the endpoint is
+        // being asked about itself. Cloning the config out and unlocking first
+        // is what the accessor is for.
+        let Some(config) = self.endpoint() else {
             return ModelDiscovery::without_endpoint(
                 ModelListing::Unknown,
                 "no endpoint configured yet",
             );
         };
 
-        drop(inner);
         self.explore(&config, api_key).await
     }
 

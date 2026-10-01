@@ -51,7 +51,7 @@ fun ContextSheet(controller: ChatController, onDismiss: () -> Unit) {
                     ) {
                         Text(source.name, style = MaterialTheme.typography.bodyLarge)
                         Text(
-                            text = "${source.kindLabel} · ${source.recordCount} records",
+                            text = "${source.kind.name} · ${source.recordCount} records",
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )

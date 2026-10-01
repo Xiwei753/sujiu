@@ -1,195 +1,198 @@
 package io.sujiu.app.bridge
 
+import io.sujiu.app.presentation.CharacterRow
+import io.sujiu.app.presentation.MessageRow
+import io.sujiu.app.presentation.ModelRow
+import io.sujiu.app.presentation.SessionRow
+import io.sujiu.app.presentation.SourceKind
+import io.sujiu.app.presentation.SourceRow
+import io.sujiu.app.presentation.SpeakerRole
+import io.sujiu.app.presentation.ToolCallItem
+import io.sujiu.app.presentation.TurnStep
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 
 /**
- * Preview data source used until `sujiu-ffi` exposes the conversation surface.
+ * Preview data source used until the Android app is wired to the native runtime.
  *
- * It implements exactly the same contract the FFI bridge will implement, so
- * the presentation and UI layers need no change when the real runtime lands.
- * The scripted turn intentionally walks the full normalized event set:
- * thinking, text, a context tool call, more text, completion, plus the
- * cancelled and failed paths.
+ * It builds the same view models `UniffiSujiuBridge` builds from generated
+ * binding records, so the presentation and UI layers need no change when the
+ * real bridge replaces it. That is the point of keeping [SujiuBridge] an
+ * operation set over view models rather than a copy of the binding contract:
+ * this file names no generated type, and neither does anything above it.
+ *
+ * The scripted turn intentionally walks the full turn-step set: thinking, text,
+ * a tool call, more text, completion, plus the cancelled and failed paths.
  */
 class InMemorySujiuBridge(
     private val deltaDelayMillis: Long = 24L,
 ) : SujiuBridge {
 
     private val models = listOf(
-        ModelSummary("model-balanced", "Sujiu Chat 3", "Sujiu", "200k context"),
-        ModelSummary("model-reasoning", "Sujiu Reason 3", "Sujiu", "200k context · thinking"),
-        ModelSummary("model-local", "Local Qwen 3", "On device", "32k context"),
+        ModelRow("model-balanced", "Sujiu Chat 3", "Sujiu", true),
+        ModelRow("model-reasoning", "Sujiu Reason 3", "Sujiu", true),
+        ModelRow("model-local", "Local Qwen 3", "On device", false),
     )
 
     private val characters = listOf(
-        CharacterSummary(
-            id = "char-lin",
-            name = "Lin",
-            description = "Night-shift radio host who never says what she means",
-            tags = listOf("Modern", "Slow burn", "Radio"),
-        ),
-        CharacterSummary(
-            id = "char-qi",
-            name = "Qi",
-            description = "Archivist of a city that rewrote its own name",
-            tags = listOf("Fantasy", "Mystery"),
-        ),
-        CharacterSummary(
-            id = "char-ayan",
-            name = "Ayan",
-            description = "Courier with a debt and a bicycle",
-            tags = listOf("Modern", "Adventure"),
-        ),
-        CharacterSummary(
-            id = "char-mira",
-            name = "Mira",
-            description = "Cartographer mapping places that are not there yet",
-            tags = listOf("Fantasy", "Travel"),
-        ),
+        CharacterRow("char-lin", "Lin", "Night-shift radio host who never says what she means"),
+        CharacterRow("char-qi", "Qi", "Archivist of a city that rewrote its own name"),
+        CharacterRow("char-ayan", "Ayan", "Courier with a debt and a bicycle"),
+        CharacterRow("char-mira", "Mira", "Cartographer mapping places that are not there yet"),
     )
 
     private val contextSources = listOf(
-        ContextSourceSummary("world-lore", "Rain City lorebook", "World lore", 42),
-        ContextSourceSummary("story-event", "Night of the broadcast", "Story event", 8),
-        ContextSourceSummary("memory-lin", "Lin · long term memory", "Character memory", 17),
-        ContextSourceSummary("chat-history", "Older conversations", "Chat history", 96),
+        SourceRow("world-lore", "Rain City lorebook", SourceKind.WorldLore, 42),
+        SourceRow("story-event", "Night of the broadcast", SourceKind.StoryEvent, 8),
+        SourceRow("memory-lin", "Lin · long term memory", SourceKind.CharacterMemory, 17),
+        SourceRow("chat-history", "Older conversations", SourceKind.ChatHistory, 96),
     )
 
     private val now = System.currentTimeMillis()
 
     private val sessions = listOf(
-        SessionSummary(
+        SessionRow(
             id = "session-1",
             title = "The 2 a.m. frequency",
-            characterId = "char-lin",
-            characterName = "Lin",
-            preview = "…and the signal answers back.",
+            who = "Lin",
             updatedAt = now - 12 * 60_000L,
+            messageCount = 3,
         ),
-        SessionSummary(
+        SessionRow(
             id = "session-2",
             title = "Archive of the drowned district",
-            characterId = "char-qi",
-            characterName = "Qi",
-            preview = "The map is older than the street it describes.",
+            who = "Qi",
             updatedAt = now - 26 * 60 * 60_000L,
+            messageCount = 12,
         ),
-        SessionSummary(
+        SessionRow(
             id = "session-3",
             title = "A package, no return address",
-            characterId = "char-ayan",
-            characterName = "Ayan",
-            preview = "I counted the seals twice. Both times: nine.",
+            who = "Ayan",
             updatedAt = now - 3 * 24 * 60 * 60_000L,
+            messageCount = 7,
         ),
-        SessionSummary(
+        SessionRow(
             id = "session-4",
             title = "Coastline that keeps moving",
-            characterId = "char-mira",
-            characterName = "Mira",
-            preview = "Every tide redraws the border.",
+            who = "Mira",
             updatedAt = now - 9 * 24 * 60 * 60_000L,
+            messageCount = 21,
         ),
     )
 
     private val messagesBySession = mapOf(
         "session-1" to listOf(
-            MessageSummary(
+            MessageRow(
                 id = "m-1",
-                role = MessageRole.User,
+                role = SpeakerRole.User,
+                speaker = "You",
                 text = "You said the frequency was dead. Why is the light on the console blinking?",
+                toolCalls = emptyList(),
             ),
-            MessageSummary(
+            MessageRow(
                 id = "m-2",
-                role = MessageRole.Assistant,
+                role = SpeakerRole.Assistant,
+                speaker = "Lin",
                 text = "Because the console and I are arguing about who owns the night shift. " +
                     "The blinking is a caller who has not decided to speak yet.",
-                toolName = "search_context",
-                toolStatusLabel = "Searched 3 records",
+                toolCalls = listOf(
+                    ToolCallItem(
+                        id = "call-1",
+                        toolName = "search_context",
+                        statusLabel = "done",
+                        summary = "3 records · 1 world lore, 1 story event, 1 memory",
+                    ),
+                ),
             ),
-            MessageSummary(
+            MessageRow(
                 id = "m-3",
-                role = MessageRole.User,
+                role = SpeakerRole.User,
+                speaker = "You",
                 text = "And if they decide to speak while I am on the line?",
+                toolCalls = emptyList(),
             ),
         ),
     )
 
-    private var cancelledSessionId: String? = null
+    private var cancelledConversationId: String? = null
 
-    override suspend fun listSessions(): List<SessionSummary> = sessions
+    override suspend fun listSessions(): List<SessionRow> = sessions
 
-    override suspend fun listCharacters(query: String?): List<CharacterSummary> {
+    override suspend fun listCharacters(query: String?): List<CharacterRow> {
         val trimmed = query?.trim().orEmpty()
         if (trimmed.isEmpty()) return characters
         return characters.filter {
             it.name.contains(trimmed, ignoreCase = true) ||
-                it.description.contains(trimmed, ignoreCase = true) ||
-                it.tags.any { tag -> tag.contains(trimmed, ignoreCase = true) }
+                it.description.contains(trimmed, ignoreCase = true)
         }
     }
 
-    override suspend fun listModels(): List<ModelSummary> = models
+    override suspend fun listModels(): List<ModelRow> = models
 
-    override suspend fun listContextSources(): List<ContextSourceSummary> = contextSources
+    override suspend fun listContextSources(): List<SourceRow> = contextSources
 
-    override suspend fun conversationState(sessionId: String): ConversationSnapshot {
-        val session = sessions.firstOrNull { it.id == sessionId } ?: sessions.first()
-        return ConversationSnapshot(
-            session = session,
+    override suspend fun conversationState(conversationId: String): ConversationView {
+        val session = sessions.firstOrNull { it.id == conversationId } ?: sessions.first()
+        return ConversationView(
+            conversationId = session.id,
+            participants = characters.filter { it.id == session.who },
+            // The preview binds nothing, and says so rather than inventing a
+            // persona to look as though it does.
+            personaId = null,
+            worldBookIds = emptyList(),
+            promptProfileId = null,
             messages = messagesBySession[session.id].orEmpty(),
-            contextSources = contextSources,
         )
     }
 
-    override fun sendTurn(sessionId: String, userText: String): Flow<TurnEvent> = flow {
-        cancelledSessionId = null
-        emit(TurnEvent.Started)
+    override fun sendTurn(conversationId: String, userText: String): Flow<TurnStep> = flow {
+        cancelledConversationId = null
+        emit(TurnStep.Started)
 
         val script = scriptFor(userText)
         for (step in script) {
-            if (cancelledSessionId == sessionId) {
-                emit(TurnEvent.Cancelled)
+            if (cancelledConversationId == conversationId) {
+                emit(TurnStep.Cancelled)
                 return@flow
             }
             delay(deltaDelayMillis)
             emit(step)
         }
-        if (cancelledSessionId == sessionId) {
-            emit(TurnEvent.Cancelled)
+        if (cancelledConversationId == conversationId) {
+            emit(TurnStep.Cancelled)
         } else {
-            emit(TurnEvent.Completed)
+            emit(TurnStep.Completed)
         }
     }
 
-    override fun cancelTurn(sessionId: String) {
-        cancelledSessionId = sessionId
+    override fun cancelTurn(conversationId: String) {
+        cancelledConversationId = conversationId
     }
 
-    override fun runtimeSummary(): String = "Preview bridge · sujiu-ffi conversation API pending"
+    override fun runtimeSummary(): String = "Preview bridge · no native runtime linked yet"
 
-    private fun scriptFor(userText: String): List<TurnEvent> {
+    private fun scriptFor(userText: String): List<TurnStep> {
         if (userText.contains("fail", ignoreCase = true)) {
             return listOf(
-                TurnEvent.TextDelta("The provider rejected the request"),
-                TurnEvent.Failed("Request failed: provider returned 429"),
+                TurnStep.TextDelta("The provider rejected the request"),
+                TurnStep.Failed("Request failed: the endpoint answered 429"),
             )
         }
         return listOf(
-            TurnEvent.ThinkingDelta("Recall the broadcast record, then answer in character."),
-            TurnEvent.TextDelta("The console blinks because the night is not over yet. "),
-            TurnEvent.TextDelta("You asked earlier whether I would let a caller in. "),
-            TurnEvent.ToolCallStarted("call-1", "search_context"),
-            TurnEvent.ToolCallFinished(
+            TurnStep.ThinkingDelta("Recall the broadcast record, then answer in character."),
+            TurnStep.TextDelta("The console blinks because the night is not over yet. "),
+            TurnStep.TextDelta("You asked earlier whether I would let a caller in. "),
+            TurnStep.ToolCallStarted("call-1", "search_context"),
+            TurnStep.ToolCallFinished(
                 callId = "call-1",
                 toolName = "search_context",
                 summary = "3 records · 1 world lore, 1 story event, 1 memory",
                 isError = false,
             ),
-            TurnEvent.TextDelta("I checked the night log, the lorebook and what I still owe you. "),
-            TurnEvent.TextDelta("The answer is no, and I am going to let you stay anyway."),
+            TurnStep.TextDelta("I checked the night log, the lorebook and what I still owe you. "),
+            TurnStep.TextDelta("The answer is no, and I am going to let you stay anyway."),
         )
     }
 }

@@ -16,12 +16,12 @@ use napi_derive::napi;
 use sujiu_ai::DiagnosticEntry;
 use sujiu_core::EndpointConfig;
 use sujiu_core::{ParticipantRole, WorldBookPosition};
-use sujiu_ffi::events::{TurnEvent, TurnEventReporter};
-use sujiu_ffi::library::{
+use sujiu_runtime::events::{TurnEvent, TurnEventReporter};
+use sujiu_runtime::library::{
     CharacterRequest, PersonaRequest, PersonaSummary, PromptProfileRequest, PromptProfileSummary,
     WorldBookEntryRequest, WorldBookRequest, WorldBookSummary,
 };
-use sujiu_ffi::runtime::{
+use sujiu_runtime::runtime::{
     CharacterSummary, ContextSourceSummary, ConversationSnapshot, CreateConversationRequest,
     EndpointExploration, ModelDiscovery, ModelSummary, ParticipantRequest, ParticipantSummary,
     SendTurnRequest, SessionSummary, SujiuRuntime, ToolCallSummary,
@@ -850,7 +850,7 @@ fn stored_endpoint_of(config: Option<EndpointConfig>) -> Option<StoredEndpointDt
 pub fn create() -> Result<SujiuRuntimeBridge> {
     // The seeded catalog, not Seed::default(): a fresh launch would otherwise
     // have no characters, no history and no context sources to show.
-    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed())
+    let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed())
         .map_err(|error| napi::Error::from_reason(format!("runtime init failed: {error}")))?;
 
     Ok(SujiuRuntimeBridge {
@@ -881,7 +881,7 @@ impl SujiuRuntimeBridge {
     /// The shared runtime version, so a platform can report what it is bound to.
     #[napi]
     pub fn core_version(&self) -> String {
-        sujiu_ffi::CORE_VERSION.to_string()
+        sujiu_runtime::CORE_VERSION.to_string()
     }
 
     #[napi]
@@ -1308,7 +1308,7 @@ mod tests {
     use super::ProviderConfigDto;
     use super::{participant_role, CreateConversationRequest, ParticipantRequest};
     use sujiu_core::{apply_reasoning_override, EndpointCapabilities, Protocol};
-    use sujiu_ffi::events::TurnEventReporter;
+    use sujiu_runtime::events::TurnEventReporter;
 
     fn empty_with(prototype: &CreateConversationRequest) -> CreateConversationRequest {
         CreateConversationRequest {
@@ -1470,8 +1470,8 @@ mod tests {
     /// empty string instead of absent, a credential appearing by accident.
     #[test]
     fn a_settings_form_can_open_on_what_is_already_configured() {
-        let runtime =
-            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = sujiu_runtime::runtime::SujiuRuntime::new(sujiu_runtime::seed::seed())
+            .expect("runtime");
 
         assert!(
             super::stored_endpoint_of(runtime.endpoint()).is_none(),
@@ -1532,8 +1532,8 @@ mod tests {
     /// a test binary, so this drives the mapping and the log the mapping reads.
     #[test]
     fn a_diagnostic_line_crosses_the_bridge_ready_to_show_and_without_the_key() {
-        let runtime =
-            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = sujiu_runtime::runtime::SujiuRuntime::new(sujiu_runtime::seed::seed())
+            .expect("runtime");
         let key = "sk-sujiu-bridge-1234567890abcdef";
 
         runtime.tokio.block_on(runtime.discover_endpoint(
@@ -1584,8 +1584,8 @@ mod tests {
     /// interleaved into it, or the relevant line is impossible to pick out.
     #[test]
     fn a_platform_reading_only_the_discovery_half_gets_only_the_discovery_half() {
-        let runtime =
-            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = sujiu_runtime::runtime::SujiuRuntime::new(sujiu_runtime::seed::seed())
+            .expect("runtime");
         runtime
             .set_endpoint(Some(
                 ProviderConfigDto {
@@ -1601,9 +1601,9 @@ mod tests {
             ))
             .expect("provider");
 
-        let mut reporter = sujiu_ffi::runtime::CollectingReporter::default();
+        let mut reporter = sujiu_runtime::runtime::CollectingReporter::default();
         runtime.tokio.block_on(runtime.send_turn(
-            sujiu_ffi::runtime::SendTurnRequest {
+            sujiu_runtime::runtime::SendTurnRequest {
                 session_id: runtime.sessions()[0].id.clone(),
                 user_text: "hello".into(),
                 provider: None,
@@ -1642,8 +1642,8 @@ mod tests {
     /// through the same DTO.
     #[test]
     fn a_conversation_reports_every_participant_and_still_answers_the_simple_question() {
-        let runtime =
-            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = sujiu_runtime::runtime::SujiuRuntime::new(sujiu_runtime::seed::seed())
+            .expect("runtime");
 
         let table: Vec<super::SessionSummaryDto> = runtime
             .sessions()
@@ -1716,8 +1716,8 @@ mod tests {
             prompt_profile_id: None,
         };
 
-        let runtime =
-            sujiu_ffi::runtime::SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+        let runtime = sujiu_runtime::runtime::SujiuRuntime::new(sujiu_runtime::seed::seed())
+            .expect("runtime");
         let empty_id = runtime.create_conversation(&empty);
         let one_id = runtime.create_conversation(&one);
         let table_id = runtime.create_conversation(&table);
@@ -1743,7 +1743,7 @@ mod tests {
     ///
     /// These exercise the translation rather than the runtime calls: this crate's
     /// test binary cannot link a `napi::Error`, which only exists inside Node.
-    /// The runtime behaviour behind them is covered in `sujiu-ffi`.
+    /// The runtime behaviour behind them is covered in `sujiu-runtime`.
     #[test]
     fn each_resource_kind_reaches_a_screen_as_its_own_shape() {
         use super::{
@@ -1766,7 +1766,7 @@ mod tests {
         let book = WorldBookDto::from(WorldBookSummary {
             id: "worldbook-1".into(),
             name: "The northern coast".into(),
-            entries: vec![sujiu_ffi::library::WorldBookEntrySummary {
+            entries: vec![sujiu_runtime::library::WorldBookEntrySummary {
                 id: "entry-1".into(),
                 name: "Tone".into(),
                 content: "The coast is cold.".into(),

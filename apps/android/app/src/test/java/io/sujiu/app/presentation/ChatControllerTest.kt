@@ -1,14 +1,7 @@
 package io.sujiu.app.presentation
 
-import io.sujiu.app.bridge.CharacterSummary
-import io.sujiu.app.bridge.ConversationSnapshot
-import io.sujiu.app.bridge.ContextSourceSummary
-import io.sujiu.app.bridge.MessageRole
-import io.sujiu.app.bridge.MessageSummary
-import io.sujiu.app.bridge.ModelSummary
-import io.sujiu.app.bridge.SessionSummary
+import io.sujiu.app.bridge.ConversationView
 import io.sujiu.app.bridge.SujiuBridge
-import io.sujiu.app.bridge.TurnEvent
 import io.sujiu.app.platform.AppearanceMode
 import io.sujiu.app.platform.ClipboardService
 import io.sujiu.app.platform.PlatformInfoService
@@ -213,30 +206,30 @@ private class RecordingClipboard : ClipboardService {
     }
 }
 
-/** Deterministic bridge: the same normalized event sequence a provider would produce. */
+/** Deterministic bridge: the same normalized step sequence a provider would produce. */
 private class ScriptedBridge : SujiuBridge {
     val emittedMarkers = mutableListOf<String>()
 
     private val sessions = listOf(
-        SessionSummary("session-1", "First", "char-lin", "Lin", "preview", System.currentTimeMillis()),
-        SessionSummary("session-2", "Second", "char-qi", "Qi", "preview", 0L),
+        SessionRow("session-1", "First", "Lin", System.currentTimeMillis(), 1),
+        SessionRow("session-2", "Second", "Qi", 0L, 1),
     )
 
     private val characters = listOf(
-        CharacterSummary("char-lin", "Lin", "Radio host", listOf("Modern")),
-        CharacterSummary("char-qi", "Qi", "Archivist", listOf("Fantasy")),
+        CharacterRow("char-lin", "Lin", "Radio host"),
+        CharacterRow("char-qi", "Qi", "Archivist"),
     )
 
     private val models = listOf(
-        ModelSummary("model-balanced", "Sujiu Chat 3", "Sujiu", "200k context"),
-        ModelSummary("model-local", "Local Qwen 3", "On device", "32k context"),
+        ModelRow("model-balanced", "Sujiu Chat 3", "Sujiu", true),
+        ModelRow("model-local", "Local Qwen 3", "On device", false),
     )
 
-    private val sources = listOf(ContextSourceSummary("world-lore", "Lorebook", "World lore", 3))
+    private val sources = listOf(SourceRow("world-lore", "Lorebook", SourceKind.WorldLore, 3))
 
     override suspend fun listSessions() = sessions
 
-    override suspend fun listCharacters(query: String?): List<CharacterSummary> {
+    override suspend fun listCharacters(query: String?): List<CharacterRow> {
         val trimmed = query?.trim().orEmpty()
         if (trimmed.isEmpty()) return characters
         return characters.filter { it.name.contains(trimmed, ignoreCase = true) }
@@ -246,31 +239,34 @@ private class ScriptedBridge : SujiuBridge {
 
     override suspend fun listContextSources() = sources
 
-    override suspend fun conversationState(sessionId: String) = ConversationSnapshot(
-        session = sessions.first { it.id == sessionId },
-        messages = listOf(MessageSummary("m-1", MessageRole.User, "hi")),
-        contextSources = sources,
+    override suspend fun conversationState(conversationId: String) = ConversationView(
+        conversationId = conversationId,
+        participants = emptyList(),
+        personaId = null,
+        worldBookIds = emptyList(),
+        promptProfileId = null,
+        messages = listOf(MessageRow("m-1", SpeakerRole.User, "", "hi", emptyList())),
     )
 
-    override fun sendTurn(sessionId: String, userText: String): Flow<TurnEvent> = flow {
-        emit(TurnEvent.Started)
-        emit(TurnEvent.ThinkingDelta("considering"))
-        emit(TurnEvent.TextDelta("The night is not over"))
+    override fun sendTurn(conversationId: String, userText: String): Flow<TurnStep> = flow {
+        emit(TurnStep.Started)
+        emit(TurnStep.ThinkingDelta("considering"))
+        emit(TurnStep.TextDelta("The night is not over"))
         emittedMarkers.add("text-1")
-        emit(TurnEvent.ToolCallStarted("call-1", "search_context"))
+        emit(TurnStep.ToolCallStarted("call-1", "search_context"))
         emittedMarkers.add("tool-start")
-        emit(TurnEvent.ToolCallFinished("call-1", "search_context", "3 records", false))
+        emit(TurnStep.ToolCallFinished("call-1", "search_context", "3 records", false))
         emittedMarkers.add("tool-finish")
-        emit(TurnEvent.TextDelta(" — and neither is this answer."))
+        emit(TurnStep.TextDelta(" — and neither is this answer."))
         emittedMarkers.add("text-2")
         if (userText.contains("fail", ignoreCase = true)) {
-            emit(TurnEvent.Failed("provider returned 429"))
+            emit(TurnStep.Failed("the endpoint returned 429"))
         } else {
-            emit(TurnEvent.Completed)
+            emit(TurnStep.Completed)
         }
     }
 
-    override fun cancelTurn(sessionId: String) = Unit
+    override fun cancelTurn(conversationId: String) = Unit
 
     override fun runtimeSummary() = "test bridge"
 }

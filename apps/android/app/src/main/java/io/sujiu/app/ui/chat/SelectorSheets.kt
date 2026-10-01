@@ -58,7 +58,7 @@ fun ModelSelectorSheet(controller: ChatController, onDismiss: () -> Unit) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(model.name, style = MaterialTheme.typography.bodyLarge)
                             Text(
-                                text = "${model.providerLabel} · ${model.contextLabel}",
+                                text = model.endpointLabel,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
@@ -100,7 +100,6 @@ fun CharacterSelectorSheet(
                     CharacterRow(
                         name = character.name,
                         description = character.description,
-                        tags = character.tags,
                         selected = character.id == state.currentCharacter?.id,
                         onClick = {
                             controller.dispatch(ChatIntent.CharacterSelected(character.id))
@@ -129,7 +128,6 @@ fun CharacterSelectorSheet(
 fun CharacterRow(
     name: String,
     description: String,
-    tags: List<String>,
     selected: Boolean,
     onClick: () -> Unit,
 ) {
@@ -150,13 +148,5 @@ fun CharacterRow(
             maxLines = 2,
             overflow = TextOverflow.Ellipsis,
         )
-        if (tags.isNotEmpty()) {
-            Text(
-                text = tags.joinToString(" · "),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(top = 4.dp),
-            )
-        }
     }
 }

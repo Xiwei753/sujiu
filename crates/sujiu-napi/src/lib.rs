@@ -19,5 +19,5 @@ pub use bridge::{
 
 #[napi_derive::napi]
 pub fn core_version() -> String {
-    sujiu_ffi::CORE_VERSION.to_string()
+    sujiu_runtime::CORE_VERSION.to_string()
 }

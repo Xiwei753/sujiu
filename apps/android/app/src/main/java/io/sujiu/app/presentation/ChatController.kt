@@ -1,11 +1,6 @@
 package io.sujiu.app.presentation
 
-import io.sujiu.app.bridge.CharacterSummary
-import io.sujiu.app.bridge.MessageRole
-import io.sujiu.app.bridge.MessageSummary
-import io.sujiu.app.bridge.SessionSummary
 import io.sujiu.app.bridge.SujiuBridge
-import io.sujiu.app.bridge.TurnEvent
 import io.sujiu.app.platform.AppearanceMode
 import io.sujiu.app.platform.PlatformServices
 import kotlinx.coroutines.CoroutineScope
@@ -109,31 +104,39 @@ class ChatController(
 
     fun runtimeSummary(): String = bridge.runtimeSummary()
 
-    fun characterById(id: String): CharacterSummary? =
+    fun characterById(id: String): CharacterRow? =
         _state.value.characters.firstOrNull { it.id == id }
 
-    fun sessionById(id: String): SessionSummary? =
+    fun sessionById(id: String): SessionRow? =
         _state.value.sessionGroups.asSequence()
             .flatMap { it.sessions.asSequence() }
             .firstOrNull { it.id == id }
 
-    private suspend fun loadConversation(sessionId: String) {
-        val snapshot = bridge.conversationState(sessionId)
+    private suspend fun loadConversation(conversationId: String) {
+        val conversation = bridge.conversationState(conversationId)
         val models = if (_state.value.models.isEmpty()) bridge.listModels() else _state.value.models
         val characters =
             if (_state.value.characters.isEmpty()) bridge.listCharacters() else _state.value.characters
+        // A participant is who is in the conversation. The character list is
+        // where the description lives, so a participant found in both uses the
+        // richer row. A conversation with three participants has no primary one;
+        // the composer is not where that is decided, so this stays the first and
+        // the participant list is still there to read.
+        val lead = conversation.participants.firstOrNull()
         messageCounter = 0
         _state.update {
             it.copy(
-                currentSessionId = snapshot.session.id,
-                messages = snapshot.messages.map { it.toItem() },
-                contextSources = snapshot.contextSources,
-                currentCharacter = characters.firstOrNull { c -> c.id == snapshot.session.characterId },
+                currentSessionId = conversation.conversationId,
+                messages = conversation.messages.map { it.toItem() },
+                currentCharacter = lead?.let { participant ->
+                    characters.firstOrNull { it.id == participant.id } ?: participant
+                },
                 currentModel = models.firstOrNull(),
                 generationState = GenerationState.Idle,
                 errorMessage = null,
             )
         }
+        loadContextSources()
     }
 
     private suspend fun loadContextSources() {
@@ -190,47 +193,47 @@ class ChatController(
         _state.update { it.copy(generationState = GenerationState.Cancelled) }
     }
 
-    private fun applyTurnEvent(event: TurnEvent) {
-        when (event) {
-            TurnEvent.Started -> ensureAssistant()
+    private fun applyTurnEvent(step: TurnStep) {
+        when (step) {
+            TurnStep.Started -> ensureAssistant()
 
-            is TurnEvent.TextDelta -> {
+            is TurnStep.TextDelta -> {
                 ensureAssistant()
                 _state.update { it.copy(generationState = GenerationState.Streaming) }
-                appendToAssistant { assistant -> assistant.copy(text = assistant.text + event.text) }
+                appendToAssistant { assistant -> assistant.copy(text = assistant.text + step.text) }
             }
 
-            is TurnEvent.ThinkingDelta -> {
+            is TurnStep.ThinkingDelta -> {
                 ensureAssistant()
                 appendToAssistant { assistant ->
-                    assistant.copy(thinking = assistant.thinking + event.text)
+                    assistant.copy(thinking = assistant.thinking + step.text)
                 }
             }
 
-            is TurnEvent.ToolCallStarted -> {
+            is TurnStep.ToolCallStarted -> {
                 ensureAssistant()
                 _state.update { it.copy(generationState = GenerationState.ExecutingTool) }
                 appendToAssistant { assistant ->
                     assistant.copy(
                         toolCalls = assistant.toolCalls + ToolCallItem(
-                            id = event.callId,
-                            toolName = event.toolName,
+                            id = step.callId,
+                            toolName = step.toolName,
                             statusLabel = "running",
                         ),
                     )
                 }
             }
 
-            is TurnEvent.ToolCallFinished -> {
+            is TurnStep.ToolCallFinished -> {
                 _state.update { it.copy(generationState = GenerationState.ContinuingAfterTool) }
                 appendToAssistant { assistant ->
                     assistant.copy(
                         toolCalls = assistant.toolCalls.map { call ->
-                            if (call.id == event.callId) {
+                            if (call.id == step.callId) {
                                 call.copy(
-                                    statusLabel = if (event.isError) "failed" else "done",
-                                    summary = event.summary,
-                                    isError = event.isError,
+                                    statusLabel = if (step.isError) "failed" else "done",
+                                    summary = step.summary,
+                                    isError = step.isError,
                                 )
                             } else {
                                 call
@@ -240,22 +243,22 @@ class ChatController(
                 }
             }
 
-            TurnEvent.Completed -> {
+            TurnStep.Completed -> {
                 assistantDraftIndex = null
                 _state.update { it.copy(generationState = GenerationState.Completed) }
             }
 
-            is TurnEvent.Failed -> {
+            is TurnStep.Failed -> {
                 assistantDraftIndex = null
                 _state.update {
                     it.copy(
                         generationState = GenerationState.Failed,
-                        errorMessage = event.message,
+                        errorMessage = step.message,
                     )
                 }
             }
 
-            TurnEvent.Cancelled -> {
+            TurnStep.Cancelled -> {
                 assistantDraftIndex = null
                 _state.update { it.copy(generationState = GenerationState.Cancelled) }
             }
@@ -281,26 +284,34 @@ class ChatController(
 
     private fun nextId(prefix: String): String = "$prefix-${messageCounter++}"
 
-    private fun MessageSummary.toItem(): ChatMessageItem = when (role) {
-        MessageRole.User -> ChatMessageItem.User(id, text)
-        MessageRole.Assistant -> ChatMessageItem.Assistant(
+    /**
+     * A stored step becomes a message item.
+     *
+     * A fixed instruction to the model renders like other assistant text
+     * because that is all it is on screen: it is context, not a turn. Folding
+     * it here loses nothing, because the transcript keeps every step and only
+     * this decides what the list draws.
+     */
+    private fun MessageRow.toItem(): ChatMessageItem = when (role) {
+        SpeakerRole.User -> ChatMessageItem.User(id, text)
+        // A MessageRow already carries ToolCallItems, so this is a pass-through.
+        // Converting it again here would be a second mapping of the same shape.
+        SpeakerRole.Assistant -> ChatMessageItem.Assistant(
             id = id,
             text = text,
-            toolCalls = toolName?.let {
-                listOf(ToolCallItem(id = "tool-$id", toolName = it, statusLabel = "done"))
-            } ?: emptyList(),
+            toolCalls = toolCalls,
         )
-        MessageRole.System -> ChatMessageItem.Assistant(id, text)
+        SpeakerRole.System, SpeakerRole.Developer -> ChatMessageItem.Assistant(id, text)
     }
 
-    private fun groupSessions(sessions: List<SessionSummary>): List<SessionGroup> {
+    private fun groupSessions(sessions: List<SessionRow>): List<SessionGroup> {
         val zone = ZoneId.systemDefault()
         val today = LocalDate.now(zone).atStartOfDay(zone).toInstant().toEpochMilli()
         val yesterday = today - 24 * 60 * 60_000L
         val buckets = linkedMapOf(
-            "Today" to mutableListOf<SessionSummary>(),
-            "Yesterday" to mutableListOf<SessionSummary>(),
-            "Earlier" to mutableListOf<SessionSummary>(),
+            "Today" to mutableListOf<SessionRow>(),
+            "Yesterday" to mutableListOf<SessionRow>(),
+            "Earlier" to mutableListOf<SessionRow>(),
         )
         sessions.sortedByDescending { it.updatedAt }.forEach { session ->
             val title = when {

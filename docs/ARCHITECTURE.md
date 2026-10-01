@@ -270,13 +270,29 @@ A caller that describes the provider again is making a claim about it. A field t
 
 A per-turn provider is therefore **merged** over the saved one: blank strings inherit, stated fields win, and `extra` merges key by key. The bridge follows the same rule by not describing the provider at all on an ordinary turn — it is already configured in the runtime — and by sending one only for a deliberate single-turn override, in which case it is sent whole.
 
-### 4. sujiu-ffi
+### 4. sujiu-runtime
 
 A deliberately small boundary around Rust. It exposes the conversation runtime to Qt/Kotlin/ArkTS without making any platform reimplement provider or tool semantics: runtime state lives in Rust, and every call returns either domain data or normalized turn events.
 
-`sujiu-napi` re-exports that same surface as a NAPI module. ArkTS imports it directly, so the HarmonyOS bridge calls the runtime without any C glue in ArkTS. The layer rules are unchanged by either crate: neither one carries UI state, navigation or platform concerns.
+It is also the **single source** of every cross-platform interface. Two binding crates turn it into platform code, and neither one is a second answer to what a platform may ask:
 
-See [UI_ARCHITECTURE.md §5](UI_ARCHITECTURE.md) for the exported surface, the event names that cross the boundary, and what is still missing.
+```text
+sujiu-uniffi   Android      UniFFI  -> generated Kotlin
+sujiu-napi     HarmonyOS    napi-rs -> generated N-API + index.d.ts
+```
+
+`sujiu-uniffi` holds no logic beyond translation: records the platforms receive are UniFFI records with explicit `From` conversions, and a platform cannot reach a runtime type that has no conversion. `sujiu-napi` does the same through `#[napi(object)]` DTOs. Neither crate carries UI state, navigation or platform concerns, and neither carries the other's generator — a crate that could only be used by one of the two platforms would make a plain Rust consumer of the runtime carry a binding toolchain it never asked for.
+
+The consequence that matters is negative: a field a platform needs does not get added to Kotlin or ArkTS. It gets added here and exported. That is why `sujiu-uniffi` had to grow a `list_models()` during this work — the Android bridge wanted the model list, and the honest fix was an export, not a second hand-written shape.
+
+Two binding crates means two generators, and that is deliberate rather than a failure to converge. There is no mature UniFFI target for ArkTS, so napi-rs is the correct route for HarmonyOS. Asking one generator to serve both would mean a language binding nobody needs in order to avoid writing the Android one properly.
+
+The generated artifacts are build outputs with different owners, because the two toolchains have different constraints:
+
+- **Kotlin is generated at build time** by a Gradle task and is not committed. Nothing can drift from a file the build overwrites.
+- **`index.d.ts` is committed**, because the HarmonyOS SDK does not verify a NAPI module: the file is a contract for the C++ language server, not an input the ArkTS compiler reads. A Rust export change that skipped regeneration would otherwise surface as a disagreement between the bridge and the contract on a device, so `scripts/check-bindings.sh` regenerates beside it and diffs.
+
+See [UI_ARCHITECTURE.md §5](UI_ARCHITECTURE.md) for the two generated binding surfaces, where their outputs live, the event names that cross the boundary, and what is still missing.
 
 ### 5. Compatibility codecs
 

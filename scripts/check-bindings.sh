@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Fail when a committed binding declaration no longer matches the Rust exports.
+#
+# CI runs this so a Rust DTO change that was never regenerated is a failed job,
+# not a device failure: the ArkTS bridge reads a declaration nobody compiles
+# against, so nothing else would notice it going stale.
+#
+# The Kotlin bindings are generated at build time and are deliberately not
+# checked here; the compile that consumes them is the check.
+#
+# Usage:
+#   scripts/check-bindings.sh
+#
+# Environment:
+#   DEVECO_CLI_CLT_PATH   HarmonyOS Command Line Tools root. Required, because
+#                         regenerating the declaration needs the NDK.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+committed="$repo_root/apps/harmony/entry/src/main/cpp/types/libsujiu_napi/index.d.ts"
+scratch="$repo_root/target/napi-bindings-check"
+generated="$scratch/index.d.ts"
+
+# Generate into a scratch copy and compare afterwards. Generating over the
+# committed file and diffing that against itself would report success for a
+# repository it had already rewritten, and would leave the tree modified by a
+# check that is supposed to only look at it.
+rm -rf "$scratch"
+mkdir -p "$scratch"
+
+# `diff` is not trusted for the verdict. The HarmonyOS Command Line Tools ship
+# their own under sdk/.../toolchains, and on any machine that has that directory
+# on PATH it shadows GNU diff, rejects `-u`, and exits 0 when it could not parse
+# its options at all. A comparison that cannot fail is not a comparison, so the
+# verdict comes from `cmp`, which that toolchain does not ship.
+#
+# The probe exists because the alternative is a check that reports success
+# because its own tooling is broken, which is the exact failure this script was
+# written to catch.
+probe_a="$scratch/probe-a.d.ts"
+probe_b="$scratch/probe-b.d.ts"
+printf 'export declare const x: string;\n' > "$probe_a"
+printf 'export declare const y: string;\n' > "$probe_b"
+if cmp -s "$probe_a" "$probe_b"; then
+  echo "cmp cannot tell two different files apart on this machine." >&2
+  echo "The drift check would pass for any binding, so it is not run." >&2
+  exit 1
+fi
+if ! cmp -s "$probe_a" "$probe_a"; then
+  echo "cmp reports identical files as different on this machine." >&2
+  echo "The drift check would fail for any binding, so it is not run." >&2
+  exit 1
+fi
+
+if ! DEVECO_CLI_CLT_PATH="${DEVECO_CLI_CLT_PATH:-}" SUJIU_ARKTS_OUT="$generated" \
+  "$repo_root/scripts/generate-bindings.sh" arkts; then
+  echo "The ArkTS declaration could not be generated." >&2
+  exit 1
+fi
+
+if [ ! -s "$generated" ]; then
+  echo "The generated ArkTS declaration is empty." >&2
+  echo "An empty declaration describes nothing and would match nothing." >&2
+  exit 1
+fi
+
+if cmp -s "$generated" "$committed"; then
+  echo "The committed ArkTS declaration matches the napi exports."
+  exit 0
+fi
+
+echo "The committed ArkTS declaration no longer matches the napi exports." >&2
+echo "Run scripts/generate-bindings.sh and commit the result." >&2
+# Best effort only. If this machine's diff is the HarmonyOS one, the verdict above
+# is still correct; it just has nothing readable to show.
+diff -u "$committed" "$generated" 2>/dev/null | sed -n '1,40p' >&2 || true
+exit 1

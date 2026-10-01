@@ -98,13 +98,6 @@ fun CharacterDetailScreen(controller: ChatController, characterId: String) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text(character?.description.orEmpty(), style = MaterialTheme.typography.bodyLarge)
-            if (!character?.tags.isNullOrEmpty()) {
-                Text(
-                    text = character!!.tags.joinToString(" · "),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
             TextButton(
                 onClick = { SujiuNavigation.selectCharacterAndReturn(controller, characterId) },
                 modifier = Modifier.fillMaxWidth(),

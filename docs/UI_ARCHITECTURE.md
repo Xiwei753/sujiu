@@ -226,7 +226,7 @@ UI / View
     ↓ intents        ↑ view state
 Presentation / ViewModel / Controller
     ↓                     ↑
-Application Bridge ──→ Rust (sujiu-ffi)
+Application Bridge ──→ Rust (sujiu-runtime)
     ↓
 Platform Services
     ↓
@@ -293,7 +293,7 @@ state, so a panel is never a place where the UI fetches or transforms data.
 
 ### 2.3 Application Bridge
 
-Connects the presentation layer to `sujiu-ffi` and translates Rust events into
+Connects the presentation layer to `sujiu-runtime` and translates Rust events into
 provider-neutral presentation data. It contains **no visual logic** and no
 provider wire formats.
 
@@ -511,7 +511,7 @@ controller settles      -> graph -> hold.release()
 ### 2.5 Dependency direction
 
 ```text
-ui → presentation → bridge → sujiu-ffi
+ui → presentation → bridge → sujiu-runtime
 ui → platform services
 presentation → platform services (through service interfaces only)
 platform services must never import ui or presentation
@@ -615,10 +615,17 @@ swallow the tool round.
 
 ---
 
-## 4. Bridge contract required by the frontends
+## 4. The app-facing API the frontends require
 
-The frontends need a coarse, provider-neutral conversation API. The current
-`sujiu-ffi` surface is **not sufficient** — see [§5](#5-current-ffi-gap-analysis).
+The frontends need a coarse, provider-neutral conversation API. What follows
+describes that API and what is still missing — see
+[§5](#5-generated-binding-surfaces).
+
+**None of it is written out per platform.** Every record and operation below
+exists once in `sujiu-runtime` and reaches Kotlin and ArkTS through a
+generator. Read this section to know what the contract *is*; do not use it as
+something to transcribe. A platform holds view models reached by converting a
+generated record, never a hand-typed copy of these shapes.
 
 Required data (provider-neutral, stable IDs, no provider wire format):
 
@@ -686,56 +693,85 @@ Rules:
 
 ---
 
-## 5. FFI surface
+## 5. Generated binding surfaces
 
-`sujiu-ffi` owns the runtime state and exposes a coarse C ABI. `sujiu-napi`
-re-exports the same surface as a NAPI module so a platform can call it without
-C glue. The frontend never sees this layer; it only sees §4.
+A platform does not call Rust and does not transcribe Rust. §4 exists once, in
+`sujiu-runtime`, and two generators project it:
 
 ```text
-sujiu_core_version()
-sujiu_compile_prompt_json(input_json)
-sujiu_string_free(value)
-
-sujiu_runtime_new() / sujiu_runtime_free(runtime)
-sujiu_configure_provider_json(runtime, config_json)
-sujiu_list_sessions_json(runtime)
-sujiu_list_characters_json(runtime, query)
-sujiu_list_models_json(runtime)
-sujiu_list_context_sources_json(runtime)
-sujiu_conversation_state_json(runtime, session_id)
-sujiu_create_conversation_json(runtime, request_json)
-sujiu_create_session_json(runtime, character_id)
-sujiu_send_turn_json(runtime, request_json)
-sujiu_send_turn_streaming(runtime, request_json, callback, user_data)
-sujiu_cancel_turn(runtime)
-
-sujiu_endpoint_json(runtime)
-sujiu_runtime_use_directory_json(runtime, path)
-sujiu_runtime_data_dir_json(runtime)
-
-sujiu_diagnostics_json(runtime, limit)
-sujiu_discovery_diagnostics_json(runtime, limit)
-sujiu_diagnostics_text_json(runtime)
-sujiu_diagnostics_clear(runtime)
+sujiu-runtime  (records + operations)
+   ├─ crates/sujiu-uniffi  →  UniFFI   →  generated Kotlin   (Android)
+   └─ crates/sujiu-napi    →  napi-rs  →  generated N-API     (HarmonyOS)
 ```
 
-The `limit` argument is a pointer that may be null, and null means the whole
-log. Refusing a request over a malformed limit helps nobody, and a diagnostic
-surface that can itself fail is a diagnostic surface nobody will use.
+The two generators are not a failure to converge. There is no mature UniFFI
+target for ArkTS, so HarmonyOS uses napi-rs and Android uses UniFFI, and both
+are the right answer for their platform.
 
-The three read entry points exist because they answer different questions. A
-structured list is what a screen renders; a filtered list is how a user separates
-probing from chatting; one text blob is what a user pastes into a bug report and
-what has to survive a platform that cannot render a list at all.
+### 5.1 Where the generated files live, and who owns them
 
-Every `*_json` entry point returns the same envelope, `{"ok":…,"data":…,"error":…}`,
-and a null pointer becomes an error envelope rather than a crash, so a frontend
-can trust the shape without knowing what failed.
+The two artifacts are deliberately not treated the same way.
 
-### 5.1 Turn events cross the boundary already normalized
+**Kotlin is generated at build time and not committed.** A Gradle task builds
+`libsujiu_uniffi.so`, runs the generator and adds the result to the source set,
+so there is no checked-in file that can be out of date. The contract cannot
+drift from Rust because the build overwrites it every time.
 
-`send_turn_streaming` reports application events, not provider events:
+**`index.d.ts` is generated and committed.** The HarmonyOS SDK does not verify a
+NAPI module — it warns that the module is unverified — so the declaration is a
+contract the C++ language server reads, not an input the ArkTS compiler checks.
+Nothing else would notice it going stale, so `scripts/check-bindings.sh`
+regenerates it beside the committed copy and diffs the two. CI runs that check,
+which is the only reason a Rust export change that skipped regeneration fails a
+job instead of reaching a device.
+
+```bash
+scripts/generate-bindings.sh          # both platforms
+scripts/generate-bindings.sh kotlin
+scripts/generate-bindings.sh arkts
+scripts/check-bindings.sh             # fail on drift, change nothing
+```
+
+The check regenerates beside the original and compares. A check that repairs
+what it is checking reports success for a repository it has already changed.
+
+### 5.2 What a platform is allowed to write
+
+A platform may write view models, and only view models:
+
+```text
+generated record  →  platform view model  →  UI
+```
+
+`bridge/GeneratedMapping.kt` on Android and the mapping helpers in
+`SujiuNativeBridge.ets` are the whole of that conversion layer, and the
+conversions over generated enums are exhaustive on purpose: adding a
+`TurnEventKind` should fail the build rather than render as "something else".
+
+### 5.3 The C ABI in `sujiu-runtime/src/lib.rs`
+
+That file also exports a coarse C ABI of about twenty-five `sujiu_*` functions,
+every one of them wrapping the same operations in a
+`{"ok":…,"data":…,"error":…}` JSON envelope and handing back a string that the
+caller frees with `sujiu_string_free`. A null pointer becomes an error envelope
+rather than a crash, and a null `limit` means the whole log.
+
+No platform uses it. `sujiu-napi` and `sujiu-uniffi` both call the Rust API
+directly, which is why a method could be added to §4 in this round without
+touching a line of it — and why `list_models()` could be missing from one
+platform's export while the operation existed in Rust the whole time.
+
+It is therefore a third hand-written copy of the same surface, which is exactly
+what AGENTS.md §14 rules 3 and 7 exist to prevent, and it is scheduled to be
+removed. Until it is, it is not a route to take: a new binding crate goes
+through `sujiu-runtime`, and adding an operation to the C ABI as well would be
+the drift this document is about.
+
+### 5.4 Turn events cross the boundary already normalized
+
+A turn reports application events, not provider events. The generated names
+differ per platform — Kotlin gets `TURN_STARTED`, the `.d.ts` gets
+`turnStarted` — and they are the same event:
 
 ```text
 turn_started
@@ -756,7 +792,7 @@ The agent loop reports through `StreamSink` and takes a `CancelToken`; a
 provider that cannot stream still works, because `AiProvider::stream` has a
 default body that calls `complete` and emits the result as one delta.
 
-### 5.2 What is still missing
+### 5.5 What is still missing
 
 | Need | Status | Consequence |
 | --- | --- | --- |
@@ -765,15 +801,22 @@ default body that calls `complete` and emits the result as one delta.
 | imported character cards | codec only | the character library has no import yet |
 | long-term memory writes | not started | see AGENTS.md §11 |
 
-### 5.3 Per-platform status
+### 5.6 Per-platform status
 
 HarmonyOS talks to the real runtime today: `SujiuNativeBridge` imports the NAPI
 module and implements §4 on top of it, and the preview bridge is gone. The
 native library is cross compiled and staged by
 `scripts/build-harmony-runtime.sh`.
 
-Android and Desktop still ship preview bridges behind the same interface, so
-their presentation code is already written against §4. Replacing them with the
+Android has `UniffiSujiuBridge`, which calls the generated Kotlin interface, so
+its binding is generated too. It is not yet the bridge the app is wired to,
+because the app still runs without a native library on the classpath; until it
+does, `InMemorySujiuBridge` remains the source. The preview bridge builds the
+same view models from the same operation set, which is what makes swapping it a
+change to one file rather than to the UI.
+
+Desktop still ships a preview bridge behind the same interface, so its
+presentation code is already written against §4. Replacing it with the
 FFI-backed implementation must not change any UI or presentation file.
 
 ---
@@ -787,7 +830,7 @@ match §2.
 apps/android/app/src/main/java/io/sujiu/app/
   ui/            Compose screens, components, theme
   presentation/  view state, intents, view models
-  bridge/        sujiu-ffi boundary (preview implementation for now)
+  bridge/        sujiu-runtime boundary (preview implementation for now)
   platform/      capability services (clipboard/appearance/platform info today)
   MainActivity   composition root (AppGraph)
 
@@ -795,14 +838,14 @@ apps/harmony/entry/src/main/ets/
   pages/         navigation destinations
   components/    reusable ArkUI components
   presentation/  observable view state + controllers
-  bridge/        sujiu-ffi boundary; SujiuNativeBridge talks to the real runtime
+  bridge/        sujiu-runtime boundary; SujiuNativeBridge talks to the real runtime
   platform/      capability services (clipboard/appearance/platform info today)
   app/           composition root (AppGraph)
 
 apps/desktop/
   qml/           Qt Quick views
   src/presentation/  C++ controllers exposing view state
-  src/bridge/        sujiu-ffi boundary + preview implementation
+  src/bridge/        sujiu-runtime boundary + preview implementation
   src/platform/      capability services (clipboard/appearance/platform info today)
   src/main.cpp       composition root
 ```

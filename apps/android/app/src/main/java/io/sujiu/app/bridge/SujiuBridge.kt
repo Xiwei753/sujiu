@@ -1,112 +1,60 @@
 package io.sujiu.app.bridge
 
+import io.sujiu.app.presentation.CharacterRow
+import io.sujiu.app.presentation.MessageRow
+import io.sujiu.app.presentation.ModelRow
+import io.sujiu.app.presentation.SessionRow
+import io.sujiu.app.presentation.SourceRow
+import io.sujiu.app.presentation.TurnStep
 import kotlinx.coroutines.flow.Flow
 
 /**
- * Data handed across the application bridge.
+ * The application facing surface of the shared Rust runtime.
  *
- * These types are provider neutral on purpose: the platform never sees a
- * provider response block, a tool call envelope or an HTTP detail. A future
- * `sujiu-ffi` implementation only has to translate its payload into these
- * shapes; no UI or presentation change is required afterwards.
- */
-data class SessionSummary(
-    val id: String,
-    val title: String,
-    val characterId: String,
-    val characterName: String,
-    val preview: String,
-    val updatedAt: Long,
-)
-
-data class CharacterSummary(
-    val id: String,
-    val name: String,
-    val description: String,
-    val tags: List<String>,
-)
-
-data class ModelSummary(
-    val id: String,
-    val name: String,
-    val providerLabel: String,
-    val contextLabel: String,
-)
-
-data class ContextSourceSummary(
-    val id: String,
-    val name: String,
-    val kindLabel: String,
-    val recordCount: Int,
-)
-
-enum class MessageRole { User, Assistant, System }
-
-data class MessageSummary(
-    val id: String,
-    val role: MessageRole,
-    val text: String,
-    val toolName: String? = null,
-    val toolStatusLabel: String? = null,
-)
-
-data class ConversationSnapshot(
-    val session: SessionSummary,
-    val messages: List<MessageSummary>,
-    val contextSources: List<ContextSourceSummary>,
-)
-
-/**
- * Normalized turn events.
+ * Everything here is a view model from `presentation`, never a Rust record.
+ * The Rust app-facing API is defined once, in `crates/sujiu-uniffi`, and
+ * UniFFI generates the Kotlin for it at build time;
+ * [UniffiSujiuBridge] maps those generated records onto the view models in
+ * `GeneratedMapping.kt`.
  *
- * Provider specific streaming events are mapped onto this set by the bridge
- * implementation, so presentation and UI stay identical across providers.
- */
-sealed interface TurnEvent {
-    data object Started : TurnEvent
-
-    data class TextDelta(val text: String) : TurnEvent
-
-    data class ThinkingDelta(val text: String) : TurnEvent
-
-    data class ToolCallStarted(val callId: String, val toolName: String) : TurnEvent
-
-    data class ToolCallFinished(
-        val callId: String,
-        val toolName: String,
-        val summary: String,
-        val isError: Boolean,
-    ) : TurnEvent
-
-    data object Completed : TurnEvent
-
-    data class Failed(val message: String) : TurnEvent
-
-    data object Cancelled : TurnEvent
-}
-
-/**
- * The only application facing surface of the shared Rust runtime.
- *
- * The FFI contract is expected to grow these operations; until it does, the
- * in-memory preview bridge is used so the whole frontend stack stays
- * exercisable.
+ * This interface exists so the frontend stack stays exercisable without a
+ * built native library, and so the two implementations can be compared. It is
+ * an operation set, not a copy of the binding contract: it declares what a chat
+ * surface needs and holds no provider wire format, no HTTP detail and no
+ * storage document.
  */
 interface SujiuBridge {
-    suspend fun listSessions(): List<SessionSummary>
+    suspend fun listSessions(): List<SessionRow>
 
-    suspend fun listCharacters(query: String? = null): List<CharacterSummary>
+    suspend fun listCharacters(query: String? = null): List<CharacterRow>
 
-    suspend fun listModels(): List<ModelSummary>
+    suspend fun listModels(): List<ModelRow>
 
-    suspend fun listContextSources(): List<ContextSourceSummary>
+    suspend fun listContextSources(): List<SourceRow>
 
-    suspend fun conversationState(sessionId: String): ConversationSnapshot
+    /** The transcript of one conversation, with the four bindings it uses. */
+    suspend fun conversationState(conversationId: String): ConversationView
 
-    fun sendTurn(sessionId: String, userText: String): Flow<TurnEvent>
+    fun sendTurn(conversationId: String, userText: String): Flow<TurnStep>
 
-    fun cancelTurn(sessionId: String)
+    fun cancelTurn(conversationId: String)
 
     /** Human readable identity of the runtime behind this bridge, for About. */
     fun runtimeSummary(): String
 }
+
+/**
+ * One conversation, as a chat screen reads it.
+ *
+ * Built from the generated snapshot rather than taken from it: the runtime also
+ * reports a first participant's card for frontends that only know about one
+ * character, and Android is not that frontend.
+ */
+data class ConversationView(
+    val conversationId: String,
+    val participants: List<CharacterRow>,
+    val personaId: String?,
+    val worldBookIds: List<String>,
+    val promptProfileId: String?,
+    val messages: List<MessageRow>,
+)

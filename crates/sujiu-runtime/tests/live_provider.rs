@@ -8,7 +8,7 @@
 //! SUJIU_TEST_BASE_URL=https://example/v1 \
 //! SUJIU_TEST_API_KEY=... \
 //! SUJIU_TEST_MODEL=some-model \
-//!   cargo test -p sujiu-ffi --test live_provider -- --ignored --nocapture
+//!   cargo test -p sujiu-runtime --test live_provider -- --ignored --nocapture
 //! ```
 //!
 //! The point is to prove that the shared runtime can carry a whole turn on its
@@ -18,8 +18,8 @@
 use std::sync::{Arc, Mutex};
 
 use sujiu_core::EndpointConfig;
-use sujiu_ffi::events::{TurnEvent, TurnEventKind, TurnEventReporter};
-use sujiu_ffi::runtime::{SendTurnRequest, SujiuRuntime};
+use sujiu_runtime::events::{TurnEvent, TurnEventKind, TurnEventReporter};
+use sujiu_runtime::runtime::{SendTurnRequest, SujiuRuntime};
 
 /// Collects events so the test can assert on the order they arrived in.
 #[derive(Clone, Default)]
@@ -66,7 +66,7 @@ fn a_real_turn_streams_back_from_a_live_provider() {
     let api_key = std::env::var("SUJIU_TEST_API_KEY").expect("SUJIU_TEST_API_KEY");
     let model = std::env::var("SUJIU_TEST_MODEL").expect("SUJIU_TEST_MODEL");
 
-    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
     runtime
         .set_endpoint(Some(EndpointConfig {
             id: "live".to_string(),

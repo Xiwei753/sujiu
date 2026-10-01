@@ -8,7 +8,12 @@ on:
       - "scripts/build-harmony-runtime.sh"
       - "scripts/check-harmony-runtime.sh"
       - "scripts/harmony-runtime-fingerprint.sh"
+      - "scripts/generate-bindings.sh"
+      - "scripts/check-bindings.sh"
+      - "scripts/harmony-cross-env.sh"
       - "apps/harmony/entry/libs/**"
+      - "apps/harmony/entry/src/main/cpp/types/**"
+      - "apps/android/**"
       - ".github/workflows/core-ci.yml"
   pull_request:
     paths:
@@ -17,7 +22,12 @@ on:
       - "scripts/build-harmony-runtime.sh"
       - "scripts/check-harmony-runtime.sh"
       - "scripts/harmony-runtime-fingerprint.sh"
+      - "scripts/generate-bindings.sh"
+      - "scripts/check-bindings.sh"
+      - "scripts/harmony-cross-env.sh"
       - "apps/harmony/entry/libs/**"
+      - "apps/harmony/entry/src/main/cpp/types/**"
+      - "apps/android/**"
       - ".github/workflows/core-ci.yml"
 
 jobs:
@@ -45,3 +55,49 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check the staged runtime library against its sources
         run: scripts/check-harmony-runtime.sh
+
+  # The HarmonyOS type declaration is a committed build output. Nothing
+  # compiles it, because the SDK does not verify a NAPI module, so a Rust
+  # export that changed without regenerating would reach a device as a
+  # contract the bridge disagrees with. This job fails instead.
+  #
+  # The generator cross compiles for OHOS and reads the compiled module, so it
+  # needs the same NDK the runtime build uses.
+  bindings-harmony:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check the generated N-API declaration against the Rust exports
+        env:
+          DEVECO_CLI_CLT_PATH: ${{ github.workspace }}/harmony-cli
+        run: |
+          if [ ! -d "$DEVECO_CLI_CLT_PATH" ]; then
+            echo "HarmonyOS Command Line Tools are not available on this runner." >&2
+            echo "Fetch them into \$DEVECO_CLI_CLT_PATH, or run this check locally:" >&2
+            echo "  export DEVECO_CLI_CLT_PATH=\$HOME/.harmony-cli" >&2
+            echo "  scripts/check-bindings.sh" >&2
+            exit 1
+          fi
+          scripts/check-bindings.sh
+
+  # Kotlin is generated from the Rust exports at build time, so there is no
+  # committed artifact to drift. What can still be wrong is that the app's own
+  # Kotlin no longer matches the generated contract, and the generated contract
+  # cannot be compiled at all. Both fail here rather than on a device.
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+      - name: Compile against the generated bindings
+        working-directory: apps/android
+        run: ./gradlew :app:compileDebugKotlin --no-daemon

@@ -1,0 +1,32 @@
+[package]
+name = "sujiu-uniffi"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "UniFFI binding layer for Android: the generated app-facing contract"
+
+# `lib` is what the generator reads; `cdylib` is what Android loads.
+[lib]
+name = "sujiu_uniffi"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+# The generator is its own binary so an ordinary build never links it. Building
+# it needs the `bindgen` feature, which pulls in the whole generator tree.
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[dependencies]
+sujiu-core = { path = "../sujiu-core" }
+sujiu-ai = { path = "../sujiu-ai" }
+sujiu-runtime = { path = "../sujiu-runtime" }
+serde_json = "1"
+thiserror = "2"
+# `build` is what makes `setup_scaffolding!` work; `tokio` is the async runtime
+# the exported turn methods run on.
+uniffi = { version = "0.32", features = ["build", "tokio"] }
+
+[features]
+default = []
+bindgen = ["uniffi/cli"]

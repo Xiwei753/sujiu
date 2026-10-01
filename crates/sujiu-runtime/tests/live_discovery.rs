@@ -18,14 +18,14 @@
 //! ```text
 //! SUJIU_TEST_BASE_URL=https://example/v1 \
 //! SUJIU_TEST_API_KEY=... \
-//!   cargo test -p sujiu-ffi --test live_discovery -- --ignored --nocapture
+//!   cargo test -p sujiu-runtime --test live_discovery -- --ignored --nocapture
 //! ```
 //!
 //! No model is set, which is the point: discovery has to work before the user
 //! has chosen one.
 
 use sujiu_ai::DiagnosticKind;
-use sujiu_ffi::runtime::SujiuRuntime;
+use sujiu_runtime::runtime::SujiuRuntime;
 
 // Not #[tokio::test]: the runtime owns a tokio runtime, and dropping one inside
 // an async context panics. The C ABI blocks on the same runtime, so this does
@@ -36,7 +36,7 @@ fn a_live_endpoint_is_described_without_a_model_and_without_leaking_the_key() {
     let base_url = std::env::var("SUJIU_TEST_BASE_URL").expect("SUJIU_TEST_BASE_URL");
     let api_key = std::env::var("SUJIU_TEST_API_KEY").expect("SUJIU_TEST_API_KEY");
 
-    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
     let exploration = runtime
         .tokio
         .block_on(runtime.discover_endpoint(&base_url, &api_key, true));

@@ -1,0 +1,18 @@
+{
+  "name": "sujiu-napi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "N-API binding for the Sujiu Rust runtime, loaded by the HarmonyOS frontend.",
+  "napi": {
+    "name": "sujiu",
+    "triples": {
+      "defaults": true,
+      "additional": [
+        "aarch64-unknown-linux-ohos"
+      ]
+    }
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.10.5"
+  }
+}

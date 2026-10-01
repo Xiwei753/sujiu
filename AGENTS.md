@@ -45,7 +45,9 @@ crates/
   sujiu-core/    Provider-neutral domain data and prompt compilation
   sujiu-ai/      AI providers, conversation loop, tools, retrieval
   sujiu-codec/   External format compatibility
-  sujiu-ffi/     Cross-language boundary
+  sujiu-runtime/ Shared runtime and app-facing API
+  sujiu-uniffi/  Android UniFFI binding (generated Kotlin)
+  sujiu-napi/    HarmonyOS N-API binding (generated types)
 
 docs/
   ARCHITECTURE.md
@@ -296,17 +298,79 @@ Important rules:
 
 The goal is ecosystem compatibility, not code-architecture compatibility.
 
-## 14. FFI boundary
+## 14. Cross-language bindings are generated, never written by hand
 
-Keep FFI small and stable.
+The Rust app-facing API is the **single source** of every cross-platform
+interface. Platform bindings are build outputs of it.
 
-Prefer versioned, provider-neutral data structures.
+```text
+sujiu-core / sujiu-ai
+        ↓
+sujiu-runtime          app-facing API, no binding machinery
+        ↓
+├── sujiu-uniffi       Android: UniFFI → generated Kotlin
+└── sujiu-napi         HarmonyOS: napi-rs → generated N-API + index.d.ts
+```
 
-Do not expose platform-specific UI state through FFI.
+Hard rules. Each of these exists because breaking it has already cost a
+real bug, not as a matter of taste:
 
-Do not require every frontend to understand provider-specific tool-call JSON.
+1. **Rust is the only source.** If a platform needs a field, an operation or
+   a whole entity, add it to `sujiu-runtime` and export it. The alternative is
+   two contracts that answer to no one.
 
-Rust should normalize the runtime behavior first.
+2. **Android uses UniFFI; HarmonyOS uses napi-rs.** There is no mature
+   UniFFI target for ArkTS, so napi-rs is the correct route there. Do not
+   argue for one generator across both platforms.
+
+3. **Never hand-copy a Rust DTO or API into Kotlin, ArkTS or TypeScript.** A
+   `data class CharacterSummary` in Kotlin that was typed out by hand is the
+   regression this section exists to prevent. It is not a placeholder and it
+   is not faster.
+
+4. **Platform view models are allowed, and are not the contract.** A platform
+   may have its own shapes for rendering, reached only by converting from a
+   generated record:
+
+   ```text
+   GeneratedRecord -> PlatformViewModel
+   ```
+
+   A view model that happens to match a Rust record field-for-field is still a
+   view model. Keep the conversion exhaustive: a `when` over a generated enum
+   should fail to compile when a case is added, not fall through to "other".
+
+5. **Regenerate or verify after touching an export.** Changing a Rust DTO,
+   adding a `#[uniffi::export]` or adding a `#[napi]` method means running:
+
+   ```bash
+   scripts/generate-bindings.sh
+   scripts/check-bindings.sh
+   ```
+
+6. **CI must fail on binding drift.** `scripts/check-bindings.sh` regenerates
+   beside the committed artifact and diffs it. A check that repairs what it is
+   checking reports success for a repository it has already changed.
+
+7. **Never add a second hand-written bridge contract to make something run.**
+   A preview bridge is acceptable while no native library is linked; it must
+   speak view models, name no generated type, and be replaced by the real
+   bridge rather than accumulating alongside it.
+
+8. **Do not expose provider internals through a binding.** No wire format, no
+   OpenAI/Anthropic request shape, no HTTP status, no internal store document.
+   Platforms see Sujiu's domain model: Conversation, Character, Persona,
+   WorldBook, PromptProfile, endpoint and model discovery, turn events,
+   diagnostics.
+
+Keep FFI small and stable. Prefer versioned, provider-neutral data structures.
+Do not expose platform-specific UI state through a binding. Do not require
+every frontend to understand provider-specific tool-call JSON. Rust should
+normalize the runtime behavior first.
+
+A summary row and an editor body are different records. Prefilling an editor
+from a list row starts a blank form over a fully-written resource, and saving
+destroys whatever the row did not carry.
 
 ## 15. HarmonyOS development on Linux with DevEco CLI
 

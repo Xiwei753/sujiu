@@ -3,7 +3,7 @@
 # the entry module, so the HAP ships the real runtime instead of a preview one.
 #
 # The library is a NAPI module, so ArkTS can import it directly and the
-# application bridge can talk to sujiu-ffi without any C glue in ArkTS.
+# application bridge can talk to sujiu-runtime without any C glue in ArkTS.
 #
 # ArkTS imports the library by name (`libsujiu_napi.so`), so a staged copy has
 # to exist before `devecocli build` can compile the entry module. The staged
@@ -32,26 +32,12 @@ fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ndk="$DEVECO_CLI_CLT_PATH/sdk/default/openharmony/native"
 
-if [ ! -x "$ndk/llvm/bin/aarch64-unknown-linux-ohos-clang" ]; then
-  echo "The OHOS NDK was not found at $ndk" >&2
-  exit 1
-fi
-
 # rustls links C and assembly, so the cross compiler is needed as well as the
-# linker. Without these the link step fails with a target mismatch.
-export PATH="$ndk/llvm/bin:$PATH"
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER="$ndk/llvm/bin/aarch64-unknown-linux-ohos-clang"
-export CC_aarch64_unknown_linux_ohos="$ndk/llvm/bin/aarch64-unknown-linux-ohos-clang"
-export CXX_aarch64_unknown_linux_ohos="$ndk/llvm/bin/aarch64-unknown-linux-ohos-clang++"
-export AR_aarch64_unknown_linux_ohos="$ndk/llvm/bin/llvm-ar"
-
-# The napi symbols are not in libc. The ArkTS engine resolves them from
-# libace_napi.z.so, which the NDK declares as the ace_napi system capability.
-# Without this dependency the built module only needs libc.so, and the device
-# refuses to relocate it at load time with
-# "relocating failed: symbol not found ... s=napi_create_object",
-# which surfaces as a blank screen rather than as a build error.
-export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-lace_napi.z"
+# linker, and ring's build script reads CC to choose its assembler. The whole
+# list lives in one sourced file so the binding generator and this build cannot
+# disagree about what a HarmonyOS target needs.
+# shellcheck source=scripts/harmony-cross-env.sh
+source "$repo_root/scripts/harmony-cross-env.sh"
 
 echo "Building the Sujiu runtime for aarch64-unknown-linux-ohos ($profile)"
 cargo build --manifest-path "$repo_root/Cargo.toml" \

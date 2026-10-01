@@ -1,9 +1,5 @@
 package io.sujiu.app.presentation
 
-import io.sujiu.app.bridge.CharacterSummary
-import io.sujiu.app.bridge.ContextSourceSummary
-import io.sujiu.app.bridge.ModelSummary
-import io.sujiu.app.bridge.SessionSummary
 import io.sujiu.app.platform.AppearanceMode
 
 /**
@@ -55,19 +51,19 @@ sealed interface ChatMessageItem {
 
 data class SessionGroup(
     val title: String,
-    val sessions: List<SessionSummary>,
+    val sessions: List<SessionRow>,
 )
 
 data class ChatUiState(
     val sessionGroups: List<SessionGroup> = emptyList(),
     val messages: List<ChatMessageItem> = emptyList(),
-    val characters: List<CharacterSummary> = emptyList(),
+    val characters: List<CharacterRow> = emptyList(),
     val characterQuery: String = "",
-    val models: List<ModelSummary> = emptyList(),
-    val contextSources: List<ContextSourceSummary> = emptyList(),
+    val models: List<ModelRow> = emptyList(),
+    val contextSources: List<SourceRow> = emptyList(),
     val currentSessionId: String? = null,
-    val currentCharacter: CharacterSummary? = null,
-    val currentModel: ModelSummary? = null,
+    val currentCharacter: CharacterRow? = null,
+    val currentModel: ModelRow? = null,
     val draft: String = "",
     val generationState: GenerationState = GenerationState.Idle,
     val errorMessage: String? = null,

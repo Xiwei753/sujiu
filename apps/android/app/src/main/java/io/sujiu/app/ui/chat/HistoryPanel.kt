@@ -24,7 +24,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
-import io.sujiu.app.bridge.SessionSummary
+import io.sujiu.app.presentation.SessionRow
 import io.sujiu.app.presentation.ChatController
 import io.sujiu.app.presentation.ChatIntent
 
@@ -73,7 +73,7 @@ fun HistoryPanel(
                     )
                 }
                 items(items = group.sessions, key = { it.id }) { session ->
-                    SessionRow(
+                    SessionItem(
                         session = session,
                         selected = session.id == state.currentSessionId,
                         onClick = {
@@ -88,8 +88,11 @@ fun HistoryPanel(
 }
 
 @Composable
-private fun SessionRow(
-    session: SessionSummary,
+// Named for the composable, not the row type it renders: a private function
+// sharing a name with the data class it takes is a name collision waiting to
+// be misread as the type.
+private fun SessionItem(
+    session: SessionRow,
     selected: Boolean,
     onClick: () -> Unit,
 ) {
@@ -107,7 +110,7 @@ private fun SessionRow(
             overflow = TextOverflow.Ellipsis,
         )
         Text(
-            text = session.characterName,
+            text = session.who,
             style = MaterialTheme.typography.labelSmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,

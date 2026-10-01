@@ -16,8 +16,8 @@ use std::thread;
 
 use serde_json::{json, Value};
 use sujiu_core::EndpointConfig;
-use sujiu_ffi::events::{TurnEvent, TurnEventKind, TurnEventReporter};
-use sujiu_ffi::runtime::{SendTurnRequest, SujiuRuntime};
+use sujiu_runtime::events::{TurnEvent, TurnEventKind, TurnEventReporter};
+use sujiu_runtime::runtime::{SendTurnRequest, SujiuRuntime};
 
 /// A request body the server received.
 type Received = Value;
@@ -236,7 +236,7 @@ impl TurnEventReporter for Recorder {
 }
 
 fn runtime_for(base_url: &str) -> SujiuRuntime {
-    let runtime = SujiuRuntime::new(sujiu_ffi::seed::seed()).expect("runtime");
+    let runtime = SujiuRuntime::new(sujiu_runtime::seed::seed()).expect("runtime");
     runtime
         .set_endpoint(Some(EndpointConfig {
             id: "mock".to_string(),
