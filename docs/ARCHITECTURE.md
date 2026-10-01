@@ -290,7 +290,7 @@ Two binding crates means two generators, and that is deliberate rather than a fa
 The generated artifacts are build outputs with different owners, because the two toolchains have different constraints:
 
 - **Kotlin is generated at build time** by a Gradle task and is not committed. Nothing can drift from a file the build overwrites.
-- **`index.d.ts` is committed**, because the HarmonyOS SDK does not verify a NAPI module: the file is a contract for the C++ language server, not an input the ArkTS compiler reads. A Rust export change that skipped regeneration would otherwise surface as a disagreement between the bridge and the contract on a device, so `scripts/check-bindings.sh` regenerates beside it and diffs.
+- **`index.d.ts` is committed and is read by the ArkTS compiler**, via a local folder package declared in `entry/oh-package.json5` whose `types` field points at it. That association is what makes the declaration authoritative instead of decorative: with it, a bridge call that no longer matches a Rust export fails the build; without it, every import from the module is `any`. A Rust export change that skipped *regeneration* is a separate failure the compiler cannot see, so `scripts/check-bindings.sh` regenerates beside the committed copy and diffs.
 
 See [UI_ARCHITECTURE.md §5](UI_ARCHITECTURE.md) for the two generated binding surfaces, where their outputs live, the event names that cross the boundary, and what is still missing.
 

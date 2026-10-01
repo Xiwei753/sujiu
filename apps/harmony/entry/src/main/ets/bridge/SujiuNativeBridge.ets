@@ -9,7 +9,14 @@
  *
  * The native module is produced by scripts/build-harmony-runtime.sh.
  */
-import sujiu from 'libsujiu_napi.so';
+import {
+  create, SujiuRuntimeBridge, ParticipantDto, ParticipantRequestDto,
+  SessionSummaryDto, CharacterSummaryDto, ModelSummaryDto, ContextSourceDto,
+  MessageDto, ToolCallDto, ConversationSnapshotDto, PersonaDto, PersonaRequestDto,
+  WorldBookDto, WorldBookEntryDto, WorldBookEntryRequestDto, WorldBookRequestDto, PromptProfileDto,
+  PromptProfileRequestDto, CharacterRequestDto, ProviderConfigDto, TurnRequestDto,
+  ModelDiscoveryDto, EndpointExplorationDto, DiagnosticEntryDto, StoredEndpointDto
+} from 'libsujiu_napi.so';
 import { SujiuBridge, SessionSummary, CharacterSummary, ModelSummary, ContextSourceSummary,
   ConversationSnapshot, MessageSummary, MessageRole, TurnEvent, TurnEventKind,
   TurnEventListener, ProviderDraft, EndpointExploration, ModelDiscovery,
@@ -17,321 +24,23 @@ import { SujiuBridge, SessionSummary, CharacterSummary, ModelSummary, ContextSou
   WorldBookEntry, WorldBookDraft, WorldBookEntryDraft, PromptProfileSummary,
   PromptProfileDraft, CharacterDraft, ParticipantBinding, ConversationParticipant } from './SujiuBridge';
 
-interface NativeSession {
-  id: string;
-  characterId: string;
-  characterName: string;
-  preview: string;
-  title: string;
-  updatedAtMs: number;
-  messageCount: number;
-}
-
-interface NativeCharacter {
-  id: string;
-  name: string;
-  description: string;
-}
-
-interface NativeModel {
-  id: string;
-  name: string;
-  endpointId: string;
-  /**
-   * A word to show a person. The endpoint's own name, or a friendly one for an
-   * address we recognise. It decides nothing.
-   */
-  endpointLabel: string;
-  configured: boolean;
-}
-
-interface NativeContextSource {
-  id: string;
-  kind: string;
-  name: string;
-  description: string;
-  recordCount: number;
-}
-
-interface NativeToolCall {
-  id: string;
-  name: string;
-  title: string;
-  status: string;
-  isError: boolean;
-  resultText: string;
-}
-
-interface NativeMessage {
-  id: string;
-  role: string;
-  text: string;
-  toolCalls: NativeToolCall[];
-}
-
-interface NativeParticipant {
-  characterId: string;
-  name: string;
-  role: string;
-}
-
-interface NativeSnapshot {
-  sessionId: string;
-  character: NativeCharacter | null;
-  participants: NativeParticipant[];
-  personaId: string | null;
-  worldbookIds: string[];
-  promptProfileId: string | null;
-  messages: NativeMessage[];
-}
-
-interface NativePersona {
-  id: string;
-  name: string;
-  description: string;
-  worldbookCount: number;
-}
-
-interface NativePersonaRequest {
-  id?: string;
-  name: string;
-  description: string;
-  userPrompt: string;
-  worldbookIds: string[];
-}
-
-interface NativeWorldBookEntry {
-  id: string;
-  name: string;
-  content: string;
-  keys: string[];
-  enabled: boolean;
-  constant: boolean;
-  position: string;
-}
-
-interface NativeWorldBook {
-  id: string;
-  name: string;
-  entries: NativeWorldBookEntry[];
-}
-
-interface NativeWorldBookEntryRequest {
-  id?: string;
-  name: string;
-  content: string;
-  keys: string[];
-  enabled?: boolean;
-  constant?: boolean;
-  position?: string;
-}
-
-interface NativeWorldBookRequest {
-  id?: string;
-  name: string;
-  entries: NativeWorldBookEntryRequest[];
-}
-
-interface NativePromptProfile {
-  id: string;
-  name: string;
-}
-
-interface NativePromptProfileRequest {
-  id?: string;
-  name: string;
-  systemPrompt: string;
-  userPrompt: string;
-  postHistoryInstructions: string;
-  formatRules: string;
-}
-
-interface NativeCharacterRequest {
-  id?: string;
-  name: string;
-  description: string;
-  personality: string;
-  scenario: string;
-  firstMessage: string;
-  alternateGreetings: string[];
-  exampleDialogue: string;
-  systemPrompt: string;
-  postHistoryInstructions: string;
-  worldbookIds: string[];
-}
-
-interface NativeParticipantRequest {
-  characterId: string;
-  role?: string;
-  displayName?: string;
-}
-
-interface NativeProviderConfig {
-  id: string;
-  name: string;
-  baseUrl: string;
-  selectedModel?: string;
-  maxTokens?: number;
-  temperature?: number;
-  replaysAssistantReasoning?: boolean;
-}
-
-interface NativeModelDiscovery {
-  listing: string;
-  note: string;
-  manualEntryAllowed: boolean;
-  models: NativeModel[];
-}
-
-interface NativeEndpointExploration {
-  protocol: string;
-  protocols: string[];
-  /** How the protocol probe came out, as a code. See `EndpointExploration.status`. */
-  status: string;
-  reason?: string;
-  models: NativeModelDiscovery;
-}
-
-/**
- * The native shape of one diagnostic line.
+/*
+ * One turn event as the runtime delivers it.
  *
- * `detail` arrives fully rendered and fully redacted. Nothing here can contain
- * a key, which is what lets a platform show a line or paste it into a bug
- * report without a second filtering pass that could be got wrong.
+ * This is the one shape with no generated declaration, and the reason is worth
+ * stating so nobody adds it back by hand later: a turn streams many events, so
+ * `sendTurn` reports each one as a JSON string through a callback instead of
+ * returning a typed value. There is nothing for napi-rs to generate a type
+ * from, so the shape is spelled out here — once, next to the only function
+ * that parses it, and deliberately named so it cannot be mistaken for a
+ * generated DTO.
  */
-interface NativeDiagnosticEntry {
-  kind: string;
-  stage: string;
-  message: string;
-  atMs: number;
-  detail: string;
-}
-
-/**
- * The native shape of an endpoint that is already configured.
- *
- * There is no credential field here, and there must not be one added. The key
- * lives in platform storage and is read immediately before a turn; a type that
- * carried it would put a secret one careless read away from a log line.
- */
-interface NativeStoredEndpoint {
-  id: string;
-  baseUrl: string;
-  selectedModel?: string;
-  label: string;
-}
-
-interface NativeTurnRequest {
-  sessionId: string;
-  userText: string;
-  provider: NativeProviderConfig | undefined;
-  apiKey: string;
-}
-
-interface NativeTurnEvent {
+interface RuntimeTurnEventPayload {
   kind: string;
   text: string;
   toolName: string;
   toolCallId: string;
   isError: boolean;
-}
-
-interface NativeRuntime {
-  coreVersion(): string;
-  supportedProtocols(): string[];
-  listSessions(): NativeSession[];
-  listCharacters(query: string): NativeCharacter[];
-  listModels(): NativeModel[];
-  listContextSources(): NativeContextSource[];
-  conversationState(sessionId: string): NativeSnapshot | null;
-  createSession(characterId: string): string;
-  /**
-   * Every stored resource of one kind, as list rows.
-   *
-   * Four separate calls rather than one "library" call that returns everything:
-   * a page that shows four sections should not have to download the prompt
-   * bodies to render the character list, and a shape that returned everything
-   * would let a caller start treating the four as one resource again.
-   */
-  listPersonas(): NativePersona[];
-  /** One persona in full, for an editor. null when the id is unknown. */
-  persona(id: string): NativePersonaRequest | null;
-  savePersona(persona: NativePersonaRequest): string;
-  deletePersona(id: string): boolean;
-  listWorldBooks(): NativeWorldBook[];
-  /** World books carry their entries, so a book is edited as a whole. */
-  saveWorldBook(book: NativeWorldBookRequest): string;
-  deleteWorldBook(id: string): boolean;
-  listPromptProfiles(): NativePromptProfile[];
-  /** One prompt profile in full, for an editor. null when the id is unknown. */
-  promptProfile(id: string): NativePromptProfileRequest | null;
-  savePromptProfile(profile: NativePromptProfileRequest): string;
-  deletePromptProfile(id: string): boolean;
-  saveCharacter(character: NativeCharacterRequest): string;
-  /** One character in full, or null when the id is unknown. */
-  character(id: string): NativeCharacterRequest | null;
-  deleteCharacter(id: string): boolean;
-  /**
-   * Replaces one conversation's bindings.
-   *
-   * Declared as four separate arguments rather than one object because they are
-   * four answers to four independent questions — who is here, which persona, which
-   * world books, which prompt set — and folding them into one object would let a
-   * caller update one and appear to have updated all four.
-   */
-  setConversationBindings(
-    sessionId: string,
-    participants: NativeParticipantRequest[],
-    personaId?: string,
-    worldbookIds?: string[],
-    promptProfileId?: string
-  ): void;
-  cancelTurn(): void;
-  useDataDirectory(directory: string): Promise<void>;
-  dataDirectory(): string | null;
-  /**
-   * Applies a provider description. Throws when the address is blank.
-   *
-   * Declared as returning nothing because that is what it returns. It used to be
-   * declared as a promise, and chaining `.then` onto a value that is not one
-   * threw *after* the endpoint had been written — so every save reported a
-   * failure for work that had succeeded. The type now says what is true.
-   */
-  configureProvider(draft: NativeProviderConfig): void;
-  /**
-   * Asks an endpoint what it can do. Needs an address and a key and nothing
-   * else: no stored endpoint, no chosen model, no vendor named.
-   */
-  discoverEndpoint(baseUrl: string, apiKey: string, refresh?: boolean): NativeEndpointExploration;
-  rememberedEndpoint(baseUrl: string): NativeEndpointExploration | undefined;
-  /** The endpoint already configured, or null. Never carries a credential. */
-  storedEndpoint(): NativeStoredEndpoint | null;
-  /**
-   * The diagnostic log, newest last. `limit` is optional and takes the most
-   * recent N lines; omitted means everything held.
-   */
-  diagnostics(limit?: number): NativeDiagnosticEntry[];
-  /** Only the `discovery` half, which is what a settings screen usually wants. */
-  discoveryDiagnostics(limit?: number): NativeDiagnosticEntry[];
-  /** The whole log as text, already redacted. */
-  diagnosticsText(): string;
-  /** Empties the log. Configuration and conversations are untouched. */
-  clearDiagnostics(): void;
-  /**
-   * Runs a turn and reports each event as JSON.
-   *
-   * The native callback is invoked as `(unused, payload)`: the first argument
-   * is the callback return value, which this module never uses and which is
-   * therefore always null.
-   */
-  sendTurn(
-    request: NativeTurnRequest,
-    onEvent: (unused: Object | null, payload: string) => void
-  ): Promise<string>;
-}
-
-interface SujiuNativeModule {
-  create(): NativeRuntime;
 }
 
 /**
@@ -388,7 +97,7 @@ function toRole(value: string): MessageRole {
  * field this function forgets to copy is not merely absent from the request,
  * it is the saved value being overridden with a default.
  */
-function toNativeProvider(draft: ProviderDraft): NativeProviderConfig {
+function toNativeProvider(draft: ProviderDraft): ProviderConfigDto {
   return {
     id: draft.id,
     name: draft.name,
@@ -397,10 +106,10 @@ function toNativeProvider(draft: ProviderDraft): NativeProviderConfig {
     maxTokens: draft.maxTokens,
     temperature: draft.temperature,
     replaysAssistantReasoning: draft.replaysAssistantReasoning
-  } as NativeProviderConfig;
+  } as ProviderConfigDto;
 }
 
-function toModelDiscovery(value: NativeModelDiscovery): ModelDiscovery {
+function toModelDiscovery(value: ModelDiscoveryDto): ModelDiscovery {
   const models: ModelSummary[] = [];
   for (let i = 0; i < value.models.length; i++) {
     models.push(toModel(value.models[i]));
@@ -413,7 +122,7 @@ function toModelDiscovery(value: NativeModelDiscovery): ModelDiscovery {
   } as ModelDiscovery;
 }
 
-function toEndpointExploration(value: NativeEndpointExploration): EndpointExploration {
+function toEndpointExploration(value: EndpointExplorationDto): EndpointExploration {
   return {
     protocol: value.protocol,
     protocols: value.protocols,
@@ -423,7 +132,7 @@ function toEndpointExploration(value: NativeEndpointExploration): EndpointExplor
   } as EndpointExploration;
 }
 
-function toDiagnosticEntry(value: NativeDiagnosticEntry): DiagnosticEntry {
+function toDiagnosticEntry(value: DiagnosticEntryDto): DiagnosticEntry {
   return {
     kind: value.kind,
     stage: value.stage,
@@ -433,7 +142,7 @@ function toDiagnosticEntry(value: NativeDiagnosticEntry): DiagnosticEntry {
   } as DiagnosticEntry;
 }
 
-function toStoredEndpoint(value: NativeStoredEndpoint): StoredEndpoint {
+function toStoredEndpoint(value: StoredEndpointDto): StoredEndpoint {
   return {
     id: value.id,
     baseUrl: value.baseUrl,
@@ -442,7 +151,7 @@ function toStoredEndpoint(value: NativeStoredEndpoint): StoredEndpoint {
   } as StoredEndpoint;
 }
 
-function toSession(value: NativeSession): SessionSummary {
+function toSession(value: SessionSummaryDto): SessionSummary {
   return {
     id: value.id,
     title: value.title,
@@ -453,11 +162,11 @@ function toSession(value: NativeSession): SessionSummary {
   } as SessionSummary;
 }
 
-function toCharacter(value: NativeCharacter): CharacterSummary {
+function toCharacter(value: CharacterSummaryDto): CharacterSummary {
   return { id: value.id, name: value.name, description: value.description, tags: [] } as CharacterSummary;
 }
 
-function toModel(value: NativeModel): ModelSummary {
+function toModel(value: ModelSummaryDto): ModelSummary {
   const state: string = value.configured ? 'ready' : 'no credential';
   return {
     id: value.id,
@@ -467,7 +176,7 @@ function toModel(value: NativeModel): ModelSummary {
   } as ModelSummary;
 }
 
-function toContextSource(value: NativeContextSource): ContextSourceSummary {
+function toContextSource(value: ContextSourceDto): ContextSourceSummary {
   return {
     id: value.id,
     name: value.name,
@@ -500,13 +209,13 @@ function toFailureCode(message: string): string {
   return 'turn_failed';
 }
 
-function toMessage(value: NativeMessage): MessageSummary {
+function toMessage(value: MessageDto): MessageSummary {
   const summary: MessageSummary = {
     id: value.id,
     role: toRole(value.role),
     text: value.text
   } as MessageSummary;
-  const calls: NativeToolCall[] = value.toolCalls === undefined || value.toolCalls === null
+  const calls: ToolCallDto[] = value.toolCalls === undefined || value.toolCalls === null
     ? [] : value.toolCalls;
   if (calls.length > 0) {
     summary.toolName = calls[0].title;
@@ -515,7 +224,7 @@ function toMessage(value: NativeMessage): MessageSummary {
   return summary;
 }
 
-function toParticipant(value: NativeParticipant): ConversationParticipant {
+function toParticipant(value: ParticipantDto): ConversationParticipant {
   return {
     characterId: value.characterId,
     name: value.name,
@@ -523,7 +232,7 @@ function toParticipant(value: NativeParticipant): ConversationParticipant {
   } as ConversationParticipant;
 }
 
-function toPersona(value: NativePersona): PersonaSummary {
+function toPersona(value: PersonaDto): PersonaSummary {
   return {
     id: value.id,
     name: value.name,
@@ -532,7 +241,7 @@ function toPersona(value: NativePersona): PersonaSummary {
   } as PersonaSummary;
 }
 
-function toPersonaDraft(value: NativePersonaRequest): PersonaDraft {
+function toPersonaDraft(value: PersonaRequestDto): PersonaDraft {
   return {
     id: value.id,
     name: value.name,
@@ -542,17 +251,17 @@ function toPersonaDraft(value: NativePersonaRequest): PersonaDraft {
   } as PersonaDraft;
 }
 
-function toNativePersonaDraft(value: PersonaDraft): NativePersonaRequest {
+function toNativePersonaDraft(value: PersonaDraft): PersonaRequestDto {
   return {
     id: value.id,
     name: value.name,
     description: value.description,
     userPrompt: value.userPrompt,
     worldbookIds: value.worldbookIds
-  } as NativePersonaRequest;
+  } as PersonaRequestDto;
 }
 
-function toWorldBookEntry(value: NativeWorldBookEntry): WorldBookEntry {
+function toWorldBookEntry(value: WorldBookEntryDto): WorldBookEntry {
   return {
     id: value.id,
     name: value.name,
@@ -564,7 +273,7 @@ function toWorldBookEntry(value: NativeWorldBookEntry): WorldBookEntry {
   } as WorldBookEntry;
 }
 
-function toWorldBook(value: NativeWorldBook): WorldBookSummary {
+function toWorldBook(value: WorldBookDto): WorldBookSummary {
   const entries: WorldBookEntry[] = [];
   for (let i = 0; i < value.entries.length; i++) {
     entries.push(toWorldBookEntry(value.entries[i]));
@@ -572,8 +281,8 @@ function toWorldBook(value: NativeWorldBook): WorldBookSummary {
   return { id: value.id, name: value.name, entries: entries } as WorldBookSummary;
 }
 
-function toNativeWorldBook(value: WorldBookDraft): NativeWorldBookRequest {
-  const entries: NativeWorldBookEntryRequest[] = [];
+function toNativeWorldBook(value: WorldBookDraft): WorldBookRequestDto {
+  const entries: WorldBookEntryRequestDto[] = [];
   for (let i = 0; i < value.entries.length; i++) {
     const entry: WorldBookEntryDraft = value.entries[i];
     entries.push({
@@ -584,16 +293,16 @@ function toNativeWorldBook(value: WorldBookDraft): NativeWorldBookRequest {
       enabled: entry.enabled,
       constant: entry.constant,
       position: entry.position
-    } as NativeWorldBookEntryRequest);
+    } as WorldBookEntryRequestDto);
   }
-  return { id: value.id, name: value.name, entries: entries } as NativeWorldBookRequest;
+  return { id: value.id, name: value.name, entries: entries } as WorldBookRequestDto;
 }
 
-function toPromptProfile(value: NativePromptProfile): PromptProfileSummary {
+function toPromptProfile(value: PromptProfileDto): PromptProfileSummary {
   return { id: value.id, name: value.name } as PromptProfileSummary;
 }
 
-function toPromptProfileDraft(value: NativePromptProfileRequest): PromptProfileDraft {
+function toPromptProfileDraft(value: PromptProfileRequestDto): PromptProfileDraft {
   return {
     id: value.id,
     name: value.name,
@@ -604,7 +313,7 @@ function toPromptProfileDraft(value: NativePromptProfileRequest): PromptProfileD
   } as PromptProfileDraft;
 }
 
-function toNativePromptProfile(value: PromptProfileDraft): NativePromptProfileRequest {
+function toNativePromptProfile(value: PromptProfileDraft): PromptProfileRequestDto {
   return {
     id: value.id,
     name: value.name,
@@ -612,10 +321,10 @@ function toNativePromptProfile(value: PromptProfileDraft): NativePromptProfileRe
     userPrompt: value.userPrompt,
     postHistoryInstructions: value.postHistoryInstructions,
     formatRules: value.formatRules
-  } as NativePromptProfileRequest;
+  } as PromptProfileRequestDto;
 }
 
-function toCharacterDraft(value: NativeCharacterRequest): CharacterDraft {
+function toCharacterDraft(value: CharacterRequestDto): CharacterDraft {
   return {
     id: value.id,
     name: value.name,
@@ -631,7 +340,7 @@ function toCharacterDraft(value: NativeCharacterRequest): CharacterDraft {
   } as CharacterDraft;
 }
 
-function toNativeCharacter(value: CharacterDraft): NativeCharacterRequest {
+function toNativeCharacter(value: CharacterDraft): CharacterRequestDto {
   return {
     id: value.id,
     name: value.name,
@@ -644,19 +353,19 @@ function toNativeCharacter(value: CharacterDraft): NativeCharacterRequest {
     systemPrompt: value.systemPrompt,
     postHistoryInstructions: value.postHistoryInstructions,
     worldbookIds: value.worldbookIds
-  } as NativeCharacterRequest;
+  } as CharacterRequestDto;
 }
 
-function toNativeParticipant(value: ParticipantBinding): NativeParticipantRequest {
+function toNativeParticipant(value: ParticipantBinding): ParticipantRequestDto {
   return {
     characterId: value.characterId,
     role: value.role,
     displayName: value.displayName
-  } as NativeParticipantRequest;
+  } as ParticipantRequestDto;
 }
 
 export class SujiuNativeBridge implements SujiuBridge {
-  private readonly runtime: NativeRuntime;
+  private readonly runtime: SujiuRuntimeBridge;
   private draft: ProviderDraft | null = null;
   private apiKey: string = '';
   private running: boolean = false;
@@ -673,21 +382,20 @@ export class SujiuNativeBridge implements SujiuBridge {
   private turnProviderOverride: ProviderDraft | null = null;
 
   constructor() {
-    const module: SujiuNativeModule = sujiu as SujiuNativeModule;
-    this.runtime = module.create();
+    this.runtime = create();
   }
 
   runtimeSummary(): string {
     try {
-      return `sujiu-ffi ${this.runtime.coreVersion()} · native runtime`;
+      return `sujiu-runtime ${this.runtime.coreVersion()} · native runtime`;
     } catch (error) {
-      return 'sujiu-ffi · native runtime';
+      return 'sujiu-runtime · native runtime';
     }
   }
 
   listSessions(): Promise<SessionSummary[]> {
     try {
-      const rows: NativeSession[] = this.runtime.listSessions();
+      const rows: SessionSummaryDto[] = this.runtime.listSessions();
       const result: SessionSummary[] = [];
       for (let i = 0; i < rows.length; i++) {
         result.push(toSession(rows[i]));
@@ -700,7 +408,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   listCharacters(query: string): Promise<CharacterSummary[]> {
     try {
-      const rows: NativeCharacter[] = this.runtime.listCharacters(query);
+      const rows: CharacterSummaryDto[] = this.runtime.listCharacters(query);
       const result: CharacterSummary[] = [];
       for (let i = 0; i < rows.length; i++) {
         result.push(toCharacter(rows[i]));
@@ -713,7 +421,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   listModels(): Promise<ModelSummary[]> {
     try {
-      const rows: NativeModel[] = this.runtime.listModels();
+      const rows: ModelSummaryDto[] = this.runtime.listModels();
       const result: ModelSummary[] = [];
       for (let i = 0; i < rows.length; i++) {
         result.push(toModel(rows[i]));
@@ -726,7 +434,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   listContextSources(): Promise<ContextSourceSummary[]> {
     try {
-      const rows: NativeContextSource[] = this.runtime.listContextSources();
+      const rows: ContextSourceDto[] = this.runtime.listContextSources();
       const result: ContextSourceSummary[] = [];
       for (let i = 0; i < rows.length; i++) {
         result.push(toContextSource(rows[i]));
@@ -739,7 +447,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   conversationState(sessionId: string): Promise<ConversationSnapshot> {
     try {
-      const snapshot: NativeSnapshot | null = this.runtime.conversationState(sessionId);
+      const snapshot: ConversationSnapshotDto | null = this.runtime.conversationState(sessionId);
       if (snapshot === null || snapshot === undefined) {
         return Promise.reject(new Error(`conversation_state: unknown session ${sessionId}`));
       }
@@ -748,7 +456,7 @@ export class SujiuNativeBridge implements SujiuBridge {
         messages.push(toMessage(snapshot.messages[i]));
       }
       let session: SessionSummary | undefined = undefined;
-      const rows: NativeSession[] = this.runtime.listSessions();
+      const rows: SessionSummaryDto[] = this.runtime.listSessions();
       for (let i = 0; i < rows.length; i++) {
         if (rows[i].id === snapshot.sessionId) {
           session = toSession(rows[i]);
@@ -765,13 +473,13 @@ export class SujiuNativeBridge implements SujiuBridge {
           updatedAt: 0
         } as SessionSummary;
       }
-      const sources: NativeContextSource[] = this.runtime.listContextSources();
+      const sources: ContextSourceDto[] = this.runtime.listContextSources();
       const contextSources: ContextSourceSummary[] = [];
       for (let i = 0; i < sources.length; i++) {
         contextSources.push(toContextSource(sources[i]));
       }
       const participants: ConversationParticipant[] = [];
-      const bound: NativeParticipant[] = snapshot.participants === undefined || snapshot.participants === null
+      const bound: ParticipantDto[] = snapshot.participants === undefined || snapshot.participants === null
         ? [] : snapshot.participants;
       for (let i = 0; i < bound.length; i++) {
         participants.push(toParticipant(bound[i]));
@@ -795,7 +503,7 @@ export class SujiuNativeBridge implements SujiuBridge {
   createSession(characterId: string): Promise<SessionSummary> {
     try {
       const id: string = this.runtime.createSession(characterId);
-      const rows: NativeSession[] = this.runtime.listSessions();
+      const rows: SessionSummaryDto[] = this.runtime.listSessions();
       for (let i = 0; i < rows.length; i++) {
         if (rows[i].id === id) {
           return Promise.resolve(toSession(rows[i]));
@@ -809,7 +517,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   listPersonas(): Promise<PersonaSummary[]> {
     try {
-      const rows: NativePersona[] = this.runtime.listPersonas();
+      const rows: PersonaDto[] = this.runtime.listPersonas();
       const result: PersonaSummary[] = [];
       for (let i = 0; i < rows.length; i++) {
         result.push(toPersona(rows[i]));
@@ -829,7 +537,7 @@ export class SujiuNativeBridge implements SujiuBridge {
    */
   persona(id: string): Promise<PersonaDraft | undefined> {
     try {
-      const value: NativePersonaRequest | null = this.runtime.persona(id);
+      const value: PersonaRequestDto | null = this.runtime.persona(id);
       return Promise.resolve(value === null || value === undefined ? undefined : toPersonaDraft(value));
     } catch (error) {
       return Promise.reject(new Error(`persona failed: ${(error as Error).message}`));
@@ -854,7 +562,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   listWorldBooks(): Promise<WorldBookSummary[]> {
     try {
-      const rows: NativeWorldBook[] = this.runtime.listWorldBooks();
+      const rows: WorldBookDto[] = this.runtime.listWorldBooks();
       const result: WorldBookSummary[] = [];
       for (let i = 0; i < rows.length; i++) {
         result.push(toWorldBook(rows[i]));
@@ -883,7 +591,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   listPromptProfiles(): Promise<PromptProfileSummary[]> {
     try {
-      const rows: NativePromptProfile[] = this.runtime.listPromptProfiles();
+      const rows: PromptProfileDto[] = this.runtime.listPromptProfiles();
       const result: PromptProfileSummary[] = [];
       for (let i = 0; i < rows.length; i++) {
         result.push(toPromptProfile(rows[i]));
@@ -896,7 +604,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   promptProfile(id: string): Promise<PromptProfileDraft | undefined> {
     try {
-      const value: NativePromptProfileRequest | null = this.runtime.promptProfile(id);
+      const value: PromptProfileRequestDto | null = this.runtime.promptProfile(id);
       return Promise.resolve(
         value === null || value === undefined ? undefined : toPromptProfileDraft(value));
     } catch (error) {
@@ -930,7 +638,7 @@ export class SujiuNativeBridge implements SujiuBridge {
 
   character(id: string): Promise<CharacterDraft | undefined> {
     try {
-      const value: NativeCharacterRequest | null = this.runtime.character(id);
+      const value: CharacterRequestDto | null = this.runtime.character(id);
       return Promise.resolve(value === null || value === undefined ? undefined : toCharacterDraft(value));
     } catch (error) {
       return Promise.reject(new Error(`character failed: ${(error as Error).message}`));
@@ -953,7 +661,7 @@ export class SujiuNativeBridge implements SujiuBridge {
     promptProfileId?: string
   ): Promise<void> {
     try {
-      const bound: NativeParticipantRequest[] = [];
+      const bound: ParticipantRequestDto[] = [];
       for (let i = 0; i < participants.length; i++) {
         bound.push(toNativeParticipant(participants[i]));
       }
@@ -980,7 +688,7 @@ export class SujiuNativeBridge implements SujiuBridge {
     const override: ProviderDraft | null = this.turnProviderOverride;
     this.turnProviderOverride = null;
 
-    const request: NativeTurnRequest = {
+    const request: TurnRequestDto = {
       sessionId: sessionId,
       userText: userText,
       // No provider means "use the one the runtime already has". Sending the
@@ -990,11 +698,11 @@ export class SujiuNativeBridge implements SujiuBridge {
       apiKey: this.apiKey
     };
 
-    this.runtime.sendTurn(request, (_unused: Object | null, payload: string): void => {
+    this.runtime.sendTurn(request, (_error: Error | null, payload: string): void => {
       if (payload === undefined || payload === null) {
         return;
       }
-      const parsed: NativeTurnEvent = JSON.parse(payload) as NativeTurnEvent;
+      const parsed: RuntimeTurnEventPayload = JSON.parse(payload) as RuntimeTurnEventPayload;
       const kind: TurnEventKind = toKind(parsed.kind);
       if (kind === TurnEventKind.Failed) {
         // Rust reports what went wrong; the UI localizes a code and keeps the
@@ -1033,7 +741,12 @@ export class SujiuNativeBridge implements SujiuBridge {
   }
 
   async useDataDirectory(directory: string): Promise<boolean> {
-    await this.runtime.useDataDirectory(directory);
+    // The native call returns void, so it is invoked directly and not awaited.
+    // The local interface used to declare it as a promise, and awaiting a value
+    // that was never one is the same mistake as chaining `.then` onto it: the
+    // work has already happened by the time the type says it has not. The
+    // generated declaration now says void, and the compiler enforces it.
+    this.runtime.useDataDirectory(directory);
     return true;
   }
 
@@ -1061,19 +774,19 @@ export class SujiuNativeBridge implements SujiuBridge {
    */
   rememberedEndpoint(baseUrl: string): Promise<EndpointExploration | undefined> {
     try {
-      const native: NativeEndpointExploration | undefined = this.runtime.rememberedEndpoint(baseUrl);
-      // Both spellings of nothing are checked, and the reason is worth writing
-      // down: napi-rs hands back `null` for an `Option` of `None`, not
-      // `undefined`. A guard written against the declared TypeScript type looks
-      // correct, compiles, and then maps a null straight into the converter,
-      // which fails on the first property it tries to read. The symptom is an
-      // endpoint with nothing remembered reporting "cannot read property
-      // protocol of null", which points at the mapper instead of at the guard.
+      const native: EndpointExplorationDto | null = this.runtime.rememberedEndpoint(baseUrl);
+      // The generated declaration says `| null` because that is what napi-rs
+      // hands back for an `Option` of `None`, so the guard reads the same way
+      // the runtime actually behaves. It used to be written against a local
+      // interface that said `undefined` instead, which compiled and then mapped
+      // a null straight into the converter; the symptom was an endpoint with
+      // nothing remembered reporting "cannot read property protocol of null",
+      // pointing at the mapper rather than at the guard.
       //
       // Nothing stays nothing rather than becoming a promise of a blank answer,
       // because "never asked" and "asked and found nothing" are different
       // answers and a caller has to be able to tell them apart.
-      if (native === undefined || native === null) {
+      if (native === null) {
         return Promise.resolve(undefined);
       }
       return Promise.resolve(toEndpointExploration(native));
@@ -1136,7 +849,7 @@ export class SujiuNativeBridge implements SujiuBridge {
    */
   diagnostics(limit?: number): Promise<DiagnosticEntry[]> {
     try {
-      const rows: NativeDiagnosticEntry[] = this.runtime.diagnostics(limit);
+      const rows: DiagnosticEntryDto[] = this.runtime.diagnostics(limit);
       const result: DiagnosticEntry[] = [];
       for (let i = 0; i < rows.length; i++) {
         result.push(toDiagnosticEntry(rows[i]));
@@ -1156,7 +869,7 @@ export class SujiuNativeBridge implements SujiuBridge {
    */
   discoveryDiagnostics(limit?: number): Promise<DiagnosticEntry[]> {
     try {
-      const rows: NativeDiagnosticEntry[] = this.runtime.discoveryDiagnostics(limit);
+      const rows: DiagnosticEntryDto[] = this.runtime.discoveryDiagnostics(limit);
       const result: DiagnosticEntry[] = [];
       for (let i = 0; i < rows.length; i++) {
         result.push(toDiagnosticEntry(rows[i]));

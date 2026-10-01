@@ -1,0 +1,6 @@
+{
+  "name": "libsujiu_napi.so",
+  "types": "./index.d.ts",
+  "version": "",
+  "description": "Sujiu N-API bindings"
+}

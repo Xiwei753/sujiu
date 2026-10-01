@@ -5,5 +5,7 @@
   "main": "",
   "author": "xiwei",
   "license": "AGPL-3.0",
-  "dependencies": {}
+  "dependencies": {
+    "libsujiu_napi.so": "file:./src/main/cpp/types/libsujiu_napi"
+  }
 }

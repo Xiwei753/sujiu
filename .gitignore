@@ -22,8 +22,12 @@ cmake-build-*/
 
 # HarmonyOS build outputs and local toolchain state
 apps/harmony/**/build/
-apps/harmony/oh_modules/
-apps/harmony/oh-package-lock.json5
+# ohpm installs into every module that declares dependencies, not only the
+# project root: wiring the generated N-API declaration as a local folder
+# package makes entry/oh_modules appear. Matching the whole tree is the same
+# rule as the build/ line above, not a second rule for a second directory.
+apps/harmony/**/oh_modules/
+apps/harmony/**/oh-package-lock.json5
 apps/harmony/local.properties
 
 # Local, uncommitted test credentials.

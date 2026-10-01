@@ -717,13 +717,27 @@ The two artifacts are deliberately not treated the same way.
 so there is no checked-in file that can be out of date. The contract cannot
 drift from Rust because the build overwrites it every time.
 
-**`index.d.ts` is generated and committed.** The HarmonyOS SDK does not verify a
-NAPI module — it warns that the module is unverified — so the declaration is a
-contract the C++ language server reads, not an input the ArkTS compiler checks.
-Nothing else would notice it going stale, so `scripts/check-bindings.sh`
-regenerates it beside the committed copy and diffs the two. CI runs that check,
-which is the only reason a Rust export change that skipped regeneration fails a
-job instead of reaching a device.
+**`index.d.ts` is generated and committed.** The ArkTS compiler *does* consume it,
+but only once the native module is declared as a local folder package — that
+association is what turns the SDK's "module is not verified" warning into real
+type checking. Both halves are required and neither works alone:
+
+```json5
+// entry/src/main/cpp/types/libsujiu_napi/oh-package.json5
+{ "name": "libsujiu_napi.so", "types": "./index.d.ts", "version": "" }
+```
+
+```json5
+// entry/oh-package.json5
+{ "dependencies": { "libsujiu_napi.so": "file:./src/main/cpp/types/libsujiu_napi" } }
+```
+
+Without the dependency, every import from the module is `any` and nothing about
+the native surface is checked. Because a stale declaration would then be
+invisible to the compiler as well, `scripts/check-bindings.sh` regenerates it
+beside the committed copy and diffs the two; CI runs that check. The compiler and
+the script cover different failures — the compiler catches a bridge call that no
+longer matches Rust, the script catches a declaration that was never regenerated.
 
 ```bash
 scripts/generate-bindings.sh          # both platforms
@@ -747,6 +761,22 @@ generated record  →  platform view model  →  UI
 `SujiuNativeBridge.ets` are the whole of that conversion layer, and the
 conversions over generated enums are exhaustive on purpose: adding a
 `TurnEventKind` should fail the build rather than render as "something else".
+
+What a platform may **not** write is a second copy of the native surface. The
+`Native*` interfaces that used to sit at the top of `SujiuNativeBridge.ets` —
+including a `NativeRuntime` that restated the whole method table — were exactly
+that, and they had already drifted: `useDataDirectory` was declared as returning
+`Promise<void>` when Rust returns nothing, and `rememberedEndpoint` as returning
+`undefined` when napi-rs returns `null`. Both were legal TypeScript that failed
+at runtime. They are gone; the file imports the generated `*Dto` types and calls
+`SujiuRuntimeBridge` methods directly, so those two mistakes are now compile
+errors.
+
+The one local shape that remains is the turn-event payload, because a turn
+streams many events and `sendTurn` therefore reports each one as a JSON string
+through a callback — there is nothing for the generator to produce a type from.
+It is named `RuntimeTurnEventPayload` rather than `Native*` so that it cannot be
+mistaken for a generated declaration later.
 
 ### 5.3 The C ABI in `sujiu-runtime/src/lib.rs`
 
