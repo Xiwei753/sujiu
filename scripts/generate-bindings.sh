@@ -15,9 +15,11 @@
 # Usage:
 #   scripts/generate-bindings.sh [kotlin|arkts|all]
 #
-# Environment:
-#   DEVECO_CLI_CLT_PATH   Required for `arkts`. HarmonyOS Command Line Tools
-#                         root, which contains the NDK used to cross compile.
+# Neither target needs DEVECO_CLI_CLT_PATH. That is deliberate and it is what
+# makes these bindings checkable anywhere, including CI: the HarmonyOS Command
+# Line Tools are a multi-gigabyte local install that a GitHub-hosted runner does
+# not have, so a check that needs them could never run there. See
+# generate_arkts for why the declaration does not need the NDK.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -69,15 +71,24 @@ generate_kotlin() {
 
 generate_arkts() {
   echo "Generating the ArkTS declaration from the napi exports"
-  if [ -z "${DEVECO_CLI_CLT_PATH:-}" ]; then
-    echo "DEVECO_CLI_CLT_PATH is not set." >&2
-    echo "Point it at the HarmonyOS Command Line Tools, for example:" >&2
-    echo "  export DEVECO_CLI_CLT_PATH=\$HOME/.harmony-cli" >&2
-    exit 1
-  fi
-  # shellcheck source=scripts/harmony-cross-env.sh
-  source "$repo_root/scripts/harmony-cross-env.sh"
 
+  # Built for the host, not for aarch64-unknown-linux-ohos.
+  #
+  # napi-rs derives the declaration from the #[napi] attributes while it
+  # compiles, so the text does not depend on the target: the same Rust exports
+  # produce the same declaration whether the crate was cross compiled or not.
+  # The NDK is needed for the loadable module a device runs, which is what
+  # build-harmony-runtime.sh produces, and for nothing here.
+  #
+  # This is not only a convenience. Cross compiling requires the HarmonyOS
+  # Command Line Tools, which do not exist on a CI runner, so a check that
+  # needed them was a check that could never pass outside one person's machine.
+  #
+  # The host build also emits the JS loader, and the loader's own
+  # `__napiBindingTarget` constant is declared in the result. That constant
+  # belongs to the loader rather than to the module, and it is still kept: the
+  # committed file has to be exactly what this command produces, or comparing
+  # the two proves nothing.
   local staging="$repo_root/target/napi-bindings"
   rm -rf "$staging"
   mkdir -p "$staging"
@@ -89,8 +100,7 @@ generate_arkts() {
   (
     cd "$repo_root/crates/sujiu-napi"
     npx --yes --package "$napi_cli" napi build \
-      --target aarch64-unknown-linux-ohos \
-      --release \
+      --platform \
       --dts index.d.ts \
       --output-dir "$staging" \
       >/dev/null

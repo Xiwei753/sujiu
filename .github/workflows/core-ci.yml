@@ -61,8 +61,11 @@ jobs:
   # export that changed without regenerating would reach a device as a
   # contract the bridge disagrees with. This job fails instead.
   #
-  # The generator cross compiles for OHOS and reads the compiled module, so it
-  # needs the same NDK the runtime build uses.
+  # It needs only a Rust toolchain and Node. napi-rs derives the declaration
+  # from the #[napi] attributes while it compiles, and the text does not depend
+  # on the target, so this does not cross compile. The NDK is only needed for
+  # the loadable module a device runs, which is a committed build output that
+  # the harmony-runtime job above already covers by fingerprint.
   bindings-harmony:
     runs-on: ubuntu-latest
     steps:
@@ -72,17 +75,7 @@ jobs:
         with:
           node-version: 22
       - name: Check the generated N-API declaration against the Rust exports
-        env:
-          DEVECO_CLI_CLT_PATH: ${{ github.workspace }}/harmony-cli
-        run: |
-          if [ ! -d "$DEVECO_CLI_CLT_PATH" ]; then
-            echo "HarmonyOS Command Line Tools are not available on this runner." >&2
-            echo "Fetch them into \$DEVECO_CLI_CLT_PATH, or run this check locally:" >&2
-            echo "  export DEVECO_CLI_CLT_PATH=\$HOME/.harmony-cli" >&2
-            echo "  scripts/check-bindings.sh" >&2
-            exit 1
-          fi
-          scripts/check-bindings.sh
+        run: scripts/check-bindings.sh
 
   # Kotlin is generated from the Rust exports at build time, so there is no
   # committed artifact to drift. What can still be wrong is that the app's own
@@ -97,6 +90,11 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
+      # The runner image ships some Android SDK packages but not the platform
+      # this app compiles against, and an AGP build without its platform is a
+      # configuration failure rather than a compile failure, which hides the
+      # thing this job exists to check.
+      - uses: android-actions/setup-android@v3
       - uses: gradle/actions/setup-gradle@v4
       - name: Compile against the generated bindings
         working-directory: apps/android

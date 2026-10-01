@@ -11,9 +11,10 @@
 # Usage:
 #   scripts/check-bindings.sh
 #
-# Environment:
-#   DEVECO_CLI_CLT_PATH   HarmonyOS Command Line Tools root. Required, because
-#                         regenerating the declaration needs the NDK.
+# No environment is required. The declaration is generated from the #[napi]
+# attributes while the crate compiles, so regenerating it needs a Rust toolchain
+# and Node, not the HarmonyOS NDK. A check that could only run on a machine with
+# the Command Line Tools installed would not be a check.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,7 +53,7 @@ if ! cmp -s "$probe_a" "$probe_a"; then
   exit 1
 fi
 
-if ! DEVECO_CLI_CLT_PATH="${DEVECO_CLI_CLT_PATH:-}" SUJIU_ARKTS_OUT="$generated" \
+if ! SUJIU_ARKTS_OUT="$generated" \
   "$repo_root/scripts/generate-bindings.sh" arkts; then
   echo "The ArkTS declaration could not be generated." >&2
   exit 1
