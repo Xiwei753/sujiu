@@ -505,24 +505,51 @@ impl ProviderContinuation {
         }
     }
 
-    /// Record how much of the request this handle already accounts for.
+    /// Record what this handle accounts for.
     ///
     /// A native handle does not replace the transcript, it lets a request stop
     /// re-sending the part the endpoint still holds. That only works if the
-    /// handle says *which* part, so the count travels with it. Without a count
-    /// the safe answer is to send everything, which is what a missing one does.
-    pub fn remembering_coverage(mut self, sent_messages: usize) -> Self {
-        self.state
-            .insert(SENT_MESSAGES_KEY.to_owned(), Value::from(sent_messages));
+    /// handle says *which* part, so the lineage travels with it. Without it the
+    /// safe answer is to send everything, which is what a missing one does.
+    pub fn remembering_coverage(mut self, coverage: ContinuationCoverage) -> Self {
+        if let Ok(value) = serde_json::to_value(&coverage) {
+            self.state.insert(COVERAGE_KEY.to_owned(), value);
+        }
         self
     }
 
-    /// How many leading request messages this handle already covers.
-    pub fn sent_messages(&self) -> Option<usize> {
-        self.state
-            .get(SENT_MESSAGES_KEY)
-            .and_then(Value::as_u64)
-            .map(|count| count as usize)
+    /// What this handle accounts for, when it says so in the current shape.
+    ///
+    /// The older bare `sentMessages` count is deliberately *not* read back here.
+    /// It said how many messages were sent without saying what they were, so it
+    /// cannot prove that the same messages are in front of the model now — and
+    /// a count alone is exactly what caused input to be re-billed for a prefix
+    /// the endpoint already held. A stored count without a digest degrades to
+    /// "cannot prove", which sends everything.
+    pub fn coverage(&self) -> Option<ContinuationCoverage> {
+        let value = self.state.get(COVERAGE_KEY)?;
+        let coverage: ContinuationCoverage = serde_json::from_value(value.clone()).ok()?;
+        (coverage.digest.len() == DIGEST_CHARS).then_some(coverage)
+    }
+
+    /// How many leading request messages this handle provably still accounts
+    /// for, given the messages this request would actually send.
+    ///
+    /// This is the check that makes reuse safe rather than hopeful. The handle
+    /// names a digest of the messages it covered; if the request's own prefix
+    /// still hashes to that digest, the endpoint is holding exactly those
+    /// messages and skipping them is correct. If the prompt moved — a world-book
+    /// entry matched, a persona or prompt profile was edited, a summary replaced
+    /// history — the digest differs, nothing is skipped, and the whole
+    /// transcript goes out again.
+    pub fn proven_covers(&self, messages: &[ModelMessage]) -> Option<usize> {
+        let coverage = self.coverage()?;
+        let sent = coverage.sent.min(messages.len());
+        if message_prefix_digest(&messages[..sent]) != coverage.digest {
+            return None;
+        }
+        let covered = sent + coverage.assistant_messages;
+        (covered <= messages.len()).then_some(covered)
     }
 
     /// Whether this state may be replayed to `identity` unchanged.
@@ -531,8 +558,89 @@ impl ProviderContinuation {
     }
 }
 
+/// The state key recording what a handle accounts for.
+pub const COVERAGE_KEY: &str = "messageCoverage";
+
 /// The state key recording how much of the request a handle covers.
+///
+/// Kept for reading documents written before coverage carried a digest. It is
+/// deliberately not written any more: see [`ProviderContinuation::coverage`].
 pub const SENT_MESSAGES_KEY: &str = "sentMessages";
+
+/// What a native handle has already accounted for.
+///
+/// ## Why this is a provider-neutral message prefix, not a wire item count
+///
+/// A Responses handle does not cover "N items". One provider-neutral message
+/// becomes several input items — an assistant turn that both spoke and called a
+/// tool is a `message` item *and* a `function_call` item — and the response
+/// itself contributes more items the next request does not send. A number
+/// counted in wire items and a number counted in messages drift apart
+/// permanently, and using the wrong one either re-sends a prefix the endpoint
+/// holds (billed twice) or skips a prefix it never received (silently losing
+/// context).
+///
+/// So the lineage is counted in the provider-neutral messages that are actually
+/// the unit of the transcript, and the wire item count is kept beside it for
+/// auditing only.
+///
+/// ## What the three fields mean
+///
+/// - `sent`: leading request messages the endpoint holds, counting everything
+///   sent so far in this chain — including a prefix an earlier handle covered.
+/// - `digest`: a digest of exactly those messages, so reuse can be *proved*
+///   against the request being built rather than assumed from a count.
+/// - `assistant_messages`: assistant messages this response itself added to the
+///   endpoint's copy. They are not in `sent` because they did not exist yet when
+///   the request was built, and they are not re-sent, so they have to be counted
+///   separately. A tool result is deliberately not counted: the endpoint has
+///   never seen it, which is why the next round sends exactly the tool results.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ContinuationCoverage {
+    /// Leading request messages the endpoint already holds.
+    pub sent: usize,
+    /// Digest of exactly those messages.
+    #[serde(default)]
+    pub digest: String,
+    /// Assistant messages the response itself added.
+    #[serde(default)]
+    pub assistant_messages: usize,
+    /// How many wire items the covered messages became. Audit only.
+    #[serde(default)]
+    pub wire_items: usize,
+}
+
+const DIGEST_CHARS: usize = 16;
+
+/// A digest of a prefix of the request messages.
+///
+/// This is a change detector, not a security primitive: it answers "are these the
+/// same messages" for the runtime's own transcript, and FNV-1a is enough for that
+/// while keeping the stored handle small and dependency-free. A collision would
+/// mean a changed prefix reused a handle, which costs a re-sent prompt, not a
+/// wrong answer, so a fast non-cryptographic hash is the right trade.
+pub fn message_prefix_digest(messages: &[ModelMessage]) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut absorb = |bytes: &[u8]| {
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+
+    for message in messages {
+        absorb(
+            serde_json::to_string(message)
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+        // A separator so a message boundary cannot be shifted between messages.
+        absorb(&[0x1e]);
+    }
+
+    format!("{hash:016x}")
+}
 
 /// Token accounting for one provider response.
 ///

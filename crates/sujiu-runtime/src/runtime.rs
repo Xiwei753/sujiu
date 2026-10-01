@@ -25,9 +25,9 @@ use sujiu_ai::{
 };
 use sujiu_core::{
     apply_reasoning_override, Character, ChatRole, CompactionInput, ContextKind, ContextRecord,
-    ContextSource, Conversation, EndpointCapabilities, EndpointConfig, Library, ModelListing,
-    Participant, ParticipantRole, PromptCompiler, Protocol, ProviderIdentity, Transcript,
-    DEFAULT_APP_SYSTEM_PROMPT,
+    ContextSource, ContinuationUpdate, Conversation, EndpointCapabilities, EndpointConfig, Library,
+    ModelListing, Participant, ParticipantRole, PromptCompiler, Protocol, ProviderIdentity,
+    Transcript, DEFAULT_APP_SYSTEM_PROMPT,
 };
 
 use sujiu_ai::diagnostics::{fields, DiagnosticEntry, DiagnosticKind, DiagnosticLog, LOG_KEY};
@@ -964,8 +964,14 @@ impl SujiuRuntime {
     /// decide something negotiation decides by asking the endpoint. Nothing
     /// needs choosing here; the list is only useful for showing what the
     /// runtime may end up using.
+    ///
+    /// It is the implemented set, not the priority order. An endpoint that only
+    /// speaks Anthropic Messages is still identified as speaking it — the probe
+    /// reaches `/messages` and says so — but it is not listed here, because
+    /// listing a protocol a user can select but cannot then use is a capability
+    /// this build does not have.
     pub fn supported_protocols() -> Vec<String> {
-        Protocol::PRIORITY
+        sujiu_ai::IMPLEMENTED_PROTOCOLS
             .iter()
             .map(|p| protocol_label(*p))
             .collect()
@@ -1583,9 +1589,12 @@ impl SujiuRuntime {
             .prepare(request)
             .map_err(|error| TurnFailure(error.to_string()))?;
         let messages = prepared.messages.clone();
-        let continuation = prepared.continuation.clone();
         let speaker = prepared.speaker.clone();
-        let provider = self.build_provider(prepared).await?;
+        // Negotiation decides which protocol this turn speaks, so the provider
+        // state that may be replayed is decided with it rather than before.
+        let turn_provider = self.build_provider(prepared).await?;
+        let continuation = turn_provider.continuation.clone();
+        let provider = turn_provider;
         let tools = self.inner.lock().unwrap().tools.clone();
 
         let runtime = AgentRuntime::new(
@@ -1719,19 +1728,25 @@ impl SujiuRuntime {
             &request.user_text,
         ));
 
-        // Only replay provider state that belongs to this exact endpoint and
-        // model. After a switch this is `None`, and the adapter rebuilds the
-        // request from the normalized transcript instead.
-        // The protocol is not in the config any more: it is whatever
-        // negotiation settles on, and until then an unknown protocol means this
-        // identity matches nothing, so no stale provider state is replayed.
-        let identity = ProviderIdentity {
-            protocol: Protocol::default(),
-            endpoint_id: config.id.clone(),
-            base_url: config.base_url.clone(),
-            model: config.selected_model.clone().unwrap_or_default(),
-        };
-        let continuation = conversation.transcript.continuation_for(&identity).cloned();
+        // The last provider state this transcript produced, regardless of which
+        // provider produced it.
+        //
+        // It is fetched here, *before* negotiation, but it is not filtered
+        // here: an identity cannot be built until the endpoint has said which
+        // protocol it speaks, and building one with a placeholder protocol made
+        // "unknown" mean "Responses" — so a Chat Completions handle could be
+        // matched by an identity no provider ever had. `build_provider` decides
+        // whether this state is reusable once the real identity exists.
+        let stored_continuation = conversation
+            .transcript
+            .continuation_event()
+            .and_then(|event| match event {
+                ContinuationUpdate::Replace(continuation) => Some(continuation.clone()),
+                // A provider that cleared its handle, or had no opinion, means
+                // there is nothing to carry — the same answer the previous
+                // lookup gave, just without asking a made-up identity first.
+                ContinuationUpdate::Clear | ContinuationUpdate::Unchanged => None,
+            });
 
         Ok(PreparedTurn {
             messages: plan.model_messages(),
@@ -1742,9 +1757,8 @@ impl SujiuRuntime {
             speaker: conversation
                 .sole_participant()
                 .map(|participant| participant.character_id.clone()),
-            continuation,
+            stored_continuation,
             config,
-            identity,
             api_key,
         })
     }
@@ -1800,7 +1814,31 @@ impl SujiuRuntime {
         let message_count = prepared.messages.len();
         let config = prepared.config;
         let api_key = prepared.api_key;
-        let identity = prepared.identity;
+
+        // The identity is built *here*, from what the endpoint said, and not
+        // before.
+        //
+        // It is the key every piece of provider state is stored and matched
+        // under, so building it before negotiation means building it from a
+        // guess. With a default protocol that guess is a real protocol value,
+        // and an identity nobody will ever have still matched real provider
+        // state: a Chat Completions turn could be handed the state of a
+        // Responses conversation whose handle it then sent as a
+        // `previous_response_id` to an endpoint that never issued one.
+        let identity = ProviderIdentity {
+            protocol: capabilities.protocol,
+            endpoint_id: config.id.clone(),
+            base_url: config.base_url.clone(),
+            model: config.selected_model.clone().unwrap_or_default(),
+        };
+
+        // Only now can stored state be judged. A handle recorded for another
+        // protocol, endpoint or model stays in the transcript and is simply not
+        // replayed; the adapter rebuilds the request from the normalized
+        // transcript instead.
+        let continuation = prepared
+            .stored_continuation
+            .filter(|continuation| continuation.is_reusable_for(&identity));
 
         // The protocol the request will actually use, named before the request
         // exists.
@@ -1874,7 +1912,31 @@ impl SujiuRuntime {
                     ),
                     capabilities,
                 })),
+                continuation,
             });
+        }
+
+        // Chat Completions is the other transport this build can speak.
+        if capabilities.protocol != Protocol::OpenAiChatCompletions {
+            // Not a fallback. An endpoint negotiated for a protocol that has no
+            // adapter would otherwise be handed the Chat Completions one, and
+            // the mismatch would show up as a rejected request rather than as
+            // the honest "this build cannot talk to that endpoint yet".
+            let protocol = protocol_label(capabilities.protocol);
+            self.diagnostics.record(
+                DiagnosticKind::Chat,
+                "turn_failed",
+                "the endpoint speaks a protocol this build has no adapter for",
+                fields([
+                    ("stage", "adapter".to_string()),
+                    ("endpoint", config.normalized_base_url()),
+                    ("protocol", protocol.clone()),
+                ]),
+            );
+            self.persist_diagnostics();
+            return Err(TurnFailure(format!(
+                "this build has no {protocol} adapter yet, so the endpoint cannot be used"
+            )));
         }
 
         let provider = OpenAiCompatProvider::new(OpenAiCompatConfig {
@@ -1913,6 +1975,7 @@ impl SujiuRuntime {
 
         Ok(TurnProvider {
             provider: Box::new(provider),
+            continuation,
         })
     }
 
@@ -1975,6 +2038,12 @@ struct TurnFailure(String);
 /// disagree with the one the adapter actually uses.
 struct TurnProvider {
     provider: Box<dyn sujiu_ai::AiProvider>,
+    /// Stored provider state that survived the identity check, if any.
+    ///
+    /// Carried beside the provider rather than decided before it, because
+    /// whether state is replayable depends on the protocol the endpoint turned
+    /// out to speak.
+    continuation: Option<ProviderContinuation>,
 }
 
 /// Everything one turn needs before a provider exists.
@@ -1983,9 +2052,10 @@ struct PreparedTurn {
     /// The participant this turn's steps speak for, when the conversation has
     /// exactly one and the attribution needs no policy to make.
     speaker: Option<String>,
-    continuation: Option<ProviderContinuation>,
+    /// The last provider state the transcript produced, before any judgement
+    /// about whether it may be replayed.
+    stored_continuation: Option<ProviderContinuation>,
     config: EndpointConfig,
-    identity: ProviderIdentity,
     api_key: String,
 }
 

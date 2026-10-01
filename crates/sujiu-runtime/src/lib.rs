@@ -244,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn the_advertised_list_is_the_protocol_priority_and_not_a_vendor_list() {
+    fn the_advertised_list_is_what_this_build_can_send() {
         let advertised = SujiuRuntime::supported_protocols();
 
         assert_eq!(
@@ -252,9 +252,16 @@ mod tests {
             vec![
                 "openai_responses".to_string(),
                 "openai_chat_completions".to_string(),
-                "anthropic_messages".to_string(),
             ],
             "a frontend is handed the order to try, not a list of vendors to put in a dropdown"
+        );
+        // Anthropic Messages is still *probed* — an endpoint that only speaks it
+        // is identified correctly and reported as having no adapter here. It is
+        // simply not advertised, because advertising a protocol a user can
+        // select but cannot then use is a capability this build does not have.
+        assert!(
+            !advertised.iter().any(|label| label == "anthropic_messages"),
+            "a protocol with no adapter must not be offered"
         );
         for label in &advertised {
             assert!(

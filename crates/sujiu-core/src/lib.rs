@@ -18,10 +18,11 @@ pub use context::{ContextKind, ContextRecord, ContextScope, ContextSource};
 pub use conversation::{Conversation, Participant, ParticipantRole, CONVERSATION_SCHEMA_VERSION};
 pub use library::{standalone_context, Library};
 pub use model::{
-    AssistantTurn, ContinuationSupport, ContinuationUpdate, ModelMessage, ModelRole,
-    ProviderContinuation, ProviderIdentity, ProviderRequest, ReasoningSidecar, TokenUsage,
-    ToolAnnotations, ToolCall, ToolCallState, ToolContent, ToolDefinition, ToolDiscovery,
-    ToolOutput, ToolResult, SENT_MESSAGES_KEY,
+    message_prefix_digest, AssistantTurn, ContinuationCoverage, ContinuationSupport,
+    ContinuationUpdate, ModelMessage, ModelRole, ProviderContinuation, ProviderIdentity,
+    ProviderRequest, ReasoningSidecar, TokenUsage, ToolAnnotations, ToolCall, ToolCallState,
+    ToolContent, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult, COVERAGE_KEY,
+    SENT_MESSAGES_KEY,
 };
 pub use persona::{Persona, PERSONA_SCHEMA_VERSION};
 pub use prompt::{

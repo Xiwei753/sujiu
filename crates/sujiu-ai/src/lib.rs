@@ -21,16 +21,16 @@ pub use diagnostics::{
 };
 pub use negotiate::{
     list_models, negotiate as negotiate_protocol, negotiate_asking, CachedListing, CapabilityCache,
-    Negotiation, ProtocolAttempt,
+    Negotiation, ProtocolAttempt, IMPLEMENTED_PROTOCOLS,
 };
 pub use openai_compat::{OpenAiCompatConfig, OpenAiCompatProvider};
 pub use provider::{http_client, AiProvider, NullStreamSink, ProviderError, StreamSink};
 pub use responses::{OpenAiResponsesProvider, ResponsesConfig};
 pub use tool::{Tool, ToolError, ToolRegistry};
 pub use types::{
-    messages_from_prompt_plan, AssistantTurn, ModelMessage, ModelRole, ProviderContinuation,
-    ProviderRequest, TokenUsage, ToolAnnotations, ToolCall, ToolCallState, ToolContent,
-    ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
+    message_prefix_digest, messages_from_prompt_plan, AssistantTurn, ContinuationCoverage,
+    ModelMessage, ModelRole, ProviderContinuation, ProviderRequest, TokenUsage, ToolAnnotations,
+    ToolCall, ToolCallState, ToolContent, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
 };
 
 /// Provider data the runtime needs from the core.

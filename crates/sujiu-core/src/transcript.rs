@@ -722,16 +722,25 @@ impl Transcript {
         &self,
         identity: &crate::model::ProviderIdentity,
     ) -> Option<&crate::model::ProviderContinuation> {
-        self.turns
-            .iter()
-            .rev()
-            .find_map(Turn::continuation_event)
+        self.continuation_event()
             .and_then(|event| match event {
                 crate::model::ContinuationUpdate::Replace(continuation) => Some(continuation),
-                crate::model::ContinuationUpdate::Clear => None,
-                crate::model::ContinuationUpdate::Unchanged => None,
+                crate::model::ContinuationUpdate::Clear
+                | crate::model::ContinuationUpdate::Unchanged => None,
             })
             .filter(|continuation| continuation.is_reusable_for(identity))
+    }
+
+    /// The most recent continuation event, whatever provider produced it.
+    ///
+    /// This is the state lookup that does not need an identity, for callers that
+    /// have not negotiated yet and therefore cannot say which provider they are
+    /// talking to. Asking for an identity before negotiation is what made an
+    /// unknown protocol mean "Responses": the placeholder matched a real
+    /// Responses handle and replayed it. Deciding reuse afterwards, against the
+    /// identity the endpoint actually settled on, cannot do that.
+    pub fn continuation_event(&self) -> Option<&crate::model::ContinuationUpdate> {
+        self.turns.iter().rev().find_map(Turn::continuation_event)
     }
 
     /// Every turn id in the session, including compacted ones.

@@ -242,11 +242,24 @@ impl Negotiation {
 /// protocol priority order. An endpoint whose best protocol has no adapter yet
 /// is reported as unimplemented rather than quietly downgraded, so the gap is
 /// visible instead of being papered over by a less capable path.
-pub const IMPLEMENTED_PROTOCOLS: &[Protocol] = &[
-    Protocol::OpenAiResponses,
-    Protocol::OpenAiChatCompletions,
-    Protocol::AnthropicMessages,
-];
+///
+/// ## Why Anthropic Messages is not here
+///
+/// The probe genuinely works — it reaches `/messages` with `x-api-key` and
+/// `anthropic-version` and classifies the answer — and there is no adapter that
+/// can send a conversation over it. Listing it as implemented made negotiation
+/// *select* it, and the runtime's only two adapters are Responses and Chat
+/// Completions, so a negotiated Anthropic endpoint fell through to the Chat
+/// adapter and had its messages posted to a route that does not exist.
+///
+/// That is worse than not supporting it: the user configured a working endpoint
+/// and got a request that could never succeed, with no statement anywhere that
+/// the protocol was half-built. Probing for it is still worth doing — that is how
+/// the endpoint gets identified correctly and reported as "this build has no
+/// adapter for it" — but it is not something this build can send. Adding it back
+/// means adding the adapter in the same change.
+pub const IMPLEMENTED_PROTOCOLS: &[Protocol] =
+    &[Protocol::OpenAiResponses, Protocol::OpenAiChatCompletions];
 
 /// Ask an endpoint which protocols it speaks.
 ///

@@ -22,6 +22,24 @@
 //! the protocol or the model changes, there is no handle to use and the whole
 //! thing goes out again, and the conversation continues exactly where it left
 //! off.
+//!
+//! ## What a handle records, and when it is believed
+//!
+//! After this response, the endpoint holds *everything* that produced it: the
+//! prefix an earlier handle covered, the items sent now, and the output items
+//! this response generated. So the new handle records the whole request as a
+//! provider-neutral message prefix, plus a digest of that prefix, plus the
+//! assistant message the response itself added. Tool results are not counted:
+//! the endpoint has not seen them, which is exactly why the next round sends
+//! them and nothing else.
+//!
+//! Reuse is *proved*, not assumed. A handle is only allowed to shorten a request
+//! when the request's own leading messages still hash to the digest the handle
+//! recorded. Anything that moves the prompt — a world-book entry that newly
+//! matches, an edited persona or prompt profile, a compaction summary that
+//! replaced history — changes that prefix, so the digest differs and the whole
+//! transcript goes out again instead of being silently skipped against a
+//! conversation the endpoint holds in its old shape.
 
 use std::collections::BTreeMap;
 
@@ -29,16 +47,53 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use sujiu_core::{EndpointCapabilities, Protocol};
+use sujiu_core::{message_prefix_digest, EndpointCapabilities, Protocol};
 
 use crate::{
     provider::{AiProvider, NullStreamSink, ProviderError, StreamSink},
     types::{
-        AssistantTurn, ContinuationSupport, ContinuationUpdate, ModelMessage, ModelRole,
-        ProviderContinuation, ProviderIdentity, ProviderRequest, ReasoningSidecar, TokenUsage,
-        ToolCall,
+        AssistantTurn, ContinuationCoverage, ContinuationSupport, ContinuationUpdate, ModelMessage,
+        ModelRole, ProviderContinuation, ProviderIdentity, ProviderRequest, ReasoningSidecar,
+        TokenUsage, ToolCall,
     },
 };
+
+/// What this request will have made the endpoint hold, once its response lands.
+///
+/// Recorded for the *new* handle, and computed from this request rather than
+/// inherited from the handle this request continued from. Recording the old
+/// coverage instead is the mistake this type exists to prevent: the new
+/// `response_id` would claim to cover only what the previous response had seen,
+/// and the round after that would re-send input the endpoint already holds,
+/// which is billed twice.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SentCoverage {
+    /// Leading provider-neutral messages the endpoint will hold.
+    messages: usize,
+    /// Digest of exactly those messages.
+    digest: String,
+    /// Wire items those messages became, for auditing the conversion.
+    wire_items: usize,
+}
+
+impl SentCoverage {
+    fn of(messages: &[ModelMessage], wire_items: usize) -> Self {
+        Self {
+            messages: messages.len(),
+            digest: message_prefix_digest(messages),
+            wire_items,
+        }
+    }
+
+    fn as_coverage(self, assistant_messages: usize) -> ContinuationCoverage {
+        ContinuationCoverage {
+            sent: self.messages,
+            digest: self.digest,
+            assistant_messages,
+            wire_items: self.wire_items,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ResponsesConfig {
@@ -104,23 +159,49 @@ impl OpenAiResponsesProvider {
         format!("{}/responses", self.config.base_url.trim_end_matches('/'))
     }
 
-    /// How much of the transcript this endpoint already holds.
+    /// How much of the transcript this endpoint provably already holds.
     ///
-    /// Zero means send everything, which is always correct and is what happens
-    /// whenever the handle does not belong to this endpoint. Anything else is
-    /// the number of messages that produced the handle we are continuing from.
+    /// Zero means send everything, which is always correct. It is what happens
+    /// whenever the handle belongs to another endpoint or protocol, and also
+    /// whenever the request's own leading messages no longer hash to the digest
+    /// the handle recorded — the prompt moved since that response, so the
+    /// endpoint's copy of it is no longer a prefix of what we would send now.
     fn covered_messages(&self, request: &ProviderRequest) -> usize {
         request
             .continuation
             .as_ref()
             .filter(|continuation| continuation.is_reusable_for(&self.config.identity))
-            .and_then(ProviderContinuation::sent_messages)
-            .filter(|covered| *covered <= request.messages.len())
+            .and_then(|continuation| continuation.proven_covers(&request.messages))
             .unwrap_or(0)
     }
 
-    fn request_body(&self, request: ProviderRequest) -> Value {
+    /// How many input items one message becomes.
+    ///
+    /// Needed because the wire count is not the message count: an assistant
+    /// turn that both spoke and called a tool is two items. The number is
+    /// recorded beside the message prefix so a stored handle can be audited
+    /// against what the protocol actually received, and it is never used to
+    /// decide what to skip.
+    fn item_count(&self, message: &ModelMessage) -> usize {
+        match message {
+            ModelMessage::Text { .. } | ModelMessage::ToolResult { .. } => 1,
+            ModelMessage::Assistant { content, calls, .. } => {
+                usize::from(content.as_deref().is_some_and(|text| !text.is_empty())) + calls.len()
+            }
+        }
+    }
+
+    /// The request body, and what this request will have made the endpoint hold.
+    fn request_body(&self, request: ProviderRequest) -> (Value, SentCoverage) {
         let covered = self.covered_messages(&request);
+        let coverage = SentCoverage::of(
+            &request.messages,
+            request
+                .messages
+                .iter()
+                .map(|message| self.item_count(message))
+                .sum(),
+        );
 
         let input = request
             .messages
@@ -154,12 +235,20 @@ impl OpenAiResponsesProvider {
 
         // The native handle. It replaces the covered prefix rather than sitting
         // on top of it, which is why the prefix is skipped above.
-        if let Some(continuation) = request
-            .continuation
-            .as_ref()
-            .filter(|continuation| continuation.is_reusable_for(&self.config.identity))
-        {
-            if let Some(response_id) = continuation.response_id.as_deref() {
+        //
+        // Naming the handle is conditional on the same proof that skipped the
+        // prefix, and that is the point: a handle is only named when the
+        // endpoint's copy of this conversation is still a prefix of what we are
+        // sending. Chaining onto a handle whose prompt has since changed would
+        // silently prepend the endpoint's older, differently-shaped prefix to a
+        // request that already re-sent the whole transcript.
+        if covered > 0 {
+            if let Some(response_id) = request
+                .continuation
+                .as_ref()
+                .filter(|continuation| continuation.is_reusable_for(&self.config.identity))
+                .and_then(|continuation| continuation.response_id.as_deref())
+            {
                 body["previous_response_id"] = Value::String(response_id.to_owned());
             }
         }
@@ -171,7 +260,7 @@ impl OpenAiResponsesProvider {
             body["temperature"] = json!(temperature);
         }
 
-        body
+        (body, coverage)
     }
 
     /// One provider-neutral message may be several input items.
@@ -539,10 +628,19 @@ impl ResponseStream {
         }
     }
 
+    /// How many assistant messages this response added to the endpoint's copy.
+    ///
+    /// One turn of this protocol is one assistant message, however many items it
+    /// was split into. A response that produced nothing at all adds nothing, so
+    /// its handle must not claim a message that was never created.
+    fn produced_assistant_messages(text: &str, tool_calls: usize) -> usize {
+        usize::from(!text.is_empty() || tool_calls > 0)
+    }
+
     fn finish(
         self,
         config: &ResponsesConfig,
-        sent_messages: usize,
+        sent: SentCoverage,
     ) -> Result<AssistantTurn, ProviderError> {
         let tool_calls = self
             .calls
@@ -571,20 +669,28 @@ impl ResponseStream {
         // This is the whole reason the transport exists. The response id is a
         // real handle: the endpoint still holds the conversation, so the next
         // round can name it instead of resending the prefix.
+        //
+        // What it holds is measured from *this* request, never carried over
+        // from the handle this request continued from. That is the whole
+        // difference between skipping the tool results and skipping nothing:
+        // the new response absorbed every message sent to produce it, plus the
+        // assistant message it generated.
+        let assistant_messages =
+            ResponseStream::produced_assistant_messages(&self.text, tool_calls.len());
+        let continuation = ProviderContinuation::new(
+            config.identity.clone(),
+            ContinuationSupport::ResponseId,
+            self.response_id,
+        )
+        .remembering_coverage(sent.as_coverage(assistant_messages));
+
         Ok(AssistantTurn {
             text: (!self.text.is_empty()).then_some(self.text),
             tool_calls,
             finish_reason: self.status,
             reasoning: (!self.reasoning.trim().is_empty())
                 .then(|| ReasoningSidecar::new(self.reasoning.clone(), config.identity.clone())),
-            continuation: ContinuationUpdate::Replace(
-                ProviderContinuation::new(
-                    config.identity.clone(),
-                    ContinuationSupport::ResponseId,
-                    self.response_id,
-                )
-                .remembering_coverage(sent_messages),
-            ),
+            continuation: ContinuationUpdate::Replace(continuation),
             usage: self.usage,
         })
     }
@@ -600,8 +706,7 @@ fn response_of(event: &Value) -> Option<&Value> {
 #[async_trait]
 impl AiProvider for OpenAiResponsesProvider {
     async fn complete(&self, request: ProviderRequest) -> Result<AssistantTurn, ProviderError> {
-        let covered = self.covered_messages(&request);
-        let body = self.request_body(request);
+        let (body, sent) = self.request_body(request);
 
         let response = self
             .client
@@ -638,7 +743,7 @@ impl AiProvider for OpenAiResponsesProvider {
         stream.status = response.status.clone();
         stream.usage = response.usage.as_ref().and_then(parse_usage);
 
-        stream.finish(&self.config, covered)
+        stream.finish(&self.config, sent)
     }
 
     async fn stream(
@@ -646,8 +751,7 @@ impl AiProvider for OpenAiResponsesProvider {
         request: ProviderRequest,
         sink: &mut dyn StreamSink,
     ) -> Result<AssistantTurn, ProviderError> {
-        let covered = self.covered_messages(&request);
-        let mut body = self.request_body(request);
+        let (mut body, sent) = self.request_body(request);
         body["stream"] = json!(true);
 
         let mut response = self
@@ -703,7 +807,7 @@ impl AiProvider for OpenAiResponsesProvider {
             stream.push_line(&pending, sink)?;
         }
 
-        stream.finish(&self.config, covered)
+        stream.finish(&self.config, sent)
     }
 }
 
@@ -757,7 +861,32 @@ mod tests {
     /// because how much of the transcript a handle already covers is part of
     /// deciding the body.
     fn body(request: ProviderRequest) -> Value {
-        OpenAiResponsesProvider::new(config()).request_body(request)
+        OpenAiResponsesProvider::new(config())
+            .request_body(request)
+            .0
+    }
+
+    /// A handle as a real response would have produced it.
+    ///
+    /// Built the way the adapter builds one — from the messages the response
+    /// actually absorbed — because a hand-written count is exactly what made
+    /// this transport re-send input it already had.
+    fn handle(
+        covered: &[ModelMessage],
+        response_id: &str,
+        assistant_messages: usize,
+    ) -> ProviderContinuation {
+        ProviderContinuation::new(
+            config().identity.clone(),
+            ContinuationSupport::ResponseId,
+            Some(response_id.into()),
+        )
+        .remembering_coverage(ContinuationCoverage {
+            sent: covered.len(),
+            digest: message_prefix_digest(covered),
+            assistant_messages,
+            wire_items: covered.len(),
+        })
     }
 
     fn request(messages: Vec<ModelMessage>) -> ProviderRequest {
@@ -838,75 +967,98 @@ mod tests {
 
     #[test]
     fn a_native_handle_replaces_the_prefix_it_already_holds() {
-        // The point of the transport: a second round does not resend what the
+        // The point of the transport: a later request does not resend what the
         // endpoint already has, it names the conversation instead.
-        let identity = ProviderIdentity {
-            protocol: Protocol::OpenAiResponses,
-            endpoint_id: String::new(),
-            base_url: "https://api.example.com/v1".into(),
-            model: "tester".into(),
-        };
-
-        let first = request(vec![
+        let shared = vec![
+            ModelMessage::system("you are a watchkeeper"),
             ModelMessage::user("find the tide"),
-            ModelMessage::Assistant {
-                speaker: None,
-                content: Some("checking".into()),
-                reasoning: None,
-                calls: vec![],
-            },
-            ModelMessage::ToolResult {
-                call_id: "call-1".into(),
-                name: "search_context".into(),
-                content: "high at four".into(),
-                structured_content: None,
-                is_error: false,
-            },
+        ];
+
+        // The endpoint's own answer sits after the messages it was sent, because
+        // it produced it. Both are in the endpoint's copy of the conversation,
+        // which is why the handle counts the answer separately.
+        let mut next = request(vec![
+            ModelMessage::system("you are a watchkeeper"),
+            ModelMessage::user("find the tide"),
+            ModelMessage::assistant("high at four"),
+            ModelMessage::user("and tomorrow?"),
         ]);
+        next.continuation = Some(handle(&shared, "resp_1", 1));
 
-        let mut second = first.clone();
-        second.messages.push(ModelMessage::Assistant {
-            speaker: None,
-            content: Some("high at four".into()),
-            reasoning: None,
-            calls: vec![],
-        });
-        second.messages.push(ModelMessage::user("and tomorrow?"));
-        second.continuation = Some(
-            ProviderContinuation::new(
-                identity.clone(),
-                ContinuationSupport::ResponseId,
-                Some("resp_1".into()),
-            )
-            .remembering_coverage(3),
-        );
-
-        let body = body(second);
+        let body = body(next);
         let input = body["input"].as_array().expect("input items");
 
         assert_eq!(body["previous_response_id"], "resp_1");
-        // Only the two messages the endpoint has not seen.
-        assert_eq!(input.len(), 2);
-        assert_eq!(input[0]["role"], "assistant");
-        assert_eq!(input[1]["content"], "and tomorrow?");
+        // Only the message the endpoint has not seen.
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["content"], "and tomorrow?");
+    }
+
+    #[test]
+    fn a_prompt_that_moved_is_sent_whole_instead_of_chained() {
+        // The reason a handle carries a digest rather than only a count.
+        //
+        // A world-book entry matched on this turn, or a persona was edited, and
+        // the shared prefix is now a different one. The endpoint still holds the
+        // conversation as it was; naming its handle would splice that old shape
+        // onto a request, so nothing is skipped and the handle is not named.
+        let first = request(vec![
+            ModelMessage::system("you are a watchkeeper"),
+            ModelMessage::user("find the tide"),
+        ]);
+
+        let mut second = first.clone();
+        second.messages[0] = ModelMessage::system("you are a lighthouse keeper");
+        second.messages.push(ModelMessage::user("and tomorrow?"));
+        second.continuation = Some(handle(&first.messages, "resp_1", 1));
+
+        let body = body(second);
+
+        assert!(body.get("previous_response_id").is_none());
+        assert_eq!(body["input"].as_array().expect("input items").len(), 3);
+    }
+
+    #[test]
+    fn a_bare_coverage_count_cannot_shorten_anything() {
+        // A stored count from before coverage carried a digest says how many
+        // messages were sent without saying what they were. It cannot prove the
+        // same messages are in front of the model now, so it is not read.
+        let messages = vec![
+            ModelMessage::user("find the tide"),
+            ModelMessage::user("and tomorrow?"),
+        ];
+
+        let mut continuation = ProviderContinuation::new(
+            config().identity.clone(),
+            ContinuationSupport::ResponseId,
+            Some("resp_1".into()),
+        );
+        continuation.state.insert(
+            sujiu_core::SENT_MESSAGES_KEY.to_owned(),
+            Value::from(1usize),
+        );
+
+        let mut req = request(messages.clone());
+        req.continuation = Some(continuation);
+
+        let body = body(req);
+
+        assert!(body.get("previous_response_id").is_none());
+        assert_eq!(body["input"].as_array().expect("input items").len(), 2);
     }
 
     #[test]
     fn a_handle_from_another_endpoint_never_shortens_a_request() {
-        let mut request = request(vec![
+        let messages = vec![
             ModelMessage::user("find the tide"),
             ModelMessage::user("and tomorrow?"),
-        ]);
-        request.continuation = Some(ProviderContinuation::new(
-            ProviderIdentity {
-                protocol: Protocol::OpenAiResponses,
-                endpoint_id: String::new(),
-                base_url: "https://somewhere-else.example/v1".into(),
-                model: "tester".into(),
-            },
-            ContinuationSupport::ResponseId,
-            Some("resp_1".into()),
-        ));
+        ];
+
+        let mut other = handle(&messages, "resp_1", 1);
+        other.identity.base_url = "https://somewhere-else.example/v1".into();
+
+        let mut request = request(messages);
+        request.continuation = Some(other);
 
         let body = body(request);
 
@@ -916,18 +1068,14 @@ mod tests {
 
     #[test]
     fn a_chat_completions_id_is_not_a_handle_this_transport_accepts() {
-        let mut request = request(vec![ModelMessage::user("one"), ModelMessage::user("two")]);
-        request.continuation = Some(ProviderContinuation::new(
-            ProviderIdentity {
-                // Same endpoint and model, different protocol.
-                protocol: Protocol::OpenAiChatCompletions,
-                endpoint_id: String::new(),
-                base_url: "https://api.example.com/v1".into(),
-                model: "tester".into(),
-            },
-            ContinuationSupport::ResponseId,
-            Some("resp_1".into()),
-        ));
+        let messages = vec![ModelMessage::user("one"), ModelMessage::user("two")];
+
+        // Same endpoint and model, different protocol.
+        let mut chat = handle(&messages, "resp_1", 1);
+        chat.identity.protocol = Protocol::OpenAiChatCompletions;
+
+        let mut request = request(messages);
+        request.continuation = Some(chat);
 
         let body = body(request);
 
@@ -966,7 +1114,9 @@ mod tests {
             stream.push_line(line, &mut sink).expect("a valid event");
         }
 
-        let turn = stream.finish(&config(), 1).expect("the turn completes");
+        let turn = stream
+            .finish(&config(), SentCoverage::of(&[], 0))
+            .expect("the turn completes");
 
         assert_eq!(turn.text.as_deref(), Some("The watch is unattended."));
         assert_eq!(
@@ -1002,7 +1152,9 @@ mod tests {
             stream.push_line(line, &mut sink).expect("a valid event");
         }
 
-        let turn = stream.finish(&config(), 1).expect("the turn completes");
+        let turn = stream
+            .finish(&config(), SentCoverage::of(&[], 0))
+            .expect("the turn completes");
 
         assert_eq!(turn.tool_calls.len(), 1);
         assert_eq!(turn.tool_calls[0].id, "call_9");
@@ -1025,7 +1177,9 @@ mod tests {
             )
             .expect("a valid event");
 
-        let turn = stream.finish(&config(), 1).expect("the turn completes");
+        let turn = stream
+            .finish(&config(), SentCoverage::of(&[], 0))
+            .expect("the turn completes");
 
         assert_eq!(turn.text.as_deref(), Some("High at four."));
         assert_eq!(turn.tool_calls.len(), 1);
@@ -1033,19 +1187,100 @@ mod tests {
     }
 
     #[test]
-    fn the_handle_remembers_how_much_of_the_transcript_it_covers() {
+    fn the_handle_records_what_this_response_actually_absorbed() {
+        // Not what the previous handle covered. After this response the endpoint
+        // holds the seven messages sent plus the assistant message it produced,
+        // so the next round sends only what the endpoint has not seen.
+        let sent = vec![
+            ModelMessage::system("you are a watchkeeper"),
+            ModelMessage::user("one"),
+            ModelMessage::user("two"),
+            ModelMessage::user("three"),
+            ModelMessage::user("four"),
+            ModelMessage::user("five"),
+            ModelMessage::user("six"),
+        ];
+
         let turn = ResponseStream {
+            text: "seven it is".into(),
             response_id: Some("resp_4".into()),
             status: Some("completed".into()),
             ..ResponseStream::default()
         }
-        .finish(&config(), 7)
+        .finish(&config(), SentCoverage::of(&sent, 8))
         .expect("the turn completes");
 
-        let handle = turn.continuation.produced().expect("a handle");
+        let coverage = turn
+            .continuation
+            .produced()
+            .expect("a handle")
+            .coverage()
+            .expect("coverage this transport can prove");
 
-        assert!(handle.is_reusable_for(&config().identity));
-        assert_eq!(handle.sent_messages(), Some(7));
+        assert_eq!(coverage.sent, 7);
+        assert_eq!(coverage.digest, message_prefix_digest(&sent));
+        assert_eq!(coverage.assistant_messages, 1);
+        assert_eq!(coverage.wire_items, 8);
+    }
+
+    #[test]
+    fn a_response_that_produced_nothing_claims_no_assistant_message() {
+        let turn = ResponseStream {
+            response_id: Some("resp_5".into()),
+            status: Some("completed".into()),
+            ..ResponseStream::default()
+        }
+        .finish(&config(), SentCoverage::of(&[], 0))
+        .expect("the turn completes");
+
+        assert_eq!(
+            turn.continuation
+                .produced()
+                .expect("a handle")
+                .coverage()
+                .expect("coverage")
+                .assistant_messages,
+            0
+        );
+    }
+
+    #[test]
+    fn the_next_round_sends_only_what_the_endpoint_has_not_seen() {
+        // Round two of a real tool loop, reconstructed from what round one
+        // would have returned: seven messages in, one assistant message with a
+        // call out, one result back. The endpoint holds the input and the call
+        // it generated; it has never seen the result.
+        let sent = vec![ModelMessage::user("find the tide")];
+
+        let mut round_two = request(vec![
+            ModelMessage::user("find the tide"),
+            ModelMessage::Assistant {
+                speaker: None,
+                content: None,
+                reasoning: None,
+                calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "search_context".into(),
+                    arguments: json!({ "query": "tide" }),
+                }],
+            },
+            ModelMessage::ToolResult {
+                call_id: "call_1".into(),
+                name: "search_context".into(),
+                content: "high at four".into(),
+                structured_content: None,
+                is_error: false,
+            },
+        ]);
+        round_two.continuation = Some(handle(&sent, "resp_1", 1));
+
+        let body = body(round_two);
+        let input = body["input"].as_array().expect("input items");
+
+        assert_eq!(body["previous_response_id"], "resp_1");
+        assert_eq!(input.len(), 1);
+        assert_eq!(input[0]["type"], "function_call_output");
+        assert_eq!(input[0]["call_id"], "call_1");
     }
 
     #[test]
