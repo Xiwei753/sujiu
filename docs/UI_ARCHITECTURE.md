@@ -801,24 +801,22 @@ AGENTS.md §15.4a puts in the verification order. That split is a compromise
 forced by the runner, not a claim that the static check is a type checker: it
 cannot see a wrong argument type, and it says so in its own header.
 
-### 5.3 The C ABI in `sujiu-runtime/src/lib.rs`
+### 5.3 There is no C ABI, and that is deliberate
 
-That file also exports a coarse C ABI of about twenty-five `sujiu_*` functions,
-every one of them wrapping the same operations in a
-`{"ok":…,"data":…,"error":…}` JSON envelope and handing back a string that the
-caller frees with `sujiu_string_free`. A null pointer becomes an error envelope
-rather than a crash, and a null `limit` means the whole log.
+`sujiu-runtime` used to export about twenty-five `sujiu_*` functions, each
+wrapping the same operations in a `{"ok":…,"data":…,"error":…}` JSON envelope
+and handing back a string the caller frees with `sujiu_string_free`. No platform
+called any of them — `sujiu-napi` and `sujiu-uniffi` both bind the Rust API
+directly — and the crate is now `rlib` only, with no header.
 
-No platform uses it. `sujiu-napi` and `sujiu-uniffi` both call the Rust API
-directly, which is why a method could be added to §4 in this round without
-touching a line of it — and why `list_models()` could be missing from one
-platform's export while the operation existed in Rust the whole time.
+It was a third hand-written copy of the same surface, which is exactly what
+AGENTS.md §14 rules 3 and 7 exist to prevent. It was also how `list_models()`
+could be missing from a platform's export while the operation existed in Rust the
+whole time: the third copy looked complete, so nothing said it was not.
 
-It is therefore a third hand-written copy of the same surface, which is exactly
-what AGENTS.md §14 rules 3 and 7 exist to prevent, and it is scheduled to be
-removed. Until it is, it is not a route to take: a new binding crate goes
-through `sujiu-runtime`, and adding an operation to the C ABI as well would be
-the drift this document is about.
+If Desktop ever needs a stable C ABI, it gets its own crate that exports from
+`sujiu-runtime` rather than the runtime carrying a second contract of its own.
+Adding an operation there and to §4 would be the drift this document is about.
 
 ### 5.4 Turn events cross the boundary already normalized
 

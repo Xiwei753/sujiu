@@ -5,8 +5,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+# Only an rlib. The cross-language libraries are built by sujiu-uniffi and
+# sujiu-napi, which bind the Rust API and link it into their own artifacts.
+# Building a cdylib and a staticlib here would publish a third binary nobody
+# loads, and the C ABI it existed to export is gone.
 [lib]
-crate-type = ["rlib", "cdylib", "staticlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 serde.workspace = true
