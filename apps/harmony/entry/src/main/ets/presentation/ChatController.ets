@@ -748,42 +748,6 @@ export class ChatController {
     });
   }
 
-  personaById(id: string): PersonaSummary | undefined {
-    return this.personas.find((item: PersonaSummary) => item.id === id);
-  }
-
-  worldBookById(id: string): WorldBookSummary | undefined {
-    return this.worldBooks.find((item: WorldBookSummary) => item.id === id);
-  }
-
-  promptProfileById(id: string): PromptProfileSummary | undefined {
-    return this.promptProfiles.find((item: PromptProfileSummary) => item.id === id);
-  }
-
-  /**
-   * Whether a conversation binds this resource, for a checkmark in the picker.
-   *
-   * Compares ids and resolves the name for display separately. Comparing names
-   * would make two personas that share a name indistinguishable, and renaming one
-   * would silently unbind it.
-   */
-  isPersonaBound(id: string): boolean {
-    return this.conversationPersonaId === id;
-  }
-
-  isWorldBookBound(id: string): boolean {
-    return this.conversationWorldbookIds.includes(id);
-  }
-
-  isPromptProfileBound(id: string): boolean {
-    return this.conversationPromptProfileId === id;
-  }
-
-  isCharacterBound(characterId: string): boolean {
-    return this.conversationParticipants.some(
-      (item: ConversationParticipant) => item.characterId === characterId);
-  }
-
   /**
    * The four things one conversation binds, written to the runtime.
    *
@@ -851,14 +815,8 @@ export class ChatController {
     });
   }
 
-  /** The names a binding screen shows, resolved from ids, in the ids' order. */
-  worldBookNames(ids: string[]): string[] {
-    const names: string[] = [];
-    for (let i = 0; i < ids.length; i++) {
-      const book: WorldBookSummary | undefined = this.worldBookById(ids[i]);
-      names.push(book === undefined ? ids[i] : book.name);
-    }
-    return names;
+  worldBookById(id: string): WorldBookSummary | undefined {
+    return this.worldBooks.find((item: WorldBookSummary) => item.id === id);
   }
 
   /**

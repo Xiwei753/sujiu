@@ -189,6 +189,9 @@ export struct CharacterEditor {
       EditorActions({
         theme: this.theme,
         busy: this.controller.libraryBusy,
+        // A resource you have not saved yet has nothing to delete. Offering it
+        // would put a delete button next to a form that is still being filled in.
+        canDelete: this.resourceId.length > 0,
         onSave: () => {
           this.controller.saveCharacter({
             id: this.resourceId,
@@ -207,6 +210,10 @@ export struct CharacterEditor {
             postHistoryInstructions: this.postHistory,
             worldbookIds: []
           } as CharacterDraft);
+          this.onBack();
+        },
+        onDelete: () => {
+          this.controller.deleteCharacter(this.resourceId);
           this.onBack();
         }
       });
