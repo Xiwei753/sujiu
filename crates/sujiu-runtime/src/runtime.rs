@@ -519,6 +519,14 @@ pub(crate) struct Inner {
     tools: Arc<ToolRegistry>,
     pub(crate) endpoint: Option<EndpointConfig>,
     storage_state: StorageState,
+    /// When a turn's prompt is too big to send as it is.
+    ///
+    /// Held here rather than in each platform because deciding this *is*
+    /// conversation semantics: the same conversation has to compact the same way
+    /// whichever screen started the turn. It is a plain value with a documented
+    /// default rather than a setting every caller has to supply, because a
+    /// platform that forgets to set one must still get a bounded prompt.
+    compaction: CompactionPolicy,
 }
 
 /// Whether the attached document may still be written to.
@@ -689,6 +697,7 @@ impl SujiuRuntime {
                 tools: Arc::new(tools),
                 endpoint,
                 storage_state,
+                compaction: CompactionPolicy::default(),
             }),
             cancel: Mutex::new(None),
             capabilities: sujiu_ai::CapabilityCache::new(),
@@ -2138,7 +2147,8 @@ impl SujiuRuntime {
         let (keep_recent, material) = {
             let inner = self.inner.lock().unwrap();
             let conversation = inner.library.conversation(&request.session_id)?;
-            let keep_recent = CompactionPolicy::default()
+            let keep_recent = inner
+                .compaction
                 .keep_recent_for(&conversation.transcript, input_chars)?;
             let material = conversation.transcript.compaction_input(keep_recent)?;
             (keep_recent, material)
@@ -2241,6 +2251,17 @@ impl SujiuRuntime {
         let text = turn.text.unwrap_or_default();
         let summary = text.trim();
         (!summary.is_empty()).then(|| (summary.to_owned(), turn.usage))
+    }
+
+    /// Set the input budget a turn is compacted against.
+    ///
+    /// Deliberately a value rather than a knob per platform. Deciding when a
+    /// conversation stops being sendable is conversation semantics, so it belongs
+    /// in the kernel where every platform is subject to it; what this allows is
+    /// for the *size* of the conversation to be tuned rather than to be decided
+    /// on one screen and not another.
+    pub fn set_compaction_policy(&self, policy: CompactionPolicy) {
+        self.inner.lock().unwrap().compaction = policy;
     }
 
     pub fn cancel(&self) {

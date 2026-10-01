@@ -944,52 +944,73 @@ impl Transcript {
     }
 
     /// The folded conversation a UI renders.
+    ///
+    /// Archived turns are included. Compaction moves turns out of the *prompt*
+    /// and out of nothing else: a user who has to scroll back through a long
+    /// conversation has to find it whole, and a kernel that compacts on its own
+    /// would otherwise shorten the scrollback every time the budget ran out. The
+    /// archived turns come first because they are older, so the order a platform
+    /// renders is the order the conversation happened in.
     pub fn ui_messages(&self) -> Vec<UiMessage> {
         let mut messages = Vec::new();
 
-        for turn in &self.turns {
-            messages.push(UiMessage {
-                id: format!("{}-user", turn.id),
-                role: ChatRole::User,
-                text: turn.user.clone(),
-                speaker: None,
-                tool_calls: Vec::new(),
-            });
-
-            // The tool steps are folded into the assistant bubble. A platform
-            // may hide or collapse them; the transcript above still holds
-            // every one of them.
-            //
-            // A turn is one bubble per speaker, not one per turn. Folding a
-            // two-character answer into a single anonymous bubble would lose
-            // the one thing that tells the lines apart, and the folding rule
-            // stays the same when there is only one speaker: consecutive steps
-            // that agree on the speaker are one bubble, so a turn with nobody
-            // named still folds exactly as it did before.
-            let bubbles = turn.bubbles();
-
-            for bubble in &bubbles {
-                // A lone bubble keeps the id it has always had, because ids a
-                // platform may already have stored are not renamed to fit a
-                // case that did not exist before.
-                let id = if bubbles.len() == 1 {
-                    format!("{}-assistant", turn.id)
-                } else {
-                    format!("{}-assistant-{}", turn.id, bubble.index)
-                };
-
-                messages.push(UiMessage {
-                    id,
-                    role: ChatRole::Assistant,
-                    text: bubble.text.clone(),
-                    speaker: bubble.speaker.clone(),
-                    tool_calls: bubble.tool_calls.clone(),
-                });
+        if let Some(archived) = self.compacted.as_ref() {
+            for turn in &archived.turns {
+                messages.extend(project_turn(turn));
             }
+        }
+
+        for turn in &self.turns {
+            messages.extend(project_turn(turn));
         }
 
         messages
     }
+}
+
+/// One turn as UI messages: the user's message, then one bubble per speaker.
+fn project_turn(turn: &Turn) -> Vec<UiMessage> {
+    let mut messages = Vec::new();
+
+    messages.push(UiMessage {
+        id: format!("{}-user", turn.id),
+        role: ChatRole::User,
+        text: turn.user.clone(),
+        speaker: None,
+        tool_calls: Vec::new(),
+    });
+
+    // The tool steps are folded into the assistant bubble. A platform may hide
+    // or collapse them; the transcript above still holds every one of them.
+    //
+    // A turn is one bubble per speaker, not one per turn. Folding a
+    // two-character answer into a single anonymous bubble would lose the one
+    // thing that tells the lines apart, and the folding rule stays the same when
+    // there is only one speaker: consecutive steps that agree on the speaker are
+    // one bubble, so a turn with nobody named still folds exactly as it did
+    // before.
+    let bubbles = turn.bubbles();
+
+    for bubble in &bubbles {
+        // A lone bubble keeps the id it has always had, because ids a platform
+        // may already have stored are not renamed to fit a case that did not
+        // exist before.
+        let id = if bubbles.len() == 1 {
+            format!("{}-assistant", turn.id)
+        } else {
+            format!("{}-assistant-{}", turn.id, bubble.index)
+        };
+
+        messages.push(UiMessage {
+            id,
+            role: ChatRole::Assistant,
+            text: bubble.text.clone(),
+            speaker: bubble.speaker.clone(),
+            tool_calls: bubble.tool_calls.clone(),
+        });
+    }
+
+    messages
 }
 
 /// One assistant bubble in the UI projection.
