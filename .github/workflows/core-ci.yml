@@ -110,4 +110,14 @@ jobs:
           "$sdkmanager" "platforms;android-36" "platform-tools"
       - name: Compile against the generated bindings
         working-directory: apps/android
-        run: ./gradlew :app:compileDebugKotlin --no-daemon
+        # TEMPORARY DIAGNOSTIC. The check-run annotation is the only channel a
+        # reader who cannot download the job log can see, so a failure is
+        # reported there instead of only in a log nobody can open. Remove once
+        # the cause is known.
+        run: |
+          set -o pipefail
+          ./gradlew :app:compileDebugKotlin --no-daemon 2>&1 | tee /tmp/gradle.log || {
+            echo "::error title=Gradle failed::$(sed -n '/What went wrong/,/^\* Try/p' /tmp/gradle.log | tr '\n' ' ' | cut -c1-900)"
+            echo "::error title=Last error lines::$(grep -E '^(e: |FAILURE|Execution failed|> )' /tmp/gradle.log | tail -8 | tr '\n' ' ' | cut -c1-900)"
+            exit 1
+          }
