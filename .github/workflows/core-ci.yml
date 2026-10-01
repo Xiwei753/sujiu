@@ -90,12 +90,24 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      # The runner image ships some Android SDK packages but not the platform
-      # this app compiles against, and an AGP build without its platform is a
-      # configuration failure rather than a compile failure, which hides the
-      # thing this job exists to check.
-      - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v4
+      # The runner image ships an Android SDK, but not every platform, and AGP
+      # will not silently install one it cannot license. Configuring it with the
+      # tools already on the runner, rather than adding another action, keeps a
+      # failure here reported as a normal step failure with a real message.
+      - name: Install the Android platform this app compiles against
+        run: |
+          sdkmanager="$(command -v sdkmanager || true)"
+          if [ -z "$sdkmanager" ]; then
+            sdkmanager="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [ ! -x "$sdkmanager" ]; then
+            echo "No sdkmanager on this runner, so the Android platform cannot be installed." >&2
+            echo "An AGP build without its platform fails during configuration and says" >&2
+            echo "nothing about the bindings this job exists to check." >&2
+            exit 1
+          fi
+          yes | "$sdkmanager" --licenses > /dev/null || true
+          "$sdkmanager" "platforms;android-36" "platform-tools"
       - name: Compile against the generated bindings
         working-directory: apps/android
         run: ./gradlew :app:compileDebugKotlin --no-daemon
