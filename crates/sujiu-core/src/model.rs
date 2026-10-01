@@ -613,6 +613,53 @@ pub struct ContinuationCoverage {
 
 const DIGEST_CHARS: usize = 16;
 
+/// Roughly how much text a request carries.
+///
+/// An estimate on purpose. The kernel cannot know the endpoint's tokenizer, so
+/// this counts characters rather than claiming tokens it did not count; what it
+/// is for is deciding whether a request has stopped being reasonable, which a
+/// character count answers well enough. The provider's own accounting, recorded
+/// as [`TokenUsage`], remains the only real number.
+pub fn input_size_chars(messages: &[ModelMessage]) -> usize {
+    messages
+        .iter()
+        .map(|message| match message {
+            ModelMessage::Text { content, .. } => content.chars().count(),
+            ModelMessage::Assistant {
+                content,
+                reasoning,
+                calls,
+                ..
+            } => {
+                content
+                    .as_deref()
+                    .map(str::chars)
+                    .map(Iterator::count)
+                    .unwrap_or(0)
+                    + reasoning
+                        .as_ref()
+                        .map(|sidecar| sidecar.content.chars().count())
+                        .unwrap_or(0)
+                    + calls
+                        .iter()
+                        .map(|call| call.arguments.to_string().len())
+                        .sum::<usize>()
+            }
+            ModelMessage::ToolResult {
+                content,
+                structured_content,
+                ..
+            } => {
+                content.chars().count()
+                    + structured_content
+                        .as_ref()
+                        .map(|value| value.to_string().len())
+                        .unwrap_or(0)
+            }
+        })
+        .sum()
+}
+
 /// A digest of a prefix of the request messages.
 ///
 /// This is a change detector, not a security primitive: it answers "are these the

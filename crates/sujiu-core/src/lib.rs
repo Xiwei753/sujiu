@@ -18,11 +18,11 @@ pub use context::{ContextKind, ContextRecord, ContextScope, ContextSource};
 pub use conversation::{Conversation, Participant, ParticipantRole, CONVERSATION_SCHEMA_VERSION};
 pub use library::{standalone_context, Library};
 pub use model::{
-    message_prefix_digest, AssistantTurn, ContinuationCoverage, ContinuationSupport,
-    ContinuationUpdate, ModelMessage, ModelRole, ProviderContinuation, ProviderIdentity,
-    ProviderRequest, ReasoningSidecar, TokenUsage, ToolAnnotations, ToolCall, ToolCallState,
-    ToolContent, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult, COVERAGE_KEY,
-    SENT_MESSAGES_KEY,
+    input_size_chars, message_prefix_digest, AssistantTurn, ContinuationCoverage,
+    ContinuationSupport, ContinuationUpdate, ModelMessage, ModelRole, ProviderContinuation,
+    ProviderIdentity, ProviderRequest, ReasoningSidecar, TokenUsage, ToolAnnotations, ToolCall,
+    ToolCallState, ToolContent, ToolDefinition, ToolDiscovery, ToolOutput, ToolResult,
+    COVERAGE_KEY, SENT_MESSAGES_KEY,
 };
 pub use persona::{Persona, PERSONA_SCHEMA_VERSION};
 pub use prompt::{
@@ -39,8 +39,9 @@ pub use protocol::{
 pub use provider::{apply_reasoning_override, EndpointConfig, REPLAYS_ASSISTANT_REASONING_KEY};
 pub use transcript::{
     model_messages_from_transcript, validate_pairing, AssistantStep, CompactedTurns,
-    CompactionInput, PairingError, ToolCallRecord, ToolResultRecord, Transcript, Turn, TurnState,
-    UiMessage, UiToolCall,
+    CompactionInput, CompactionPolicy, PairingError, ToolCallRecord, ToolResultRecord, Transcript,
+    Turn, TurnState, TurnUsage, UiMessage, UiToolCall, DEFAULT_KEEP_RECENT_TURNS,
+    DEFAULT_MAX_INPUT_CHARS,
 };
 pub use worldbook::{WorldBook, WorldBookEntry, WorldBookPosition, WORLD_BOOK_SCHEMA_VERSION};
 

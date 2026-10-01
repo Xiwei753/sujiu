@@ -393,6 +393,31 @@ impl Turn {
         self.steps.iter().flat_map(|step| step.tool_calls.iter())
     }
 
+    /// What this turn cost, as the provider reported it.
+    ///
+    /// A turn is several provider requests, and the number that matters to the
+    /// bill is the sum over them: a tool-using turn re-sends the conversation on
+    /// every round. Reading only the last step reports the cheap round and hides
+    /// the expensive ones.
+    pub fn usage(&self) -> TurnUsage {
+        let mut usage = TurnUsage {
+            rounds: self.steps.len(),
+            tool_rounds: 0,
+            ..TurnUsage::default()
+        };
+
+        for step in &self.steps {
+            if !step.tool_calls.is_empty() {
+                usage.tool_rounds += 1;
+            }
+            if let Some(reported) = step.usage.as_ref() {
+                usage.absorb(reported);
+            }
+        }
+
+        usage
+    }
+
     /// The last thing any step in this turn said about continuation.
     ///
     /// A step that said nothing is not an answer, so the search keeps going
@@ -572,6 +597,158 @@ impl CompactionInput {
         text
     }
 }
+
+/// What one turn cost, as the provider accounted for it.
+///
+/// Provider-neutral on purpose. The field names are the four numbers every
+/// protocol reports differently — `prompt_tokens` versus `input_tokens`,
+/// `cached_tokens` nested in a detail object, `cache_creation_input_tokens` —
+/// and an adapter's job is to have already mapped them onto these. A log that
+/// carried the wire names would need a reader per protocol; a log that carried a
+/// converted currency figure would need a price list the kernel cannot verify.
+///
+/// No price is computed here, and none should be added. What a token costs is
+/// an account's business: it changes, it is per endpoint, and it is sometimes
+/// negotiated. Multiplying by a remembered price would make an auditable number
+/// quietly wrong.
+///
+/// A `None` field means the endpoint did not report it, which is not the same as
+/// zero — a provider with no cache billing reports no cache-write number, and
+/// reading that as "nothing was written" would be an assumption. Totals are sums
+/// of what was reported, so a turn where only some rounds reported usage has a
+/// partial total; [`TurnUsage::is_complete`] is what distinguishes the two.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnUsage {
+    /// Provider requests this turn made, including the final answer.
+    pub rounds: usize,
+    /// How many of those rounds asked for tools.
+    ///
+    /// Separate from `rounds` because a round that calls a tool re-sends the
+    /// whole conversation: the round count says how many times the prompt was
+    /// sent, and this says how many of those were tool rounds.
+    pub tool_rounds: usize,
+    /// Rounds that reported token usage at all.
+    ///
+    /// The comparison `rounds_reported < rounds` is what tells a reader that a
+    /// total is a sum over part of the turn rather than over all of it.
+    pub rounds_reported: usize,
+    /// Prompt tokens billed across the turn, cached ones included.
+    pub input_tokens: Option<u64>,
+    /// Of those, the ones the provider served from its own prompt cache.
+    pub cached_input_tokens: Option<u64>,
+    /// Prompt tokens the provider had to write into its cache.
+    pub cache_write_tokens: Option<u64>,
+    /// Completion tokens billed across the turn.
+    pub output_tokens: Option<u64>,
+}
+
+impl TurnUsage {
+    /// Fold one round's reported usage into the total.
+    fn absorb(&mut self, usage: &crate::model::TokenUsage) {
+        self.rounds_reported += 1;
+
+        let total = |mine: &mut Option<u64>, theirs: Option<u64>| {
+            if let Some(value) = theirs {
+                *mine = Some(mine.unwrap_or(0) + value);
+            }
+        };
+        total(&mut self.input_tokens, usage.input_tokens);
+        total(&mut self.cached_input_tokens, usage.cached_input_tokens);
+        total(&mut self.cache_write_tokens, usage.cache_write_tokens);
+        total(&mut self.output_tokens, usage.output_tokens);
+    }
+
+    /// Whether every round of this turn reported its usage.
+    ///
+    /// False means the totals cover only the rounds that did, so the numbers are
+    /// a floor rather than the whole bill.
+    pub fn is_complete(&self) -> bool {
+        self.rounds_reported == self.rounds
+    }
+}
+
+/// When a long session has to stop growing.
+///
+/// Compaction belongs to the runtime kernel, not to a platform. A frontend that
+/// decided it was time to compact would produce different transcripts depending
+/// on which screen the user was on, and a conversation that survives on one
+/// platform and is destroyed on another is not a portable conversation.
+///
+/// The budget is expressed in characters rather than tokens because the kernel
+/// cannot know the endpoint's tokenizer: it can count what it sends, and an
+/// estimate is enough to decide when a request has stopped being reasonable. The
+/// provider's own accounting is the real number, and that is what the turn usage
+/// ledger records.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CompactionPolicy {
+    /// Roughly how much prompt text one turn may send before older turns are
+    /// folded into a summary.
+    pub max_input_chars: usize,
+    /// How many recent turns stay verbatim no matter how long the session gets.
+    ///
+    /// Not a nicety: the most recent exchanges are what the model needs in full
+    /// to answer, and a summary of the last thing the user said is a worse
+    /// prompt than the thing itself.
+    pub keep_recent_turns: usize,
+}
+
+impl Default for CompactionPolicy {
+    fn default() -> Self {
+        Self {
+            max_input_chars: DEFAULT_MAX_INPUT_CHARS,
+            keep_recent_turns: DEFAULT_KEEP_RECENT_TURNS,
+        }
+    }
+}
+
+impl CompactionPolicy {
+    /// A policy that never compacts on its own.
+    ///
+    /// Used when a caller drives compaction explicitly, so an explicit
+    /// `compact_session` is not followed by the kernel deciding to compact again
+    /// on the same history.
+    pub fn manual() -> Self {
+        Self {
+            max_input_chars: usize::MAX,
+            keep_recent_turns: DEFAULT_KEEP_RECENT_TURNS,
+        }
+    }
+
+    /// How many turns to keep verbatim, or `None` when the prompt is within
+    /// budget.
+    ///
+    /// The decision is made from what this turn would actually send, not from a
+    /// turn count, because those come apart quickly: a few turns of long tool
+    /// results cost more than a dozen short ones, and only the first number is
+    /// what a provider is billed for.
+    ///
+    /// The cut is always on a turn boundary, so it cannot separate a tool call
+    /// from the result that answers it.
+    pub fn keep_recent_for(&self, transcript: &Transcript, input_chars: usize) -> Option<usize> {
+        if input_chars <= self.max_input_chars {
+            return None;
+        }
+
+        // Oldest first, and always keep at least the recent window and one turn
+        // to archive. A transcript with nothing to archive is not over budget in
+        // any way this can fix, and claiming otherwise would compact the whole
+        // conversation into a summary of itself.
+        let archivable = transcript.len().saturating_sub(self.keep_recent_turns);
+        (archivable > 0).then_some(self.keep_recent_turns)
+    }
+}
+
+/// Roughly a quarter of a million characters of prompt text.
+///
+/// Deliberately generous: this is a safety bound against a session that would
+/// otherwise never stop growing, not a recommendation. A provider that rejects
+/// the request for being too long is the authority on its own limit; this only
+/// stops the transcript from growing without one.
+pub const DEFAULT_MAX_INPUT_CHARS: usize = 240_000;
+
+/// Turns that stay verbatim when compaction triggers.
+pub const DEFAULT_KEEP_RECENT_TURNS: usize = 8;
 
 /// The ordered transcript of a session.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]

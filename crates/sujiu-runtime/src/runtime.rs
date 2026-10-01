@@ -24,10 +24,10 @@ use sujiu_ai::{
     ResponsesConfig, ToolRegistry,
 };
 use sujiu_core::{
-    apply_reasoning_override, Character, ChatRole, CompactionInput, ContextKind, ContextRecord,
-    ContextSource, ContinuationUpdate, Conversation, EndpointCapabilities, EndpointConfig, Library,
-    ModelListing, Participant, ParticipantRole, PromptCompiler, Protocol, ProviderIdentity,
-    Transcript, DEFAULT_APP_SYSTEM_PROMPT,
+    apply_reasoning_override, input_size_chars, Character, ChatRole, CompactionInput,
+    CompactionPolicy, ContextKind, ContextRecord, ContextSource, ContinuationUpdate, Conversation,
+    EndpointCapabilities, EndpointConfig, Library, ModelListing, Participant, ParticipantRole,
+    PromptCompiler, Protocol, ProviderIdentity, Transcript, DEFAULT_APP_SYSTEM_PROMPT,
 };
 
 use sujiu_ai::diagnostics::{fields, DiagnosticEntry, DiagnosticKind, DiagnosticLog, LOG_KEY};
@@ -53,6 +53,52 @@ const MAX_TRANSCRIPT_MESSAGES: usize = 200;
 /// Sampling defaults for a turn, overridable per provider through `extra`.
 const DEFAULT_MAX_TOKENS: u32 = 1024;
 const DEFAULT_TEMPERATURE: f32 = 0.8;
+
+/// What the model is asked for when the runtime folds old turns away.
+///
+/// A summarizer is not playing the conversation: it reports what happened, in
+/// the third person, and keeps whatever the conversation depends on later —
+/// who is who, what was agreed, what is still unresolved, and anything the
+/// world asserted as fact. It is told that the material it received is only the
+/// newest slice so that it cannot write a summary that silently forgets
+/// everything already folded into the previous one.
+const COMPACTION_INSTRUCTION: &str = "\
+You are compacting a role-play conversation so the runtime can keep it going \
+without sending every old turn again.
+
+Rewrite the material into one running summary in the third person. Keep:
+- who is taking part and how they relate to each other
+- what has happened, including decisions, commitments and promises
+- what is unresolved, and anything the conversation is building toward
+- facts the world asserted: places, people, rules, injuries, possessions
+
+Drop: filler, repeated phrasing, and narration that only mattered for the \
+immediate moment.
+
+The material may be only the newest part of the conversation. Treat anything \
+already summarized as established: the new summary must stand on its own for \
+the whole conversation, including what came before. If that is impossible, \
+write the longer summary rather than the shorter one.
+
+Answer with the summary only. No preamble, no heading, no closing remarks.";
+
+/// Render a provider's own token accounting as diagnostic fields.
+///
+/// The numbers are recorded exactly as the provider reported them and are
+/// never converted, scaled, or combined into a cost: pricing belongs to the
+/// account that pays it, and a kernel that computed a currency figure would be
+/// quoting a price it cannot verify against any endpoint.
+fn describe_usage(usage: &Option<sujiu_core::TokenUsage>) -> String {
+    let Some(usage) = usage else {
+        return "(not reported)".to_string();
+    };
+    let field = |value: Option<u64>| value.map(|n| n.to_string()).unwrap_or_default();
+    let input = field(usage.input_tokens);
+    let cached = field(usage.cached_input_tokens);
+    let written = field(usage.cache_write_tokens);
+    let output = field(usage.output_tokens);
+    format!("input={input} cached={cached} cache_write={written} output={output}")
+}
 
 /// One character taking part in a conversation, as a screen reads it.
 #[derive(Debug, Serialize)]
@@ -1588,13 +1634,35 @@ impl SujiuRuntime {
         let prepared = self
             .prepare(request)
             .map_err(|error| TurnFailure(error.to_string()))?;
-        let messages = prepared.messages.clone();
-        let speaker = prepared.speaker.clone();
+
         // Negotiation decides which protocol this turn speaks, so the provider
         // state that may be replayed is decided with it rather than before.
-        let turn_provider = self.build_provider(prepared).await?;
-        let continuation = turn_provider.continuation.clone();
-        let provider = turn_provider;
+        let provider = self.build_provider(&prepared).await?;
+        let mut continuation = provider.continuation.clone();
+
+        // Compaction is decided here, in the kernel, before anything is sent.
+        //
+        // A platform deciding this would mean the same conversation compacts
+        // differently depending on which screen it was started from, and a
+        // session that survives on one platform and is destroyed on another is
+        // not a portable conversation. The cut is on a turn boundary, so a tool
+        // call never loses the result that answers it, and the compacted turns
+        // stay retrievable — they are moved out of the prompt, not deleted.
+        let messages = match self
+            .compact_if_oversized(request, &prepared, &provider)
+            .await
+        {
+            Some(messages) => {
+                // The prompt is rebuilt against the compacted transcript, and
+                // provider state recorded against the old one is dropped with it:
+                // asking an endpoint to resume from turns the model can no
+                // longer see would splice a conversation into a summary.
+                continuation = None;
+                messages
+            }
+            None => prepared.messages.clone(),
+        };
+        let speaker = prepared.speaker.clone();
         let tools = self.inner.lock().unwrap().tools.clone();
 
         let runtime = AgentRuntime::new(
@@ -1614,6 +1682,7 @@ impl SujiuRuntime {
             .await;
 
         self.persist_turn(request, &outcome);
+        self.record_turn_usage(&prepared, &provider, &outcome);
 
         match outcome.stop {
             AgentStop::Completed => {
@@ -1769,10 +1838,11 @@ impl SujiuRuntime {
     /// turn of a session pays for it and later turns do not, and a probe that
     /// could not conclude is never cached, because a rate limit is not a fact
     /// about the endpoint.
-    async fn build_provider(&self, prepared: PreparedTurn) -> Result<TurnProvider, TurnFailure> {
+    async fn build_provider(&self, prepared: &PreparedTurn) -> Result<TurnProvider, TurnFailure> {
+        let config = &prepared.config;
         let negotiation = sujiu_ai::negotiate_protocol(
             None,
-            &prepared.config,
+            config,
             &prepared.api_key,
             Some(&self.capabilities),
             Some(self.diagnostics.as_ref()),
@@ -1793,7 +1863,7 @@ impl SujiuRuntime {
                 "the turn stopped before any request was sent",
                 fields([
                     ("stage", "negotiate".to_string()),
-                    ("endpoint", prepared.config.normalized_base_url()),
+                    ("endpoint", config.normalized_base_url()),
                     ("reason", reason.clone()),
                 ]),
             );
@@ -1808,12 +1878,16 @@ impl SujiuRuntime {
             EndpointCapabilities::negotiate(&negotiation.supported).ok_or_else(|| {
                 TurnFailure("negotiation selected a protocol it did not report".to_string())
             })?;
-        let capabilities =
-            apply_reasoning_override(negotiated, prepared.config.forced_reasoning_replay());
+        let capabilities = apply_reasoning_override(negotiated, config.forced_reasoning_replay());
 
         let message_count = prepared.messages.len();
-        let config = prepared.config;
-        let api_key = prepared.api_key;
+        let config = prepared.config.clone();
+        let api_key = prepared.api_key.clone();
+        let protocol = capabilities.protocol;
+        let model = config
+            .selected_model
+            .clone()
+            .unwrap_or_else(|| "(not chosen yet)".to_string());
 
         // The identity is built *here*, from what the endpoint said, and not
         // before.
@@ -1838,6 +1912,7 @@ impl SujiuRuntime {
         // transcript instead.
         let continuation = prepared
             .stored_continuation
+            .clone()
             .filter(|continuation| continuation.is_reusable_for(&identity));
 
         // The protocol the request will actually use, named before the request
@@ -1913,6 +1988,8 @@ impl SujiuRuntime {
                     capabilities,
                 })),
                 continuation,
+                protocol,
+                model: model.clone(),
             });
         }
 
@@ -1976,7 +2053,194 @@ impl SujiuRuntime {
         Ok(TurnProvider {
             provider: Box::new(provider),
             continuation,
+            protocol,
+            model,
         })
+    }
+
+    /// Write the turn's token ledger entry.
+    ///
+    /// Every round of a turn is a separate provider request, and the number that
+    /// gets billed is the sum over them. Reporting only the final round's usage
+    /// would make an expensive tool-using turn look like a cheap one, which is
+    /// the same failure as the response-prefix bug in reverse: the request looks
+    /// cheaper than it was, so nothing looks wrong.
+    ///
+    /// A cancelled or failed turn is recorded too. Its rounds were sent and
+    /// billed, and a ledger that only contains turns that worked would leave the
+    /// user paying for the ones that did not with no line to show for it.
+    fn record_turn_usage(
+        &self,
+        prepared: &PreparedTurn,
+        provider: &TurnProvider,
+        outcome: &AgentOutcome,
+    ) {
+        let usage = outcome.turn.usage();
+        let reported = |value: Option<u64>| value.map(|n| n.to_string()).unwrap_or_default();
+        let input = reported(usage.input_tokens);
+        let input = if input.is_empty() {
+            "unreported".to_string()
+        } else {
+            input
+        };
+
+        self.diagnostics.record(
+            DiagnosticKind::Chat,
+            "turn_usage",
+            format!(
+                "{} round(s), {} tool round(s), {input} input token(s)",
+                usage.rounds, usage.tool_rounds
+            ),
+            fields([
+                ("endpoint", prepared.config.normalized_base_url()),
+                ("protocol", protocol_label(provider.protocol)),
+                ("model", provider.model.clone()),
+                ("rounds", usage.rounds.to_string()),
+                ("tool_rounds", usage.tool_rounds.to_string()),
+                (
+                    "rounds_reported",
+                    format!("{}/{}", usage.rounds_reported, usage.rounds),
+                ),
+                ("input_tokens", reported(usage.input_tokens)),
+                ("cached_input_tokens", reported(usage.cached_input_tokens)),
+                ("cache_write_tokens", reported(usage.cache_write_tokens)),
+                ("output_tokens", reported(usage.output_tokens)),
+                ("complete", usage.is_complete().to_string()),
+            ]),
+        );
+        self.persist_diagnostics();
+    }
+
+    /// Fold old turns into a summary when this turn's prompt is over budget.
+    ///
+    /// Returns the rebuilt model messages when it compacted, and `None` when
+    /// there was nothing to do — including when the summary itself failed. A
+    /// compaction that archives turns without a summary standing in for them
+    /// has not saved anything, it has moved them out of the model's reach while
+    /// still charging for them, so the transcript is left alone instead.
+    ///
+    /// The decision is made here, from what this turn would actually send,
+    /// rather than from a turn count: a few turns of long tool results cost more
+    /// than a dozen short ones, and only the first number is what a provider
+    /// bills for.
+    async fn compact_if_oversized(
+        &self,
+        request: &SendTurnRequest,
+        prepared: &PreparedTurn,
+        provider: &TurnProvider,
+    ) -> Option<Vec<sujiu_ai::ModelMessage>> {
+        let input_chars = input_size_chars(&prepared.messages);
+
+        // Measured, decided and copied out under one lock. The provider call
+        // below must not hold it: it is a network round trip, and a turn that
+        // blocks every other reader of the session for its duration is a
+        // deadlock waiting for a slow endpoint.
+        let (keep_recent, material) = {
+            let inner = self.inner.lock().unwrap();
+            let conversation = inner.library.conversation(&request.session_id)?;
+            let keep_recent = CompactionPolicy::default()
+                .keep_recent_for(&conversation.transcript, input_chars)?;
+            let material = conversation.transcript.compaction_input(keep_recent)?;
+            (keep_recent, material)
+        };
+
+        let (summary, summary_usage) = match self.summarize(provider.as_ref(), &material).await {
+            Some(summarized) => summarized,
+            None => {
+                self.diagnostics.record(
+                    DiagnosticKind::Chat,
+                    "compaction_failed",
+                    "the summary could not be written, so the transcript was left as it was",
+                    fields([
+                        ("stage", "summarize".to_string()),
+                        ("input_chars", input_chars.to_string()),
+                        ("archived_turns", material.turns.len().to_string()),
+                    ]),
+                );
+                self.persist_diagnostics();
+                return None;
+            }
+        };
+
+        let compacted = {
+            let mut inner = self.inner.lock().unwrap();
+            let conversation = inner.library.conversation_mut(&request.session_id)?;
+            // The summary is cumulative: it was written against the previous one,
+            // so it can stand in for the archived turns *and* everything they
+            // already stood in for.
+            if !conversation
+                .transcript
+                .compact(keep_recent, |_, _| summary.clone())
+            {
+                return None;
+            }
+            conversation.clone()
+        };
+
+        let _ = self.persist();
+
+        // The summary is a real request with a real cost, so it is accounted for
+        // like any other. Hiding it would make the ledger describe only the
+        // visible conversation and quietly omit the largest hidden spend in a
+        // long session.
+        self.diagnostics.record(
+            DiagnosticKind::Chat,
+            "compacted",
+            format!(
+                "{} older turns were folded into a {} character summary",
+                material.turns.len(),
+                summary.chars().count()
+            ),
+            fields([
+                ("input_chars", input_chars.to_string()),
+                ("archived_turns", material.turns.len().to_string()),
+                ("kept_recent", keep_recent.to_string()),
+                ("summary_chars", summary.chars().count().to_string()),
+                ("summarizer_usage", describe_usage(&summary_usage)),
+            ]),
+        );
+        self.persist_diagnostics();
+
+        // The prompt is rebuilt from the compacted transcript, because the one
+        // compiled a moment ago still contains the turns that just moved into
+        // the summary.
+        let inner = self.inner.lock().unwrap();
+        Some(
+            PromptCompiler::compile(&inner.library.prompt_context(
+                &compacted,
+                Some(DEFAULT_APP_SYSTEM_PROMPT),
+                &request.user_text,
+            ))
+            .model_messages(),
+        )
+    }
+
+    /// Ask the model to fold a session's oldest turns into one running summary.
+    ///
+    /// Sent with no tools and no continuation. The model is not playing here —
+    /// it cannot call a tool, and it must not be resumed from the conversation
+    /// it is being asked to summarize, because the archived turns are precisely
+    /// what is no longer being sent verbatim.
+    async fn summarize(
+        &self,
+        provider: &dyn sujiu_ai::AiProvider,
+        material: &CompactionInput,
+    ) -> Option<(String, Option<sujiu_core::TokenUsage>)> {
+        let turn = provider
+            .complete(sujiu_ai::ProviderRequest {
+                messages: vec![
+                    sujiu_ai::ModelMessage::system(COMPACTION_INSTRUCTION),
+                    sujiu_ai::ModelMessage::user(material.to_prompt_text()),
+                ],
+                tools: Vec::new(),
+                continuation: None,
+            })
+            .await
+            .ok()?;
+
+        let text = turn.text.unwrap_or_default();
+        let summary = text.trim();
+        (!summary.is_empty()).then(|| (summary.to_owned(), turn.usage))
     }
 
     pub fn cancel(&self) {
@@ -2044,6 +2308,15 @@ struct TurnProvider {
     /// whether state is replayable depends on the protocol the endpoint turned
     /// out to speak.
     continuation: Option<ProviderContinuation>,
+    /// The wire protocol this turn spoke, and the model it named.
+    ///
+    /// Kept beside the provider because a `Box<dyn AiProvider>` cannot be asked
+    /// what it is. The turn usage ledger needs both: "12000 input tokens" is not
+    /// an audit record until you know which endpoint, which protocol and which
+    /// model reported them, and guessing the protocol here is exactly the guess
+    /// negotiation removed.
+    protocol: Protocol,
+    model: String,
 }
 
 /// Everything one turn needs before a provider exists.
