@@ -12,6 +12,9 @@ on:
       - "scripts/check-bindings.sh"
       - "scripts/check-arkts-contract.py"
       - "scripts/check-harmony-types.sh"
+      - "scripts/check-i18n.sh"
+      - "scripts/check-i18n.py"
+      - "apps/harmony/entry/src/main/resources/**"
       - "scripts/harmony-cross-env.sh"
       - "apps/harmony/entry/libs/**"
       - "apps/harmony/entry/src/main/cpp/types/**"
@@ -30,6 +33,9 @@ on:
       - "scripts/check-bindings.sh"
       - "scripts/check-arkts-contract.py"
       - "scripts/check-harmony-types.sh"
+      - "scripts/check-i18n.sh"
+      - "scripts/check-i18n.py"
+      - "apps/harmony/entry/src/main/resources/**"
       - "scripts/harmony-cross-env.sh"
       - "apps/harmony/entry/libs/**"
       - "apps/harmony/entry/src/main/cpp/types/**"
@@ -93,6 +99,13 @@ jobs:
           node-version: 22
       - name: Check the generated N-API declaration against the Rust exports
         run: scripts/check-bindings.sh
+      # A key present only in base resolves to English with no warning from
+      # the build, so an untranslated string is invisible to the compiler, to
+      # hvigor, and to the build this job already runs above. Issue #5 shipped
+      # sixty-two of them that way, and the whole library came up in English
+      # on a Chinese device.
+      - name: Check every string has a translation
+        run: scripts/check-i18n.sh
 
   # Kotlin is generated from the Rust exports at build time, so there is no
   # committed artifact to drift. What can still be wrong is that the app's own

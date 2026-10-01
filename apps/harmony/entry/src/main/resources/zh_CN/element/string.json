@@ -6,11 +6,11 @@
     },
     {
       "name": "permission_internet",
-      "value": "Sujiu 需要联网把你发送的消息发给你配置的服务商。"
+      "value": "Sujiu sends your messages to the model provider you configured."
     },
     {
       "name": "module_desc",
-      "value": "Sujiu，以聊天为先的 AI 角色扮演客户端"
+      "value": "Sujiu, a chat-first AI role-play client"
     },
     {
       "name": "entry_ability_desc",
@@ -18,139 +18,139 @@
     },
     {
       "name": "a11y_chat_history",
-      "value": "聊天记录"
+      "value": "Chat history"
     },
     {
       "name": "a11y_more",
-      "value": "更多"
+      "value": "More"
     },
     {
       "name": "a11y_back",
-      "value": "返回"
+      "value": "Back"
     },
     {
       "name": "a11y_new_chat",
-      "value": "新对话"
+      "value": "New chat"
     },
     {
       "name": "a11y_add_attachment",
-      "value": "添加附件"
+      "value": "Add attachment"
     },
     {
       "name": "a11y_send",
-      "value": "发送"
+      "value": "Send"
     },
     {
       "name": "a11y_stop",
-      "value": "停止生成"
+      "value": "Stop generating"
     },
     {
       "name": "sheet_title_more",
-      "value": "更多"
+      "value": "More"
     },
     {
       "name": "sheet_item_context",
-      "value": "本轮对话的上下文"
+      "value": "Context in this chat"
     },
     {
       "name": "sheet_item_new_chat",
-      "value": "新对话"
+      "value": "New chat"
     },
     {
       "name": "sheet_item_settings",
-      "value": "设置"
+      "value": "Settings"
     },
     {
       "name": "composer_placeholder",
-      "value": "说点什么"
+      "value": "Message"
     },
     {
       "name": "title_default_character",
-      "value": "角色"
+      "value": "Character"
     },
     {
       "name": "title_default_model",
-      "value": "选择模型"
+      "value": "Select model"
     },
     {
       "name": "message_copy",
-      "value": "复制"
+      "value": "Copy"
     },
     {
       "name": "message_thinking",
-      "value": "思考过程"
+      "value": "Thinking"
     },
     {
       "name": "message_tools",
-      "value": "工具（%1$d）"
+      "value": "Tools (%1$d)"
     },
     {
       "name": "message_tool_line",
-      "value": "%1$s：%2$s"
+      "value": "%1$s: %2$s"
     },
     {
       "name": "status_submitting",
-      "value": "正在发送…"
+      "value": "Sending…"
     },
     {
       "name": "status_streaming",
-      "value": "正在回复…"
+      "value": "Writing…"
     },
     {
       "name": "status_waiting_tool",
-      "value": "正在等待工具…"
+      "value": "Waiting for tool…"
     },
     {
       "name": "status_executing_tool",
-      "value": "正在使用工具…"
+      "value": "Using a tool…"
     },
     {
       "name": "status_continuing",
-      "value": "正在继续…"
+      "value": "Continuing…"
     },
     {
       "name": "tool_status_queued",
-      "value": "排队中"
+      "value": "queued"
     },
     {
       "name": "tool_status_running",
-      "value": "执行中"
+      "value": "running"
     },
     {
       "name": "tool_status_done",
-      "value": "已完成"
+      "value": "done"
     },
     {
       "name": "tool_status_failed",
-      "value": "失败"
+      "value": "failed"
     },
     {
       "name": "history_title",
-      "value": "对话"
+      "value": "Chats"
     },
     {
       "name": "history_no_character",
-      "value": "尚未选择角色"
+      "value": "No character yet"
     },
     {
       "name": "history_group_today",
-      "value": "今天"
+      "value": "Today"
     },
     {
       "name": "history_group_yesterday",
-      "value": "昨天"
+      "value": "Yesterday"
     },
     {
       "name": "history_group_earlier",
-      "value": "更早"
+      "value": "Earlier"
     },
     {
       "name": "model_sheet_title",
-      "value": "模型"
+      "value": "Model"
     },
     {
       "name": "model_sheet_in_use",
-      "value": "使用中"
+      "value": "In use"
     },
     {
       "name": "model_sheet_meta",
@@ -158,191 +158,135 @@
     },
     {
       "name": "model_sheet_count",
-      "value": "该接口提供 %d 个"
+      "value": "%d from this endpoint"
     },
     {
       "name": "character_sheet_search",
-      "value": "搜索角色"
+      "value": "Search characters"
     },
     {
       "name": "character_sheet_open_library",
-      "value": "打开角色库"
+      "value": "Open library"
     },
     {
       "name": "context_sheet_title",
-      "value": "上下文"
+      "value": "Context"
     },
     {
       "name": "context_sheet_empty",
-      "value": "本次对话还没有上下文来源。"
+      "value": "No context sources in this session yet."
     },
     {
       "name": "context_source_meta",
-      "value": "%1$s · %2$d 条记录"
+      "value": "%1$s · %2$d records"
     },
     {
       "name": "library_title",
-      "value": "角色"
+      "value": "Library"
     },
     {
       "name": "character_detail_chat",
-      "value": "和这个角色聊聊"
+      "value": "Chat with this character"
     },
     {
       "name": "settings_title",
-      "value": "设置"
+      "value": "Settings"
     },
     {
       "name": "settings_section_appearance",
-      "value": "外观"
+      "value": "Appearance"
     },
     {
       "name": "settings_section_about",
-      "value": "关于"
+      "value": "About"
     },
     {
       "name": "settings_about_platform",
-      "value": "平台"
+      "value": "Platform"
     },
     {
       "name": "settings_about_runtime",
-      "value": "运行时"
+      "value": "Runtime"
     },
     {
       "name": "appearance_system",
-      "value": "跟随系统"
+      "value": "System"
     },
     {
       "name": "appearance_light",
-      "value": "浅色"
+      "value": "Light"
     },
     {
       "name": "appearance_dark",
-      "value": "深色"
+      "value": "Dark"
     },
     {
       "name": "error_turn_failed",
-      "value": "这次回复没能完成。"
+      "value": "The reply could not be completed."
     },
     {
       "name": "error_new_chat_failed",
-      "value": "没能开始新的对话。"
+      "value": "A new chat could not be started."
     },
     {
       "name": "error_no_provider_configured",
-      "value": "还没有配置模型服务。"
+      "value": "No model service is configured yet."
     },
     {
       "name": "error_missing_credential",
-      "value": "缺少 API Key。"
+      "value": "The API key is missing."
     },
     {
       "name": "error_session_not_found",
-      "value": "这段对话已经不存在了。"
+      "value": "That conversation no longer exists."
     },
     {
       "name": "error_turn_busy",
-      "value": "已经有一条回复正在生成。"
+      "value": "A reply is already in progress."
     },
     {
       "name": "settings_section_provider",
-      "value": "服务商"
+      "value": "PROVIDER"
     },
     {
       "name": "provider_hint",
-      "value": "Sujiu 连接 OpenAI 兼容接口。api key 只保存在本机。"
+      "value": "Sujiu talks to an OpenAI-compatible endpoint. The api key is stored on this device only."
     },
     {
       "name": "provider_base_url",
-      "value": "接口地址"
+      "value": "Base URL"
     },
     {
       "name": "provider_model",
-      "value": "模型"
+      "value": "Model"
     },
     {
       "name": "provider_api_key",
-      "value": "API 密钥"
+      "value": "API key"
     },
     {
-      "name": "provider_save",
-      "value": "保存服务商"
+      "name": "provider_explore",
+      "value": "Ask this endpoint"
     },
     {
-      "name": "provider_clear",
-      "value": "移除"
+      "name": "provider_exploring",
+      "value": "Asking…"
     },
     {
-      "name": "provider_key_stored",
-      "value": "本机已保存 api key。"
+      "name": "provider_explore_hint",
+      "value": "Type an address and a key, then ask what is there. You only have to choose a model."
     },
     {
-      "name": "provider_need_address",
-      "value": "请先填写接口地址。"
+      "name": "provider_protocol_found",
+      "value": "It speaks"
     },
     {
-      "name": "provider_need_key",
-      "value": "接着填写 API 密钥，没有它无法探测。"
+      "name": "provider_protocol_none",
+      "value": "No protocol could be established."
     },
     {
-      "name": "provider_ready",
-      "value": "地址和密钥已就绪，可以探测这个接口。"
-    },
-    {
-      "name": "provider_probing",
-      "value": "正在探测接口能力…"
-    },
-    {
-      "name": "provider_probe_ok",
-      "value": "已连接，这个接口有响应。"
-    },
-    {
-      "name": "provider_models_count",
-      "value": "找到 %d 个模型，请选择一个，或手动输入。"
-    },
-    {
-      "name": "provider_listing_unavailable",
-      "value": "已连接，但该接口不提供模型列表。可以手动输入模型名，对话不受影响。"
-    },
-    {
-      "name": "provider_auth_failed",
-      "value": "API 密钥被拒绝。请检查密钥后重试。"
-    },
-    {
-      "name": "provider_no_such_endpoint",
-      "value": "该地址有响应，但这个路径不存在。请检查地址与路径。"
-    },
-    {
-      "name": "provider_network_error",
-      "value": "无法连接到该接口。请检查网络与地址。"
-    },
-    {
-      "name": "provider_server_error",
-      "value": "接口返回了错误信息，可能正忙，请稍后重试。"
-    },
-    {
-      "name": "provider_rate_limited",
-      "value": "请求过于频繁，请稍等片刻再试。"
-    },
-    {
-      "name": "provider_no_usable_protocol",
-      "value": "该接口有响应，但不支持 Sujiu 已知的任何协议。"
-    },
-    {
-      "name": "provider_undetermined",
-      "value": "Sujiu 无法判断该接口支持哪种协议，它仍可能可用。"
-    },
-    {
-      "name": "provider_unreadable",
-      "value": "接口返回了 Sujiu 无法解析的内容。"
-    },
-    {
-      "name": "provider_model_choose",
-      "value": "选择模型"
-    },
-    {
-      "name": "provider_model_hint",
-      "value": "这一步由你来定，Sujiu 不会替你选择。"
+      "name": "provider_models_found",
+      "value": "Models it lists"
     },
     {
       "name": "provider_models_count_short",
@@ -350,107 +294,411 @@
     },
     {
       "name": "provider_models_hide",
-      "value": "收起"
+      "value": "Hide"
     },
     {
       "name": "provider_models_show",
-      "value": "展开"
+      "value": "Show"
     },
     {
       "name": "provider_model_current",
-      "value": "当前"
+      "value": "current"
     },
     {
       "name": "provider_listing_available",
-      "value": "该接口列出了它的模型。"
+      "value": "This endpoint listed its models."
     },
     {
       "name": "provider_listing_absent",
-      "value": "该接口没有模型列表。网关常常如此，并不代表它不能对话，你仍然可以手动填写模型名。"
+      "value": "This endpoint has no model list. That is normal for a gateway and does not mean it cannot chat, so you can still type a model name."
     },
     {
       "name": "provider_listing_permission_denied",
-      "value": "当前密钥没有列出模型的权限，但它可能仍然可以对话，你仍然可以手动填写模型名。"
+      "value": "This key is not allowed to list models. It may still be allowed to chat, so you can still type a model name."
     },
     {
       "name": "provider_listing_rate_limited",
-      "value": "该接口正在限流，暂时拿不到列表。你仍然可以手动填写模型名。"
+      "value": "This endpoint is rate limiting the lookup right now. You can still type a model name."
     },
     {
       "name": "provider_listing_unreachable",
-      "value": "联系不上该接口，无法获取模型列表。你仍然可以手动填写模型名。"
+      "value": "This endpoint could not be reached to list models. You can still type a model name."
     },
     {
       "name": "provider_listing_unknown",
-      "value": "还没有查询过模型列表。你可以直接填写模型名。"
-    },
-    {
-      "name": "provider_explore",
-      "value": "询问这个接口"
-    },
-    {
-      "name": "provider_exploring",
-      "value": "正在询问…"
-    },
-    {
-      "name": "provider_explore_hint",
-      "value": "填好地址和密钥，再问一次它支持什么。模型只需要你来选。"
-    },
-    {
-      "name": "provider_protocol_found",
-      "value": "它支持"
-    },
-    {
-      "name": "provider_protocol_none",
-      "value": "没能确定协议。"
-    },
-    {
-      "name": "provider_models_found",
-      "value": "它列出的模型"
+      "value": "The model list has not been looked up yet. You can type a model name."
     },
     {
       "name": "provider_no_models",
-      "value": "请在上方填写模型名；这个接口地址仍然可用。"
+      "value": "Type a model name above; the address still works."
+    },
+    {
+      "name": "provider_save",
+      "value": "Save provider"
+    },
+    {
+      "name": "provider_clear",
+      "value": "Remove"
+    },
+    {
+      "name": "provider_key_stored",
+      "value": "An api key is stored on this device."
+    },
+    {
+      "name": "provider_need_address",
+      "value": "Type the endpoint address first."
+    },
+    {
+      "name": "provider_need_key",
+      "value": "Now add an API key. Nothing can be checked without one."
+    },
+    {
+      "name": "provider_ready",
+      "value": "Address and key are set. Ask what this endpoint supports."
+    },
+    {
+      "name": "provider_probing",
+      "value": "Asking the endpoint what it supports…"
+    },
+    {
+      "name": "provider_probe_ok",
+      "value": "Connected. This endpoint answered."
+    },
+    {
+      "name": "provider_models_count",
+      "value": "Found %d models. Choose one, or type a name."
+    },
+    {
+      "name": "provider_listing_unavailable",
+      "value": "Connected, but this endpoint does not list models. Type a model name — chatting still works."
+    },
+    {
+      "name": "provider_auth_failed",
+      "value": "The API key was rejected. Check the key and try again."
+    },
+    {
+      "name": "provider_no_such_endpoint",
+      "value": "Something answered that address, but not that path. Check the address and the path."
+    },
+    {
+      "name": "provider_network_error",
+      "value": "The endpoint could not be reached. Check the network and the address."
+    },
+    {
+      "name": "provider_server_error",
+      "value": "The endpoint answered with an error. It may be busy; try again shortly."
+    },
+    {
+      "name": "provider_rate_limited",
+      "value": "Too many requests right now. Wait a moment and try again."
+    },
+    {
+      "name": "provider_no_usable_protocol",
+      "value": "This endpoint answered, but speaks none of the protocols Sujiu knows."
+    },
+    {
+      "name": "provider_undetermined",
+      "value": "Sujiu could not tell which protocols this endpoint speaks. It may still work."
+    },
+    {
+      "name": "provider_unreadable",
+      "value": "The endpoint answered with something Sujiu cannot read."
+    },
+    {
+      "name": "provider_model_choose",
+      "value": "Choose a model"
+    },
+    {
+      "name": "provider_model_hint",
+      "value": "This one is yours to choose. Sujiu will not pick it for you."
     },
     {
       "name": "provider_reprobe",
-      "value": "重新探测"
+      "value": "Ask again"
     },
     {
       "name": "settings_section_diagnostics",
-      "value": "诊断日志"
+      "value": "DIAGNOSTICS"
     },
     {
       "name": "provider_diagnostics_show",
-      "value": "查看诊断日志"
+      "value": "Show diagnostics"
     },
     {
       "name": "provider_diagnostics_hide",
-      "value": "收起诊断日志"
+      "value": "Hide diagnostics"
     },
     {
       "name": "provider_diagnostics_empty",
-      "value": "暂无记录。"
+      "value": "Nothing recorded yet."
     },
     {
       "name": "provider_diagnostics_copy",
-      "value": "复制日志"
+      "value": "Copy log"
     },
     {
       "name": "provider_diagnostics_copied",
-      "value": "日志已复制，可以放心粘贴：其中不会出现密钥。"
+      "value": "Log copied. It is safe to paste: keys never appear in it."
     },
     {
       "name": "provider_diagnostics_clear",
-      "value": "清空日志"
+      "value": "Clear log"
     },
     {
       "name": "provider_diagnostics_note",
-      "value": "此处绝不写入 API 密钥，密钥只会以打码片段出现。"
+      "value": "API keys are never written here — a key appears only as a masked fragment."
     },
     {
       "name": "error_provider_not_saved",
-      "value": "服务商保存失败。"
+      "value": "The provider could not be saved."
+    },
+    {
+      "name": "error_entity_not_found",
+      "value": "该条目已不存在，未做任何改动。"
+    },
+    {
+      "name": "error_already_removed",
+      "value": "该条目已被删除。"
+    },
+    {
+      "name": "error_library_unavailable",
+      "value": "资料库读取失败。"
+    },
+    {
+      "name": "error_save_failed",
+      "value": "修改未能保存。"
+    },
+    {
+      "name": "error_delete_failed",
+      "value": "该条目未能删除。"
+    },
+    {
+      "name": "error_bind_failed",
+      "value": "本会话的资料未能更新。"
+    },
+    {
+      "name": "a11y_library",
+      "value": "资料库"
+    },
+    {
+      "name": "library_intro",
+      "value": "你已经保存的内容。角色、Persona、世界书和提示词都只保存一次，任何会话都可以反复使用。"
+    },
+    {
+      "name": "library_section_characters",
+      "value": "角色"
+    },
+    {
+      "name": "library_section_personas",
+      "value": "Persona"
+    },
+    {
+      "name": "library_section_world_books",
+      "value": "世界书"
+    },
+    {
+      "name": "library_section_prompts",
+      "value": "提示词"
+    },
+    {
+      "name": "library_section_counts",
+      "value": "%1$d / %2$d"
+    },
+    {
+      "name": "library_new",
+      "value": "新建"
+    },
+    {
+      "name": "library_import",
+      "value": "导入"
+    },
+    {
+      "name": "library_edit",
+      "value": "编辑"
+    },
+    {
+      "name": "library_view",
+      "value": "查看"
+    },
+    {
+      "name": "library_save",
+      "value": "保存"
+    },
+    {
+      "name": "library_delete",
+      "value": "删除"
+    },
+    {
+      "name": "library_delete_confirm",
+      "value": "确定永久删除？使用它的会话将不再使用它。"
+    },
+    {
+      "name": "library_empty_characters",
+      "value": "还没有角色。"
+    },
+    {
+      "name": "library_empty_personas",
+      "value": "还没有 Persona。"
+    },
+    {
+      "name": "library_empty_world_books",
+      "value": "还没有世界书。"
+    },
+    {
+      "name": "library_empty_prompts",
+      "value": "还没有提示词。"
+    },
+    {
+      "name": "library_import_note",
+      "value": "此平台暂不支持导入。你可以现在手写一个。"
+    },
+    {
+      "name": "library_field_name",
+      "value": "名称"
+    },
+    {
+      "name": "library_field_description",
+      "value": "描述"
+    },
+    {
+      "name": "library_field_personality",
+      "value": "性格"
+    },
+    {
+      "name": "library_field_scenario",
+      "value": "场景"
+    },
+    {
+      "name": "library_field_first_message",
+      "value": "首条消息"
+    },
+    {
+      "name": "library_field_alternate_greetings",
+      "value": "其他开场白，每行一条"
+    },
+    {
+      "name": "library_field_example_dialogue",
+      "value": "示例对话"
+    },
+    {
+      "name": "library_field_system_prompt",
+      "value": "系统提示词"
+    },
+    {
+      "name": "library_field_user_prompt",
+      "value": "用户提示词"
+    },
+    {
+      "name": "library_field_post_history",
+      "value": "历史之后的指令"
+    },
+    {
+      "name": "library_field_format_rules",
+      "value": "格式规则"
+    },
+    {
+      "name": "library_field_content",
+      "value": "内容"
+    },
+    {
+      "name": "library_field_keys",
+      "value": "关键词，用逗号分隔"
+    },
+    {
+      "name": "library_field_world_books",
+      "value": "世界书"
+    },
+    {
+      "name": "library_add_entry",
+      "value": "添加词条"
+    },
+    {
+      "name": "library_remove_entry",
+      "value": "删除词条"
+    },
+    {
+      "name": "library_entry_count",
+      "value": "%d 条"
+    },
+    {
+      "name": "library_world_book_count",
+      "value": "%d 个世界书"
+    },
+    {
+      "name": "library_prompt_intro",
+      "value": "一个会话的固定提示文本：告诉模型什么、告诉用户什么、历史之后说什么、以及怎么回答。可以重复使用，它不是设置。"
+    },
+    {
+      "name": "library_world_book_intro",
+      "value": "当关键词出现时会被带进会话的设定。一个世界书可以被任意多个角色、Persona 和会话使用。"
+    },
+    {
+      "name": "library_persona_intro",
+      "value": "用户扮演的身份。Persona 是独立资源：它不属于某个角色，可以被任意多个会话使用。"
+    },
+    {
+      "name": "binding_title",
+      "value": "本会话"
+    },
+    {
+      "name": "binding_intro",
+      "value": "从已经保存的内容里，选择这一个聊天要用哪些。编辑请到资料库里进行，同一项可以被多个会话使用。"
+    },
+    {
+      "name": "binding_participants",
+      "value": "本场聊天"
+    },
+    {
+      "name": "binding_persona",
+      "value": "Persona"
+    },
+    {
+      "name": "binding_world_books",
+      "value": "世界书"
+    },
+    {
+      "name": "binding_prompts",
+      "value": "提示词"
+    },
+    {
+      "name": "binding_none",
+      "value": "无"
+    },
+    {
+      "name": "binding_apply",
+      "value": "应用"
+    },
+    {
+      "name": "binding_empty",
+      "value": "还没有保存任何内容。请先到资料库里添加。"
+    },
+    {
+      "name": "library_field_enabled",
+      "value": "启用"
+    },
+    {
+      "name": "library_field_constant",
+      "value": "始终"
+    },
+    {
+      "name": "library_new_character",
+      "value": "新建角色"
+    },
+    {
+      "name": "library_new_persona",
+      "value": "新建 Persona"
+    },
+    {
+      "name": "library_new_world_book",
+      "value": "新建世界书"
+    },
+    {
+      "name": "library_new_prompt",
+      "value": "新建提示词"
+    },
+    {
+      "name": "sheet_item_conversation_contents",
+      "value": "本会话"
     }
   ]
 }
