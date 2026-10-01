@@ -44,6 +44,32 @@ interface RuntimeTurnEventPayload {
 }
 
 /**
+ * Copies a caller-owned array into a plain one before it crosses into native.
+ *
+ * An array held in an ArkUI `@State` is a reactive proxy, not an `Array`.
+ * `Array.isArray()` still answers true for it, the generated declaration still
+ * types it as `Array<string>`, and the compiler accepts all of it — but napi
+ * reads the object's real length field, finds none, and refuses the whole
+ * payload with `Failed to get Array length`. Nothing local reports it: the call
+ * simply never lands, so a save looks like it did nothing.
+ *
+ * That is not a hypothetical. Creating a persona on a device failed exactly this
+ * way, and no compiler check, generated-declaration check or Rust unit test could
+ * see it, because every one of them was looking at a value that was well-typed.
+ *
+ * So every array a caller owns goes through here on the way in. An array built
+ * inside this file is already plain and needs nothing, but copying it is cheap
+ * and there is then no list of sites to keep correct.
+ */
+function plainArray<T>(values: T[]): T[] {
+  const copy: T[] = [];
+  for (let i = 0; i < values.length; i++) {
+    copy.push(values[i]);
+  }
+  return copy;
+}
+
+/**
  * Maps a runtime event kind onto the shared bridge kind.
  *
  * The runtime serializes its event kinds in snake_case, exactly as they are
@@ -247,7 +273,7 @@ function toPersonaDraft(value: PersonaRequestDto): PersonaDraft {
     name: value.name,
     description: value.description,
     userPrompt: value.userPrompt,
-    worldbookIds: value.worldbookIds
+    worldbookIds: plainArray(value.worldbookIds)
   } as PersonaDraft;
 }
 
@@ -257,7 +283,7 @@ function toNativePersonaDraft(value: PersonaDraft): PersonaRequestDto {
     name: value.name,
     description: value.description,
     userPrompt: value.userPrompt,
-    worldbookIds: value.worldbookIds
+    worldbookIds: plainArray(value.worldbookIds)
   } as PersonaRequestDto;
 }
 
@@ -266,7 +292,7 @@ function toWorldBookEntry(value: WorldBookEntryDto): WorldBookEntry {
     id: value.id,
     name: value.name,
     content: value.content,
-    keys: value.keys,
+    keys: plainArray(value.keys),
     enabled: value.enabled,
     constant: value.constant,
     position: value.position
@@ -289,7 +315,7 @@ function toNativeWorldBook(value: WorldBookDraft): WorldBookRequestDto {
       id: entry.id,
       name: entry.name,
       content: entry.content,
-      keys: entry.keys,
+      keys: plainArray(entry.keys),
       enabled: entry.enabled,
       constant: entry.constant,
       position: entry.position
@@ -348,11 +374,11 @@ function toNativeCharacter(value: CharacterDraft): CharacterRequestDto {
     personality: value.personality,
     scenario: value.scenario,
     firstMessage: value.firstMessage,
-    alternateGreetings: value.alternateGreetings,
+    alternateGreetings: plainArray(value.alternateGreetings),
     exampleDialogue: value.exampleDialogue,
     systemPrompt: value.systemPrompt,
     postHistoryInstructions: value.postHistoryInstructions,
-    worldbookIds: value.worldbookIds
+    worldbookIds: plainArray(value.worldbookIds)
   } as CharacterRequestDto;
 }
 
@@ -491,7 +517,11 @@ export class SujiuNativeBridge implements SujiuBridge {
         participants: participants,
         personaId: snapshot.personaId === null || snapshot.personaId === undefined
           ? undefined : snapshot.personaId,
-        worldbookIds: snapshot.worldbookIds,
+        // Copied on the way out as well as on the way in. This list ends up in
+        // observable controller state and is handed straight back when the user
+        // changes something else about the conversation, so it has to be a plain
+        // array by the time it goes back rather than whatever state made it.
+        worldbookIds: plainArray(snapshot.worldbookIds),
         promptProfileId: snapshot.promptProfileId === null || snapshot.promptProfileId === undefined
           ? undefined : snapshot.promptProfileId
       } as ConversationSnapshot);
@@ -665,11 +695,16 @@ export class SujiuNativeBridge implements SujiuBridge {
       for (let i = 0; i < participants.length; i++) {
         bound.push(toNativeParticipant(participants[i]));
       }
+      // `undefined` is not the same answer as an empty list here: the generated
+      // declaration reads a missing argument as "leave it alone", so it is
+      // passed through rather than copied into an empty array.
+      const copiedWorldbookIds: string[] | undefined =
+        worldbookIds === undefined ? undefined : plainArray(worldbookIds);
       // Declared as returning nothing and wrapped the same way `configureProvider`
       // is. Both write synchronously, and chaining a `.then` onto a value that is
       // not a promise reports failure for work that already succeeded.
       this.runtime.setConversationBindings(
-        sessionId, bound, personaId, worldbookIds, promptProfileId);
+        sessionId, bound, personaId, copiedWorldbookIds, promptProfileId);
       return Promise.resolve();
     } catch (error) {
       return Promise.reject(new Error(`set_conversation_bindings failed: ${(error as Error).message}`));

@@ -159,16 +159,16 @@ export struct ConversationContents {
               .fontColor(this.theme.textSecondary)
               .width('100%');
           } else {
-            ForEach(this.controller.characters, (character: CharacterSummary) => {
+            Repeat(this.controller.characters).each((wrapped: RepeatItem<CharacterSummary>) => {
               BindingRow({
                 theme: this.theme,
-                name: character.name,
-                bound: this.participantIds.includes(character.id),
+                name: wrapped.item.name,
+                bound: this.participantIds.includes(wrapped.item.id),
                 onToggle: () => {
-                  this.participantIds = this.toggle(this.participantIds, character.id);
+                  this.participantIds = this.toggle(this.participantIds, wrapped.item.id);
                 }
               });
-            }, (character: CharacterSummary) => character.id);
+            });
           }
 
           BindingSection({ theme: this.theme, label: $r('app.string.binding_persona') });
@@ -178,16 +178,16 @@ export struct ConversationContents {
               .fontColor(this.theme.textSecondary)
               .width('100%');
           } else {
-            ForEach(this.controller.personas, (persona: PersonaSummary) => {
+            Repeat(this.controller.personas).each((wrapped: RepeatItem<PersonaSummary>) => {
               BindingRow({
                 theme: this.theme,
-                name: persona.name,
-                bound: this.personaId === persona.id,
+                name: wrapped.item.name,
+                bound: this.personaId === wrapped.item.id,
                 onToggle: () => {
-                  this.personaId = this.chooseOne(this.personaId, persona.id);
+                  this.personaId = this.chooseOne(this.personaId, wrapped.item.id);
                 }
               });
-            }, (persona: PersonaSummary) => persona.id);
+            });
           }
 
           BindingSection({ theme: this.theme, label: $r('app.string.binding_world_books') });
@@ -197,17 +197,17 @@ export struct ConversationContents {
               .fontColor(this.theme.textSecondary)
               .width('100%');
           } else {
-            ForEach(this.controller.worldBooks, (book: WorldBookSummary) => {
+            Repeat(this.controller.worldBooks).each((wrapped: RepeatItem<WorldBookSummary>) => {
               BindingRow({
                 theme: this.theme,
-                name: book.name,
-                detail: $r('app.string.library_entry_count', book.entries.length),
-                bound: this.worldBookIds.includes(book.id),
+                name: wrapped.item.name,
+                detail: $r('app.string.library_entry_count', wrapped.item.entries.length),
+                bound: this.worldBookIds.includes(wrapped.item.id),
                 onToggle: () => {
-                  this.worldBookIds = this.toggle(this.worldBookIds, book.id);
+                  this.worldBookIds = this.toggle(this.worldBookIds, wrapped.item.id);
                 }
               });
-            }, (book: WorldBookSummary) => book.id);
+            });
           }
 
           BindingSection({ theme: this.theme, label: $r('app.string.binding_prompts') });
@@ -217,16 +217,16 @@ export struct ConversationContents {
               .fontColor(this.theme.textSecondary)
               .width('100%');
           } else {
-            ForEach(this.controller.promptProfiles, (profile: PromptProfileSummary) => {
+            Repeat(this.controller.promptProfiles).each((wrapped: RepeatItem<PromptProfileSummary>) => {
               BindingRow({
                 theme: this.theme,
-                name: profile.name,
-                bound: this.promptProfileId === profile.id,
+                name: wrapped.item.name,
+                bound: this.promptProfileId === wrapped.item.id,
                 onToggle: () => {
-                  this.promptProfileId = this.chooseOne(this.promptProfileId, profile.id);
+                  this.promptProfileId = this.chooseOne(this.promptProfileId, wrapped.item.id);
                 }
               });
-            }, (profile: PromptProfileSummary) => profile.id);
+            });
           }
         }
         .width('100%')

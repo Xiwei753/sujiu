@@ -278,16 +278,16 @@ export struct CharacterLibrary {
         }
 
         List({ space: 10 }) {
-          ForEach(this.controller.characters, (character: CharacterSummary) => {
+          Repeat(this.controller.characters).each((wrapped: RepeatItem<CharacterSummary>) => {
             ListItem() {
               ResourceRow({
                 theme: this.theme,
-                name: character.name,
-                detail: character.description,
-                onOpen: () => this.onOpenCharacter(character.id)
+                name: wrapped.item.name,
+                detail: wrapped.item.description,
+                onOpen: () => this.onOpenCharacter(wrapped.item.id)
               });
             }
-          }, (character: CharacterSummary) => character.id);
+          });
         }
         .width('100%')
         .layoutWeight(1);
@@ -333,16 +333,16 @@ export struct PersonaLibrary {
         }
 
         List({ space: 10 }) {
-          ForEach(this.controller.personas, (persona: PersonaSummary) => {
+          Repeat(this.controller.personas).each((wrapped: RepeatItem<PersonaSummary>) => {
             ListItem() {
               ResourceRow({
                 theme: this.theme,
-                name: persona.name,
-                detail: persona.description,
-                onOpen: () => this.onOpenPersona(persona.id)
+                name: wrapped.item.name,
+                detail: wrapped.item.description,
+                onOpen: () => this.onOpenPersona(wrapped.item.id)
               });
             }
-          }, (persona: PersonaSummary) => persona.id);
+          });
         }
         .width('100%')
         .layoutWeight(1);
@@ -388,16 +388,16 @@ export struct WorldBookLibrary {
         }
 
         List({ space: 10 }) {
-          ForEach(this.controller.worldBooks, (book: WorldBookSummary) => {
+          Repeat(this.controller.worldBooks).each((wrapped: RepeatItem<WorldBookSummary>) => {
             ListItem() {
               ResourceRow({
                 theme: this.theme,
-                name: book.name,
-                detail: $r('app.string.library_entry_count', book.entries.length),
-                onOpen: () => this.onOpenWorldBook(book.id)
+                name: wrapped.item.name,
+                detail: $r('app.string.library_entry_count', wrapped.item.entries.length),
+                onOpen: () => this.onOpenWorldBook(wrapped.item.id)
               });
             }
-          }, (book: WorldBookSummary) => book.id);
+          });
         }
         .width('100%')
         .layoutWeight(1);
@@ -443,15 +443,15 @@ export struct PromptLibrary {
         }
 
         List({ space: 10 }) {
-          ForEach(this.controller.promptProfiles, (profile: PromptProfileSummary) => {
+          Repeat(this.controller.promptProfiles).each((wrapped: RepeatItem<PromptProfileSummary>) => {
             ListItem() {
               ResourceRow({
                 theme: this.theme,
-                name: profile.name,
-                onOpen: () => this.onOpenProfile(profile.id)
+                name: wrapped.item.name,
+                onOpen: () => this.onOpenProfile(wrapped.item.id)
               });
             }
-          }, (profile: PromptProfileSummary) => profile.id);
+          });
         }
         .width('100%')
         .layoutWeight(1);
