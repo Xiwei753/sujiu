@@ -829,13 +829,20 @@ fn the_second_round_names_the_handle_and_sends_only_the_tool_result() {
     drop(mock.server);
 }
 
-/// The other direction of the same claim: a handle recorded against the whole
-/// transcript is still usable by the *next* user turn, as long as the prompt has
-/// not moved. This is what native continuation is for, and it only happens if the
-/// coverage was measured from the real request rather than from the handle it
-/// continued from.
+/// Where a handle stops working, which is at the end of the turn that produced it.
+///
+/// The bug this guards against was always inside one turn: the second round of a
+/// tool turn re-sending what the first round had already sent. That is fixed, and
+/// the fix is visible in the test above. Carrying the handle into the *next* user
+/// turn buys something much smaller — a smaller request body, not a smaller bill,
+/// because a chained prefix is still billed as input — and it buys that at the
+/// price of a session that cannot be reopened after the endpoint forgets the
+/// response. A handle is a claim that something still exists on the other side.
+///
+/// The transcript is sent whole, which is also the only answer that cannot be
+/// wrong about what the endpoint has.
 #[test]
-fn a_second_user_turn_reuses_the_handle_instead_of_resending_the_transcript() {
+fn a_new_user_turn_starts_from_the_transcript_rather_than_the_last_handle() {
     let mock = Mock::start(vec![SEARCH, ANSWER, ANSWER]);
     let runtime = runtime_for(&mock.base_url(), "mock-model");
     let session = runtime.create_session(Some("character-lin"));
@@ -845,26 +852,34 @@ fn a_second_user_turn_reuses_the_handle_instead_of_resending_the_transcript() {
     let _ = mock.next_request();
 
     // Nothing about the prompt moved: same world-book hits, same persona, same
-    // profile, so the prefix the first turn recorded is still the prefix.
+    // profile. A prefix digest would still match, so this is the case where
+    // cross-turn chaining would look safe and be relied on.
     run_turn(&runtime, &session, "So who is on the other end?");
-    let second = mock.next_request();
+    let next = mock.next_request();
 
-    assert_eq!(
-        second.body["previous_response_id"].as_str(),
-        Some("resp-2"),
-        "the handle has to name the response the endpoint actually holds: {:?}",
-        second.body
+    assert!(
+        next.body.get("previous_response_id").is_none(),
+        "a handle does not outlive the turn that produced it: {:?}",
+        next.body
     );
-    let sent = items(&second);
-    assert_eq!(
-        sent.len(),
-        1,
-        "a turn that only appends must not re-send what came before: {sent:?}"
+
+    let sent = items(&next);
+    assert_every_call_is_answered(&sent, "a new user turn");
+    assert!(
+        contains(&sent, "Why is the console light blinking?"),
+        "the conversation goes out again, because the endpoint's copy cannot be \
+         assumed to still exist: {sent:?}"
     );
+    assert!(
+        contains(&sent, "So who is on the other end?"),
+        "and the new message is the only thing this turn adds: {sent:?}"
+    );
+    // The call the first turn made is the proof that the whole transcript
+    // travelled: the endpoint needs it to make sense of the result beside it.
     assert_eq!(
-        text_items(&sent),
-        vec!["So who is on the other end?".to_string()],
-        "the only new thing is the user's message: {sent:?}"
+        call_ids(&sent),
+        vec!["call-1".to_string()],
+        "the earlier call and its result are part of what is sent: {sent:?}"
     );
 
     drop(runtime);

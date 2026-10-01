@@ -893,6 +893,17 @@ impl Transcript {
     /// The search stops at the first event a provider ever gave, whatever that
     /// event was. A handle it replaced is superseded, and a handle it cleared
     /// is dead, so neither is a reason to keep looking for an older one.
+    ///
+    /// ## Not on the live path today
+    ///
+    /// This answers "may this state be sent to that identity", which is a
+    /// necessary condition for cross-turn chaining and not a sufficient one: a
+    /// handle also has to still exist at the endpoint. `SujiuRuntime` therefore
+    /// does not call this when a user turn starts — a handle stored by an
+    /// earlier turn is kept for the record and the transcript is sent whole.
+    /// Reusing it across turns is a deliberate future change, not an oversight,
+    /// and it needs an expiry story (a provider rejection recognised as an
+    /// expired handle, and one retry without it) before it is worth having.
     pub fn continuation_for(
         &self,
         identity: &crate::model::ProviderIdentity,

@@ -36,10 +36,18 @@ use serde::{Deserialize, Serialize};
 pub enum Protocol {
     /// The OpenAI Responses API, with its own continuation and item model.
     ///
-    /// This is the default because a missing protocol on stored state means
-    /// "we do not know where this came from", and an identity we cannot place
-    /// must never be treated as matching a live one. Keeping the default out of
-    /// the priority list is what makes that true.
+    /// The `#[default]` here is only a **deserialization** fallback, for a
+    /// document written before the field existed. It says nothing about which
+    /// protocol to use, and it must never be read as an answer to that: this is
+    /// `PRIORITY[0]`, so defaulting to it and defaulting to "ask the endpoint"
+    /// would look the same on the wire while being different decisions.
+    ///
+    /// Anything that needs to know the protocol must negotiate it first and build
+    /// the identity from the result. A missing protocol on stored state is "we do
+    /// not know where this came from", and an identity we cannot place must not be
+    /// treated as matching a live one — which is a reason to *stop*, not a reason
+    /// to substitute a value. See [`crate::Transcript::continuation_event`] for
+    /// how the live path asks the identity-free question instead.
     #[default]
     OpenAiResponses,
     /// OpenAI-compatible Chat Completions. The common denominator.

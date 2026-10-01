@@ -827,6 +827,18 @@ The differences are concrete:
 
 A native handle does not replace the transcript. It lets a request skip the part the endpoint already holds. The transcript stays the portable base, and it is fully re-sent whenever the endpoint, protocol or model changes. A handle from a different identity, or a Chat Completions completion id — which is a label, not a handle — is never accepted as one.
 
+#### A handle is used inside one turn, and stops at the turn boundary
+
+The scope of a `previous_response_id` is **one user turn's tool loop**. Round one sends the conversation; every round after it names the handle from the previous round and sends only what the endpoint has not seen, which is what the double-billing bug was. At the start of the next user turn, no handle is sent, even when the recorded prefix still matches the prompt.
+
+That boundary is not an oversight and it is not only about the prefix. A response id names something that exists on the other side of the network, and it expires: OpenAI retains Responses state for about thirty days by default, and a third-party compatible endpoint may keep it for less. A stored handle is therefore a claim about the past that a fresh user turn has no way to check — and an agent loop treats any provider error as the end of the turn, so a session opened after the expiry would fail its first new message even though the local transcript is intact and the prefix is unchanged.
+
+What cross-turn chaining would buy is a smaller request body. What it costs is a session that can stop being reopenable. Those are not close, and the transcript is sent whole instead.
+
+The handle is still **persisted** on the step. It is a record of what the provider gave and what it accounted for, which is worth keeping for diagnostics; it is simply not something a later turn sends. `Transcript::continuation_for` — which answers "may this state be replayed to that identity", a necessary but not sufficient condition — is kept for exactly that record and is not on the live path.
+
+Reusing a handle across user turns again would be a deliberate change, and it would have to bring an expiry story with it: recognise the rejection that means "that response is gone", clear the handle, and retry once without it. Classifying an error by its text is the kind of guessing this architecture avoids elsewhere, which is why it is not here yet.
+
 #### What a handle records, and when it is believed
 
 A handle replaces a prefix, so it has to say which prefix. `ContinuationCoverage { sent, digest, assistant_messages, wire_items }` is that answer, and the interesting part is which unit it counts in.
@@ -844,6 +856,16 @@ That proof is also what makes cross-turn reuse safe without a second lineage mec
 `previous_response_id` is therefore set exactly when `covered > 0`, not whenever a handle exists. Splicing an endpoint's older, differently-shaped prompt onto a request that already re-sent everything would produce a conversation the user never had, and bill for it.
 
 A coverage record from before the digest existed is read and **not believed**: the bare count has nothing to check against, and a count that cannot prove anything shortens nothing. Old documents lose a capability they cannot honestly claim, which is the same rule the reasoning sidecar and an unreadable document follow.
+
+The digest covers the request prefix only. The assistant messages the response itself produced are skipped by the `assistant_messages` count rather than by a digest, because they were not in the request when it was built. That is safe today — history is append-only and nothing edits a turn — and it is the constraint a future editing or regeneration feature inherits: **any mutation of stored history has to invalidate continuation**, or a handle will be considered valid against a transcript it no longer describes. Either the lineage fingerprint grows to cover what the response produced, or the mutation refuses to happen while a handle is live.
+
+#### What continuation saves, and what it does not
+
+It is tempting to read a handle as free history. It is not. Input tokens earlier in a chain are still billed as input tokens: `previous_response_id` makes the endpoint *reuse* a prefix, not make it *free*.
+
+What it avoids is the prefix being carried twice — once inside the server's chain and once stuffed into this round's input. That is double context, and double context is both a bill and a context window spent on nothing. On a request where the client would otherwise have re-sent the whole transcript, naming the handle is the difference between one copy of that history and two.
+
+So whether chaining or caching actually saved anything is read from the usage ledger — `input_tokens` and `cached_input_tokens`, as the provider reported them — and never from counting items in an HTTP body. A body is what was sent; the ledger is what was charged, and only the second one is the number anyone is paying.
 
 ### The stored layout is rooted at the conversation
 

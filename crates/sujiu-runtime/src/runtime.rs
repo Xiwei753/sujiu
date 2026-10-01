@@ -25,7 +25,7 @@ use sujiu_ai::{
 };
 use sujiu_core::{
     apply_reasoning_override, input_size_chars, Character, ChatRole, CompactionInput,
-    CompactionPolicy, ContextKind, ContextRecord, ContextSource, ContinuationUpdate, Conversation,
+    CompactionPolicy, ContextKind, ContextRecord, ContextSource, Conversation,
     EndpointCapabilities, EndpointConfig, Library, ModelListing, Participant, ParticipantRole,
     PromptCompiler, Protocol, ProviderIdentity, Transcript, DEFAULT_APP_SYSTEM_PROMPT,
 };
@@ -1647,7 +1647,30 @@ impl SujiuRuntime {
         // Negotiation decides which protocol this turn speaks, so the provider
         // state that may be replayed is decided with it rather than before.
         let provider = self.build_provider(&prepared).await?;
-        let mut continuation = provider.continuation.clone();
+
+        // A turn begins without provider state, deliberately.
+        //
+        // A continuation handle names a response the endpoint is still holding,
+        // and that is a claim about the past rather than about the conversation:
+        // handles expire (OpenAI keeps them about a month by default, and a
+        // third-party gateway may keep them far less), and an expired handle is
+        // rejected as an error rather than ignored. So a handle stored by an
+        // earlier user turn is kept in the transcript, where it is auditable,
+        // and is not sent as `previous_response_id` when the next user turn
+        // starts. The transcript is sent whole instead.
+        //
+        // This costs request size, not correctness, and little money. Chained
+        // input is still billed as input — the endpoint charges for the earlier
+        // tokens whether it read them from the chain or from this request — so
+        // what chaining across turns saves is the body we upload, not the tokens
+        // we pay for. What it would save in exchange is the case above, where an
+        // old session can no longer be continued at all.
+        //
+        // Inside the turn the handle is used, and that is where the money was
+        // being double-spent: every tool round after the first was re-sending the
+        // prefix the endpoint already held. Rounds within one turn are seconds
+        // apart, so the expiry that matters never applies to them.
+        let mut continuation: Option<ProviderContinuation> = None;
 
         // Compaction is decided here, in the kernel, before anything is sent.
         //
@@ -1806,26 +1829,6 @@ impl SujiuRuntime {
             &request.user_text,
         ));
 
-        // The last provider state this transcript produced, regardless of which
-        // provider produced it.
-        //
-        // It is fetched here, *before* negotiation, but it is not filtered
-        // here: an identity cannot be built until the endpoint has said which
-        // protocol it speaks, and building one with a placeholder protocol made
-        // "unknown" mean "Responses" — so a Chat Completions handle could be
-        // matched by an identity no provider ever had. `build_provider` decides
-        // whether this state is reusable once the real identity exists.
-        let stored_continuation = conversation
-            .transcript
-            .continuation_event()
-            .and_then(|event| match event {
-                ContinuationUpdate::Replace(continuation) => Some(continuation.clone()),
-                // A provider that cleared its handle, or had no opinion, means
-                // there is nothing to carry — the same answer the previous
-                // lookup gave, just without asking a made-up identity first.
-                ContinuationUpdate::Clear | ContinuationUpdate::Unchanged => None,
-            });
-
         Ok(PreparedTurn {
             messages: plan.model_messages(),
             // One participant, one obvious voice. Zero or several is not a
@@ -1835,7 +1838,6 @@ impl SujiuRuntime {
             speaker: conversation
                 .sole_participant()
                 .map(|participant| participant.character_id.clone()),
-            stored_continuation,
             config,
             api_key,
         })
@@ -1915,15 +1917,6 @@ impl SujiuRuntime {
             model: config.selected_model.clone().unwrap_or_default(),
         };
 
-        // Only now can stored state be judged. A handle recorded for another
-        // protocol, endpoint or model stays in the transcript and is simply not
-        // replayed; the adapter rebuilds the request from the normalized
-        // transcript instead.
-        let continuation = prepared
-            .stored_continuation
-            .clone()
-            .filter(|continuation| continuation.is_reusable_for(&identity));
-
         // The protocol the request will actually use, named before the request
         // exists.
         //
@@ -1996,7 +1989,6 @@ impl SujiuRuntime {
                     ),
                     capabilities,
                 })),
-                continuation,
                 protocol,
                 model: model.clone(),
             });
@@ -2061,7 +2053,6 @@ impl SujiuRuntime {
 
         Ok(TurnProvider {
             provider: Box::new(provider),
-            continuation,
             protocol,
             model,
         })
@@ -2323,12 +2314,6 @@ struct TurnFailure(String);
 /// disagree with the one the adapter actually uses.
 struct TurnProvider {
     provider: Box<dyn sujiu_ai::AiProvider>,
-    /// Stored provider state that survived the identity check, if any.
-    ///
-    /// Carried beside the provider rather than decided before it, because
-    /// whether state is replayable depends on the protocol the endpoint turned
-    /// out to speak.
-    continuation: Option<ProviderContinuation>,
     /// The wire protocol this turn spoke, and the model it named.
     ///
     /// Kept beside the provider because a `Box<dyn AiProvider>` cannot be asked
@@ -2346,9 +2331,6 @@ struct PreparedTurn {
     /// The participant this turn's steps speak for, when the conversation has
     /// exactly one and the attribution needs no policy to make.
     speaker: Option<String>,
-    /// The last provider state the transcript produced, before any judgement
-    /// about whether it may be replayed.
-    stored_continuation: Option<ProviderContinuation>,
     config: EndpointConfig,
     api_key: String,
 }

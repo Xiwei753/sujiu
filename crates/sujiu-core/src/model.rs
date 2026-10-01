@@ -595,6 +595,22 @@ pub const SENT_MESSAGES_KEY: &str = "sentMessages";
 ///   the request was built, and they are not re-sent, so they have to be counted
 ///   separately. A tool result is deliberately not counted: the endpoint has
 ///   never seen it, which is why the next round sends exactly the tool results.
+///
+/// ## What this does not cover, and who has to remember
+///
+/// The digest covers the **request** prefix only. `assistant_messages` is a count
+/// and not a fingerprint, so the assistant messages the response itself produced
+/// are skipped on the strength of their number rather than proved against
+/// anything. Nothing can tell a stale count from a correct one today, because
+/// history is append-only and no code path rewrites a turn that was already sent.
+///
+/// That is the constraint an editing or regeneration feature inherits. A mutation
+/// of stored history has to invalidate continuation, or a handle stays "proven"
+/// against a transcript it no longer describes. Either the lineage grows to
+/// fingerprint what the response produced as well, or the mutation is refused
+/// while a handle is live. Whichever is chosen, it is not the default: silently
+/// keeping a valid-looking handle across a rewrite is how a model ends up
+/// answering a conversation that was never sent to it.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ContinuationCoverage {
