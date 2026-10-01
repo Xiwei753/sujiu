@@ -209,6 +209,18 @@ A second compaction must **not** silently overwrite the first summary. The summa
 
 Compaction also has to leave **what the model can see** and **what the world book can trigger on** in agreement. The summary is put into the model's history, so if `Transcript::scan_text()` ignored it, a long conversation would silently change its lore semantics the moment it was compacted: the model would read "Black Tower" in the summary while no world-book entry could match it. `scan_text` therefore includes the compacted summary. The archived raw turns are still not scanned, because they genuinely left the prompt and are reached through the context protocol instead.
 
+Compaction moves turns out of the **prompt** and out of nothing else. `ui_messages()` projects the archived turns too, oldest first, because a kernel that compacts on its own would otherwise shorten a user's scrollback every time the budget ran out — the conversation would visibly lose its own history in the middle of a session. The projection is what a screen reads; `compacted` is what the prompt stopped reading.
+
+#### Who decides
+
+The kernel decides, and a platform may only change the numbers. `CompactionPolicy { max_input_chars, keep_recent_turns }` is the whole of that surface, it defaults to something bounded, and `SujiuRuntime::set_compaction_policy` changes the size rather than moving the decision. A platform that starts compaction on its own schedule, with its own threshold and its own notion of which messages matter, has reintroduced exactly the per-platform conversation semantics this architecture exists to keep in one place.
+
+The budget is in **characters**, because the kernel cannot know the endpoint's tokenizer. It is a trigger, not an accounting: the provider's own reported input tokens are the real number, and they are recorded separately as the turn's usage. A char budget that guessed well for one model and badly for another would be worse than one that is honestly an estimate.
+
+The decision is made **before** the turn, on a turn boundary, and the summarizer is a real request: the same provider, no tools, no continuation handle. The last part matters. Continuing a summarization from the transcript it is being asked to fold up would splice two different conversations together, and the summarizer has no tool to wander off with because it has no tools at all.
+
+A summary that fails is not applied. The turn carries on with the transcript it has, and the failure is recorded as a `compaction_failed` diagnostic. Archiving turns behind a summary that is not there would move them out of reach while still charging for the request that never produced anything.
+
 ### One assistant message, whatever it carries
 
 A step's visible text, its speaker, its provider sidecar and its tool calls are four properties of **one** assistant message, so the model layer has one shape for it: `ModelMessage::Assistant { content, speaker, reasoning, calls }`.
@@ -489,6 +501,18 @@ Deferred discovery has a prompt-cache cost worth stating plainly: when a search 
 
 Usage is parsed from the stream (`stream_options.include_usage`), so cache behaviour is measurable rather than guesswork. Adapters must not require continuation state on the request: a wire format without a slot for it simply never receives it.
 
+#### What a turn cost
+
+A turn with tools is several requests, and the number charged is the sum over them. `Turn::usage()` returns `TurnUsage` — rounds, tool rounds, input, cached input, cache writes, output — and every step's reported usage is absorbed into it. Reading only the last step reports the cheap round, which is the same failure as the double-billed prefix run backwards: the request looks cheaper than it was, so nothing looks wrong.
+
+`None` means **not reported**, not zero. A provider that reports no cache writes has told us nothing about cache writes, and collapsing that into `0` would make a real cache bill look like a free one. `rounds_reported` alongside `rounds` is what distinguishes a complete ledger from a partial one.
+
+It is provider-neutral because the adapters have already normalised the spellings: `input_tokens` and `prompt_tokens`, `cached_tokens` nested under either `input_tokens_details` or `prompt_tokens_details`, `cache_creation_input_tokens`. The numbers are recorded exactly as the provider accounted for them.
+
+The kernel computes **no price and no currency**. Not because it is inconvenient, but because a price in the kernel is a price that goes stale, and a wrong one is worse than none: it would be acted on. Pricing belongs to whoever is paying the bill.
+
+`SujiuRuntime` writes each turn's ledger as a `turn_usage` diagnostic carrying the endpoint, the protocol, the model and the numbers, and it writes it for cancelled and failed turns too — those rounds were sent, and they were billed. A compaction summary is a request as well, and its usage is recorded with the compaction entry, because it is the largest hidden spend in a long session.
+
 Current concrete transports:
 
 - OpenAI Responses
@@ -541,6 +565,32 @@ Anthropic Messages
 Responses comes first because it carries continuation, reasoning and tool state natively, so degrading to Chat Completions and bolting a sidecar on is a downgrade in both fidelity and cache behaviour. Chat Completions is the common denominator: a great many gateways speak it and little else. Anthropic Messages is last because very few services offer it without also offering an OpenAI-compatible interface.
 
 The selected protocol decides the adapter. The adapter decides the wire form. Nothing above the provider layer names a field.
+
+#### A protocol you cannot send is not a protocol you offer
+
+The priority list is what gets **probed**. What gets offered is `IMPLEMENTED_PROTOCOLS`, and the two are not the same thing. Anthropic Messages is probed for real — the request shape, the credential header and the version header all work — and there is no adapter behind it, so it is not in `IMPLEMENTED_PROTOCOLS` and `SujiuRuntime::supported_protocols()` does not advertise it.
+
+Listing a protocol that has no adapter is worse than not probing it. Negotiation selects from what the endpoint supports, so an Anthropic-only endpoint would be handed `AnthropicMessages`, and the runtime's adapter choice — Responses, else Chat — would send it to a Chat Completions route the service does not serve. The user is told the endpoint speaks something it cannot speak, and the failure arrives as a rejected request rather than as an honest "this build cannot talk to that endpoint yet".
+
+So negotiation reports it as what it is: the endpoint speaks a protocol this build has no adapter for. Probing it stays worthwhile, because that sentence is only reachable if the endpoint was asked. Adding the protocol back means adding the adapter in the same change.
+
+`build_provider` matches the negotiated protocol explicitly and turns anything else into that failure. It is deliberately not an `else`, because a silent fall-through is how a negotiated Anthropic conversation ends up spoken in a dialect the endpoint never agreed to.
+
+### The identity is built after the protocol is known
+
+```text
+EndpointConfig
+  -> negotiate the protocol
+  -> ProviderIdentity { protocol, endpoint_id, base_url, model }
+  -> match stored continuation state against that identity
+  -> build the adapter
+```
+
+The order is the point. `ProviderIdentity` is what stored continuation state is matched against, so building it before negotiation means asking "is this state mine?" with a protocol nobody has established yet. There is no honest answer available at that moment, and the tempting fill-in — `Protocol::default()`, which is `OpenAiResponses` — turns "unknown" into a specific claim. A Responses handle would then be found for an endpoint that turned out to speak Chat Completions, and replayed as a `previous_response_id`.
+
+`Transcript::continuation_event()` therefore takes no identity. It answers the question that can be answered without one — *what was the last thing any provider said about continuation* — and the identity filter is applied afterwards, against the protocol that was actually negotiated. A stored `Clear` still stops the walk, still regardless of protocol: a cleared handle is dead for everyone.
+
+This is also why a protocol downgrade cannot resurrect Responses state. The identity filter runs after the protocol changed, so the match fails and the transcript is sent whole, which is what the endpoint has actually seen.
 
 ### A failed probe is not a missing protocol
 
@@ -775,7 +825,25 @@ The differences are concrete:
 - continuation is a real server-side handle: the completed response id is stored as a chainable `ProviderContinuation` and sent back as `previous_response_id`
 - reasoning is an output item the endpoint already holds, so it is deliberately **not** re-sent. Re-sending it as text would mean inventing a field the protocol does not have
 
-A native handle does not replace the transcript. It lets a request skip the part the endpoint already holds, so the handle records how many messages it covers and only that many are dropped from the next request. The transcript stays the portable base, and it is fully re-sent whenever the endpoint, protocol or model changes. A handle from a different identity, or a Chat Completions completion id — which is a label, not a handle — is never accepted as one.
+A native handle does not replace the transcript. It lets a request skip the part the endpoint already holds. The transcript stays the portable base, and it is fully re-sent whenever the endpoint, protocol or model changes. A handle from a different identity, or a Chat Completions completion id — which is a label, not a handle — is never accepted as one.
+
+#### What a handle records, and when it is believed
+
+A handle replaces a prefix, so it has to say which prefix. `ContinuationCoverage { sent, digest, assistant_messages, wire_items }` is that answer, and the interesting part is which unit it counts in.
+
+It counts **provider-neutral messages**, not wire items. One message becomes several items — an assistant message that spoke and called tools is a `message` plus a `function_call` each — and the response adds its own output items on top. A single `usize` cannot keep meaning both, because the two counts drift apart permanently and a reader that picked the wrong one would skip the wrong number of messages. `wire_items` is recorded as an audit number and is never used to skip anything.
+
+`sent` is measured over **this** request, not inherited from the handle this request continued from. The endpoint holds everything that was sent to produce the response, so that is what the new handle covers; carrying the old count forward is how a stale prefix gets re-sent and billed twice.
+
+`assistant_messages` exists because the response's own output is in the endpoint's copy and did not exist when the request was built. Tool results are deliberately **not** counted: the endpoint has never seen them.
+
+Believing the handle is a separate question from recording it. `proven_covers()` re-digests the covered prefix of the messages actually being sent and only shortens the request when the digest matches and the count still fits. `message_prefix_digest` is a non-cryptographic FNV-1a over the serialized messages, chosen because this needs a change detector and not a security primitive.
+
+That proof is also what makes cross-turn reuse safe without a second lineage mechanism. A world-book entry matching for the first time, a changed persona, a changed PromptProfile, a different near-history window — each of those changes the prefix, the digest stops matching, and the whole transcript goes out again with no handle named. The rule is not "reuse across turns" or "never reuse across turns": it is **name the handle only when the endpoint's copy is still a prefix of what we are sending**, which is the same condition that authorizes skipping.
+
+`previous_response_id` is therefore set exactly when `covered > 0`, not whenever a handle exists. Splicing an endpoint's older, differently-shaped prompt onto a request that already re-sent everything would produce a conversation the user never had, and bill for it.
+
+A coverage record from before the digest existed is read and **not believed**: the bare count has nothing to check against, and a count that cannot prove anything shortens nothing. Old documents lose a capability they cannot honestly claim, which is the same rule the reasoning sidecar and an unreadable document follow.
 
 ### The stored layout is rooted at the conversation
 

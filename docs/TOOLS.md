@@ -204,12 +204,15 @@ Older material can be represented by:
 - `story_event` scene summaries for compact narrative continuity
 - `character_memory` records for durable facts and relationships
 
-This lets Sujiu eventually compact long conversations without losing the ability to
+This lets Sujiu compact long conversations without losing the ability to
 retrieve an exact old event.
 
 `Transcript::compact` moves the oldest turns into a `CompactedTurns` record and
 replaces them with a summary, so the exact turns stay retrievable through the
-context protocol after they leave the prompt.
+context protocol after they leave the prompt. Compaction happens in the runtime,
+on its own budget, before a turn is sent — the model-visible tool set does not
+change when a conversation gets long, because nothing about what the model may
+do changes with its age.
 
 ## A turn is many steps, not one message
 
@@ -272,6 +275,11 @@ it.
 A compaction summary is part of the world-book keyword scan. The model reads it,
 so the scan has to see it too — otherwise compacting a long conversation would
 quietly stop triggering the lore it used to trigger.
+
+A summary that could not be written is not applied. Compaction moves turns out of
+the prompt, so archiving them behind a summary that does not exist would move them
+out of reach while still charging for the failed summarization. The turn continues
+with the transcript it has, and the failure is reported.
 
 State a provider produced and has to be carried forward — a tool call and its
 result, a continuation handle or the fact that the provider dropped it, a
