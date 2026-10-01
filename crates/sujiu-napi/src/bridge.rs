@@ -10,13 +10,17 @@
 
 use std::sync::Arc;
 
-use napi::bindgen_prelude::{AsyncTask, Result, Task};
+use napi::bindgen_prelude::{AsyncTask, Error, Result, Task};
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 use sujiu_ai::DiagnosticEntry;
 use sujiu_core::EndpointConfig;
-use sujiu_core::ParticipantRole;
+use sujiu_core::{ParticipantRole, WorldBookPosition};
 use sujiu_ffi::events::{TurnEvent, TurnEventReporter};
+use sujiu_ffi::library::{
+    CharacterRequest, PersonaRequest, PersonaSummary, PromptProfileRequest, PromptProfileSummary,
+    WorldBookEntryRequest, WorldBookRequest, WorldBookSummary,
+};
 use sujiu_ffi::runtime::{
     CharacterSummary, ContextSourceSummary, ConversationSnapshot, CreateConversationRequest,
     EndpointExploration, ModelDiscovery, ModelSummary, ParticipantRequest, ParticipantSummary,
@@ -246,6 +250,124 @@ pub struct ConversationSnapshotDto {
     pub messages: Vec<MessageDto>,
 }
 
+/// One stored persona, as a list row.
+///
+/// A persona is an entity a user owns, not a field of a character card, which is
+/// why it has its own list here. Nothing in this shape implies that anything is
+/// bound to anything: which persona a chat uses is that conversation's answer,
+/// and it is asked separately.
+#[napi(object)]
+pub struct PersonaDto {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// How many world books this persona brings of its own.
+    pub worldbook_count: u32,
+}
+
+/// A persona to store.
+///
+/// `id` is absent or blank to create one. A present id that names nothing is
+/// refused rather than treated as a create: a screen that lost the persona it was
+/// editing would otherwise be told it saved, and would have saved a duplicate
+/// under the same name.
+#[napi(object)]
+pub struct PersonaRequestDto {
+    pub id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub user_prompt: String,
+    pub worldbook_ids: Vec<String>,
+}
+
+/// One world-book entry, as an editor sees it.
+#[napi(object)]
+pub struct WorldBookEntryDto {
+    pub id: String,
+    pub name: String,
+    /// The entry's text, unshortened.
+    ///
+    /// This is lore the model reads, so a preview here would be a truncation
+    /// rule baked into the bridge, and choosing what counts as the interesting
+    /// sentence of a piece of lore is not this layer's decision to make.
+    pub content: String,
+    pub keys: Vec<String>,
+    pub enabled: bool,
+    pub constant: bool,
+    /// `before_character`, `after_character` or `near_history`.
+    pub position: String,
+}
+
+/// One world book, with its entries.
+#[napi(object)]
+pub struct WorldBookDto {
+    pub id: String,
+    pub name: String,
+    pub entries: Vec<WorldBookEntryDto>,
+}
+
+/// A world-book entry to store.
+#[napi(object)]
+pub struct WorldBookEntryRequestDto {
+    pub id: Option<String>,
+    pub name: String,
+    pub content: String,
+    pub keys: Vec<String>,
+    /// Absent means the runtime's default, which is enabled: an entry the user
+    /// just wrote and cannot see is worse than one that works.
+    pub enabled: Option<bool>,
+    pub constant: Option<bool>,
+    pub position: Option<String>,
+}
+
+/// A world book to store. Same id rule as [`PersonaRequestDto`].
+#[napi(object)]
+pub struct WorldBookRequestDto {
+    pub id: Option<String>,
+    pub name: String,
+    pub entries: Vec<WorldBookEntryRequestDto>,
+}
+
+/// One prompt profile, as a list row.
+///
+/// Only the name. The four prompt bodies are what the profile *says*, and a row
+/// carrying all of them would be a wall of text rather than a row.
+#[napi(object)]
+pub struct PromptProfileDto {
+    pub id: String,
+    pub name: String,
+}
+
+/// A prompt profile to store. Same id rule as [`PersonaRequestDto`].
+///
+/// The named fields are the whole of what a basic editor can change, and the
+/// runtime keeps the profile's fixed segments when this is saved.
+#[napi(object)]
+pub struct PromptProfileRequestDto {
+    pub id: Option<String>,
+    pub name: String,
+    pub system_prompt: String,
+    pub user_prompt: String,
+    pub post_history_instructions: String,
+    pub format_rules: String,
+}
+
+/// A character to store. Same id rule as [`PersonaRequestDto`].
+#[napi(object)]
+pub struct CharacterRequestDto {
+    pub id: Option<String>,
+    pub name: String,
+    pub description: String,
+    pub personality: String,
+    pub scenario: String,
+    pub first_message: String,
+    pub alternate_greetings: Vec<String>,
+    pub example_dialogue: String,
+    pub system_prompt: String,
+    pub post_history_instructions: String,
+    pub worldbook_ids: Vec<String>,
+}
+
 #[napi(object)]
 pub struct ProviderConfigDto {
     pub id: String,
@@ -294,6 +416,21 @@ fn participant_role(label: &str) -> ParticipantRole {
     match label {
         "narrator" | "gm" | "gameMaster" | "game_master" => ParticipantRole::Narrator,
         _ => ParticipantRole::Character,
+    }
+}
+
+/// Reads a world-book position a screen sent.
+///
+/// An unrecognised or absent label means `after_character`, the domain default.
+/// Guessing one of the other two would be worse: a position that is wrong
+/// silently reorders part of the prompt block the provider is meant to cache, and
+/// a screen that cannot express a position can still express "where it normally
+/// goes".
+fn world_book_position(label: &str) -> WorldBookPosition {
+    match label {
+        "before_character" | "beforeCharacter" => WorldBookPosition::BeforeCharacter,
+        "near_history" | "nearHistory" => WorldBookPosition::NearHistory,
+        _ => WorldBookPosition::AfterCharacter,
     }
 }
 
@@ -449,6 +586,183 @@ impl TurnRequestDto {
             provider: self.provider.map(|provider| provider.to_domain()),
             api_key: self.api_key,
         }
+    }
+}
+
+impl From<PersonaSummary> for PersonaDto {
+    fn from(value: PersonaSummary) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            description: value.description,
+            worldbook_count: value.worldbook_count as u32,
+        }
+    }
+}
+
+impl From<WorldBookSummary> for WorldBookDto {
+    fn from(value: WorldBookSummary) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+            entries: value
+                .entries
+                .into_iter()
+                .map(|entry| WorldBookEntryDto {
+                    id: entry.id,
+                    name: entry.name,
+                    content: entry.content,
+                    keys: entry.keys,
+                    enabled: entry.enabled,
+                    constant: entry.constant,
+                    position: enum_label(&entry.position),
+                })
+                .collect(),
+        }
+    }
+}
+
+impl From<PromptProfileSummary> for PromptProfileDto {
+    fn from(value: PromptProfileSummary) -> Self {
+        Self {
+            id: value.id,
+            name: value.name,
+        }
+    }
+}
+
+impl From<ParticipantRequestDto> for ParticipantRequest {
+    fn from(value: ParticipantRequestDto) -> Self {
+        Self {
+            character_id: value.character_id,
+            role: value.role.as_deref().map(participant_role),
+            display_name: value.display_name,
+        }
+    }
+}
+
+impl PersonaRequestDto {
+    fn to_domain(self) -> PersonaRequest {
+        PersonaRequest {
+            id: self.id,
+            name: self.name,
+            description: self.description,
+            user_prompt: self.user_prompt,
+            worldbook_ids: self.worldbook_ids,
+        }
+    }
+}
+
+impl WorldBookEntryRequestDto {
+    fn to_domain(self) -> WorldBookEntryRequest {
+        WorldBookEntryRequest {
+            id: self.id,
+            name: self.name,
+            content: self.content,
+            keys: self.keys,
+            enabled: self.enabled.unwrap_or(true),
+            constant: self.constant.unwrap_or(false),
+            position: self
+                .position
+                .as_deref()
+                .map(world_book_position)
+                .unwrap_or_default(),
+        }
+    }
+}
+
+impl WorldBookRequestDto {
+    fn to_domain(self) -> WorldBookRequest {
+        WorldBookRequest {
+            id: self.id,
+            name: self.name,
+            entries: self
+                .entries
+                .into_iter()
+                .map(WorldBookEntryRequestDto::to_domain)
+                .collect(),
+        }
+    }
+}
+
+impl PromptProfileRequestDto {
+    fn to_domain(self) -> PromptProfileRequest {
+        PromptProfileRequest {
+            id: self.id,
+            name: self.name,
+            system_prompt: self.system_prompt,
+            user_prompt: self.user_prompt,
+            post_history_instructions: self.post_history_instructions,
+            format_rules: self.format_rules,
+        }
+    }
+}
+
+impl CharacterRequestDto {
+    fn to_domain(self) -> CharacterRequest {
+        CharacterRequest {
+            id: self.id,
+            name: self.name,
+            description: self.description,
+            personality: self.personality,
+            scenario: self.scenario,
+            first_message: self.first_message,
+            alternate_greetings: self.alternate_greetings,
+            example_dialogue: self.example_dialogue,
+            system_prompt: self.system_prompt,
+            post_history_instructions: self.post_history_instructions,
+            worldbook_ids: self.worldbook_ids,
+        }
+    }
+}
+
+/// The bindings a screen set on one conversation.
+///
+/// Same shape as the request that creates one, because they are the same four
+/// questions: who is in this chat, which persona is the user bringing, which
+/// world books apply, and which fixed prompt it is spoken with.
+#[derive(Clone, Debug, Default)]
+pub struct BindingsRequest {
+    pub participants: Vec<ParticipantRequest>,
+    pub persona_id: Option<String>,
+    pub worldbook_ids: Vec<String>,
+    pub prompt_profile_id: Option<String>,
+}
+
+impl BindingsRequest {
+    fn to_domain(self) -> CreateConversationRequest {
+        CreateConversationRequest {
+            participants: self.participants,
+            persona_id: self.persona_id,
+            worldbook_ids: self.worldbook_ids,
+            prompt_profile_id: self.prompt_profile_id,
+        }
+    }
+}
+
+impl From<Vec<ParticipantRequestDto>> for BindingsRequest {
+    fn from(value: Vec<ParticipantRequestDto>) -> Self {
+        Self {
+            participants: value.into_iter().map(ParticipantRequest::from).collect(),
+            ..BindingsRequest::default()
+        }
+    }
+}
+
+impl BindingsRequest {
+    fn with_persona(mut self, persona_id: Option<String>) -> Self {
+        self.persona_id = persona_id;
+        self
+    }
+
+    fn with_world_books(mut self, worldbook_ids: Option<Vec<String>>) -> Self {
+        self.worldbook_ids = worldbook_ids.unwrap_or_default();
+        self
+    }
+
+    fn with_prompt_profile(mut self, prompt_profile_id: Option<String>) -> Self {
+        self.prompt_profile_id = prompt_profile_id;
+        self
     }
 }
 
@@ -664,6 +978,191 @@ impl SujiuRuntimeBridge {
                 worldbook_ids: worldbook_ids.unwrap_or_default(),
                 prompt_profile_id,
             })
+    }
+
+    /// Every stored persona, as list rows.
+    ///
+    /// Its own call rather than a column on `list_characters`: a persona is a
+    /// separate entity, and keeping it inside a character's shape is exactly what
+    /// made it invisible.
+    #[napi]
+    pub fn list_personas(&self) -> Vec<PersonaDto> {
+        self.runtime
+            .personas()
+            .into_iter()
+            .map(PersonaDto::from)
+            .collect()
+    }
+
+    /// One persona in full, for an editor.
+    ///
+    /// A different shape from the list row on purpose: an editor needs the
+    /// bodies, and a summary would leave it nothing to prefill and nothing to
+    /// tell "empty" from "unchanged".
+    #[napi]
+    pub fn persona(&self, id: String) -> Option<PersonaRequestDto> {
+        self.runtime.persona(&id).map(|persona| PersonaRequestDto {
+            id: Some(persona.id),
+            name: persona.name,
+            description: persona.description,
+            user_prompt: persona.user_prompt,
+            worldbook_ids: persona.worldbook_ids,
+        })
+    }
+
+    #[napi]
+    pub fn save_persona(&self, persona: PersonaRequestDto) -> Result<String> {
+        self.runtime
+            .save_persona(&persona.to_domain())
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    #[napi]
+    pub fn delete_persona(&self, id: String) -> Result<bool> {
+        self.runtime
+            .delete_persona(&id)
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// Every stored world book, each with its entries.
+    ///
+    /// Entries travel with the book because an entry has no meaning outside the
+    /// book holding it: an editor has to have the whole book to save one entry.
+    #[napi]
+    pub fn list_world_books(&self) -> Vec<WorldBookDto> {
+        self.runtime
+            .world_books()
+            .into_iter()
+            .map(WorldBookDto::from)
+            .collect()
+    }
+
+    #[napi]
+    pub fn save_world_book(&self, book: WorldBookRequestDto) -> Result<String> {
+        self.runtime
+            .save_world_book(&book.to_domain())
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    #[napi]
+    pub fn delete_world_book(&self, id: String) -> Result<bool> {
+        self.runtime
+            .delete_world_book(&id)
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// Every stored prompt profile, as list rows.
+    ///
+    /// The domain calls it a prompt profile because that is what it is; a screen
+    /// may show it as "Prompts" and say nothing about the type name.
+    #[napi]
+    pub fn list_prompt_profiles(&self) -> Vec<PromptProfileDto> {
+        self.runtime
+            .prompt_profiles()
+            .into_iter()
+            .map(PromptProfileDto::from)
+            .collect()
+    }
+
+    /// One prompt profile in full, for an editor.
+    #[napi]
+    pub fn prompt_profile(&self, id: String) -> Option<PromptProfileRequestDto> {
+        self.runtime
+            .prompt_profile(&id)
+            .map(|profile| PromptProfileRequestDto {
+                id: Some(profile.id),
+                name: profile.name,
+                system_prompt: profile.system_prompt,
+                user_prompt: profile.user_prompt,
+                post_history_instructions: profile.post_history_instructions,
+                format_rules: profile.format_rules,
+            })
+    }
+
+    #[napi]
+    pub fn save_prompt_profile(&self, profile: PromptProfileRequestDto) -> Result<String> {
+        self.runtime
+            .save_prompt_profile(&profile.to_domain())
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    #[napi]
+    pub fn delete_prompt_profile(&self, id: String) -> Result<bool> {
+        self.runtime
+            .delete_prompt_profile(&id)
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// Create or edit a character.
+    ///
+    /// Exposed because a library has to be editable, not only readable: a user
+    /// who cannot correct a character's own words has to delete and recreate it,
+    /// which loses every conversation that bound it.
+    #[napi]
+    pub fn save_character(&self, character: CharacterRequestDto) -> Result<String> {
+        self.runtime
+            .save_character(&character.to_domain())
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// One character in full, for an editor to prefill from.
+    ///
+    /// `list_characters` answers with summaries, and a summary has no scenario,
+    /// no first message and no prompt bodies. An editor prefilled from one starts
+    /// blank over a character that is fully written, and saving it would replace
+    /// everything with what survived in three fields.
+    ///
+    /// Resolves to nothing for a blank or unknown id, which is the answer a
+    /// "new character" form wants.
+    #[napi]
+    pub fn character(&self, id: String) -> Option<CharacterRequestDto> {
+        let character = self.runtime.character(&id)?;
+        Some(CharacterRequestDto {
+            id: Some(character.id),
+            name: character.name,
+            description: character.description,
+            personality: character.personality,
+            scenario: character.scenario,
+            first_message: character.first_message,
+            alternate_greetings: character.alternate_greetings,
+            example_dialogue: character.example_dialogue,
+            system_prompt: character.system_prompt,
+            post_history_instructions: character.post_history_instructions,
+            worldbook_ids: character.worldbook_ids,
+        })
+    }
+
+    #[napi]
+    pub fn delete_character(&self, id: String) -> Result<bool> {
+        self.runtime
+            .delete_character(&id)
+            .map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// Replace what a conversation binds.
+    ///
+    /// This is the conversation half of the split: it changes which stored
+    /// resources one chat *uses* and never edits those resources, so a persona
+    /// bound in two conversations stays one persona. The transcript is left
+    /// alone — changing who is in a room is not rewriting what has already been
+    /// said in it.
+    #[napi]
+    pub fn set_conversation_bindings(
+        &self,
+        session_id: String,
+        participants: Vec<ParticipantRequestDto>,
+        persona_id: Option<String>,
+        worldbook_ids: Option<Vec<String>>,
+        prompt_profile_id: Option<String>,
+    ) -> Result<()> {
+        let bindings = BindingsRequest::from(participants)
+            .with_persona(persona_id)
+            .with_world_books(worldbook_ids)
+            .with_prompt_profile(prompt_profile_id);
+
+        self.runtime
+            .set_conversation_bindings(&session_id, &bindings.to_domain())
+            .map_err(|error| Error::from_reason(error.to_string()))
     }
 
     /// The wire formats the runtime speaks, in the order it tries them.
@@ -1235,5 +1734,221 @@ mod tests {
         assert_eq!(table.participants[1].name, "Wen");
         assert_eq!(table.persona_id.as_deref(), Some("persona-insomniac"));
         assert_eq!(table.worldbook_ids, vec!["world-book-coast"]);
+    }
+
+    /// The four resources have to be reachable as four things rather than as one
+    /// catalog with a kind column. A bridge that could only hand back
+    /// "characters" is what pushed personas into a character card to begin with,
+    /// so the list shapes themselves are the thing under test.
+    ///
+    /// These exercise the translation rather than the runtime calls: this crate's
+    /// test binary cannot link a `napi::Error`, which only exists inside Node.
+    /// The runtime behaviour behind them is covered in `sujiu-ffi`.
+    #[test]
+    fn each_resource_kind_reaches_a_screen_as_its_own_shape() {
+        use super::{
+            PersonaDto, PersonaSummary, PromptProfileDto, PromptProfileSummary, WorldBookDto,
+            WorldBookSummary,
+        };
+
+        let persona = PersonaDto::from(PersonaSummary {
+            id: "persona-1".into(),
+            name: "The insomniac".into(),
+            description: "A night-shift listener.".into(),
+            worldbook_count: 2,
+        });
+        assert_eq!(persona.id, "persona-1");
+        assert_eq!(
+            persona.worldbook_count, 2,
+            "a persona's own world books are counted, not listed as if a chat had bound them"
+        );
+
+        let book = WorldBookDto::from(WorldBookSummary {
+            id: "worldbook-1".into(),
+            name: "The northern coast".into(),
+            entries: vec![sujiu_ffi::library::WorldBookEntrySummary {
+                id: "entry-1".into(),
+                name: "Tone".into(),
+                content: "The coast is cold.".into(),
+                keys: vec!["coast".into()],
+                enabled: true,
+                constant: true,
+                position: sujiu_core::WorldBookPosition::NearHistory,
+            }],
+        });
+        assert_eq!(book.entries[0].position, "near_history");
+        assert_eq!(book.entries[0].keys, vec!["coast".to_string()]);
+
+        let profile = PromptProfileDto::from(PromptProfileSummary {
+            id: "promptprofile-1".into(),
+            name: "Roleplay".into(),
+        });
+        assert_eq!(profile.name, "Roleplay");
+    }
+
+    /// The row and the editor are deliberately two different shapes.
+    ///
+    /// A list of profiles is a list of names. A body carried on the row would make
+    /// the list a wall of text and would leave a screen with no reason to ask for
+    /// the profile itself — and a screen that read the row instead would never see
+    /// the difference between a cleared prompt and one that was never set.
+    #[test]
+    fn the_prompt_profile_row_and_the_editor_are_different_shapes() {
+        use super::{PromptProfileDto, PromptProfileRequestDto, PromptProfileSummary};
+
+        // Destructured exhaustively: a field added to the row fails to compile
+        // here, which is the point of keeping the row this small.
+        let PromptProfileDto { id, name } = PromptProfileDto::from(PromptProfileSummary {
+            id: "promptprofile-1".into(),
+            name: "Roleplay".into(),
+        });
+        assert_eq!(id, "promptprofile-1");
+        assert_eq!(name, "Roleplay");
+
+        // The editor carries the four bodies and the id, and nothing else.
+        let editor = PromptProfileRequestDto {
+            id: Some(id.clone()),
+            name: name.clone(),
+            system_prompt: String::new(),
+            user_prompt: String::new(),
+            post_history_instructions: String::new(),
+            format_rules: "One paragraph.".into(),
+        };
+        assert_eq!(editor.format_rules, "One paragraph.");
+        assert!(editor.system_prompt.is_empty());
+    }
+
+    /// An entry's position has to survive a round trip through the wire.
+    ///
+    /// A position that is wrong reorders part of the prompt block the provider is
+    /// meant to cache, and neither side can see the other's mistake.
+    #[test]
+    fn a_world_book_position_round_trips_through_its_label() {
+        use super::{world_book_position, WorldBookPosition};
+        for position in [
+            WorldBookPosition::BeforeCharacter,
+            WorldBookPosition::AfterCharacter,
+            WorldBookPosition::NearHistory,
+        ] {
+            let label = super::enum_label(&position);
+            assert_eq!(world_book_position(&label), position, "{label}");
+        }
+    }
+
+    /// A screen that cannot express a position still has to be able to say "where
+    /// it normally goes", and an unknown label must not become a different
+    /// position.
+    #[test]
+    fn an_unrecognised_world_book_position_falls_back_to_the_domain_default() {
+        use super::{world_book_position, WorldBookPosition};
+        assert_eq!(
+            world_book_position("somewhere else"),
+            WorldBookPosition::AfterCharacter
+        );
+        assert_eq!(
+            world_book_position("beforeCharacter"),
+            WorldBookPosition::BeforeCharacter
+        );
+    }
+
+    /// A screen creates with an absent id and edits with a real one, and the
+    /// runtime is what tells those two apart.
+    #[test]
+    fn an_absent_id_says_create_and_a_present_id_says_edit() {
+        use super::{PersonaRequestDto, WorldBookEntryRequestDto};
+
+        assert_eq!(
+            PersonaRequestDto {
+                id: None,
+                name: "New".into(),
+                description: String::new(),
+                user_prompt: String::new(),
+                worldbook_ids: Vec::new(),
+            }
+            .to_domain()
+            .id,
+            None
+        );
+
+        assert_eq!(
+            PersonaRequestDto {
+                id: Some("persona-1".into()),
+                name: "Existing".into(),
+                description: String::new(),
+                user_prompt: String::new(),
+                worldbook_ids: Vec::new(),
+            }
+            .to_domain()
+            .id
+            .as_deref(),
+            Some("persona-1")
+        );
+
+        // An entry the screen never named is created enabled, and one it says is
+        // disabled stays disabled: absent means "not stated", not "off".
+        assert!(
+            WorldBookEntryRequestDto {
+                id: None,
+                name: String::new(),
+                content: "Lore.".into(),
+                keys: Vec::new(),
+                enabled: None,
+                constant: None,
+                position: None,
+            }
+            .to_domain()
+            .enabled
+        );
+        assert!(
+            !WorldBookEntryRequestDto {
+                id: Some("entry-1".into()),
+                name: String::new(),
+                content: "Lore.".into(),
+                keys: Vec::new(),
+                enabled: Some(false),
+                constant: None,
+                position: None,
+            }
+            .to_domain()
+            .enabled
+        );
+    }
+
+    /// Bindings are four separate questions, and none of them may be lost or
+    /// invented on the way in.
+    #[test]
+    fn bindings_arrive_as_the_four_answers_they_are() {
+        use super::{BindingsRequest, ParticipantRequestDto};
+
+        let request = BindingsRequest::from(vec![ParticipantRequestDto {
+            character_id: "character-wen".into(),
+            role: Some("narrator".into()),
+            display_name: None,
+        }])
+        .with_persona(Some("persona-1".into()))
+        .with_world_books(Some(vec!["worldbook-1".into()]))
+        .with_prompt_profile(Some("promptprofile-1".into()))
+        .to_domain();
+
+        assert_eq!(request.participants.len(), 1);
+        assert_eq!(request.participants[0].character_id, "character-wen");
+        assert_eq!(
+            request.participants[0].role,
+            Some(sujiu_core::ParticipantRole::Narrator)
+        );
+        assert_eq!(request.persona_id.as_deref(), Some("persona-1"));
+        assert_eq!(request.worldbook_ids, vec!["worldbook-1"]);
+        assert_eq!(
+            request.prompt_profile_id.as_deref(),
+            Some("promptprofile-1")
+        );
+
+        // Absent lists mean "none", not "leave alone". Clearing a binding has to be
+        // expressible, or a chat could never be un-bound from anything.
+        let cleared = BindingsRequest::from(Vec::new())
+            .with_world_books(None)
+            .to_domain();
+        assert!(cleared.participants.is_empty());
+        assert!(cleared.worldbook_ids.is_empty());
     }
 }

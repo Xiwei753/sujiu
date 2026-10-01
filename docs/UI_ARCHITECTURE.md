@@ -44,17 +44,26 @@ There is no permanent bottom tab bar and no permanent dashboard.
 
 Lightweight, single row:
 
-- open the history drawer;
-- current character selector;
-- current model selector;
-- overflow menu (context & sources, character detail, settings).
+- open the history drawer (narrow layouts only);
+- the conversation title, which opens this conversation's own contents;
+- the current model selector;
+- overflow menu (context & sources, this conversation's contents, new chat);
+- **two fixed entries at the right: library, then settings — the gear is
+  rightmost and stays rightmost.**
+
+The two fixed entries exist because they are the two places the whole app can
+go, and neither of them is a property of the current conversation. Everything
+that *is* a property of the current conversation stays in the conversation's own
+surface instead of competing for a top-bar slot, and the overflow menu carries
+them. A third top-bar button for a resource kind would be a per-resource-type
+dashboard in miniature.
+
+Both entries are rendered by one shared definition so they cannot drift into two
+different-looking buttons. The library uses its own icon; settings uses a gear.
 
 The model selector is a sheet/menu showing the current model plus the small set
 of necessary facts (name, capability/status, provider). Provider credentials and
 full provider configuration live in settings — never in the chat page.
-
-The character selector uses the same pattern: current character, sheet, recents
-first, search, and an entry into the full character library.
 
 ### 1.3 Conversation
 
@@ -117,29 +126,82 @@ This screen maps to existing Rust data: `ContextSource`, `ContextRecord`,
 `list_context_sources`, `search_context`, `read_context` and tool call records.
 It exists for transparency and debugging; it is not a required step per turn.
 
-### 1.7 Character library and detail
+### 1.7 Library, and what a conversation actually uses
 
-The library is a secondary page: search, recents, favourites (later), import
-character card, create character. Prefer media/content-card or compact grid
-layouts over a contacts list (no forced avatar + two-line + chevron rows).
+Rust already splits these entities, and the UI follows that split instead of
+merging them back together for convenience:
 
-Character detail is ordinary hierarchical navigation: basics, character
-definition, greeting, world book, model/preset overrides, memory settings,
-import/export. No game-progression dashboard.
+| Rust entity | Library section | User-facing name |
+| --- | --- | --- |
+| `Character` | 角色 / Characters | 角色 |
+| `Persona` | Persona / 身份 | Persona |
+| `WorldBook` | 世界书 | 世界书 |
+| `PromptProfile` | 提示词 | 提示词 |
 
-### 1.8 Settings
+The library answers one question: **what resources do I have?** It is a
+secondary page reached from the top-bar entry, and it opens with four sections
+rather than one combined list, because a combined list has to invent a
+category column and a combined row has to hide four different kinds of
+detail behind one summary line.
 
-Standard system settings pattern with sections such as:
+Each section is a list with new / import / edit / delete / view, and each row
+opens an ordinary editor for that resource's own fields:
 
-- Provider / API
-- Default model
-- MCP / Tools
-- Data & backup
+- **角色** — name, description, personality, scenario, first message,
+  alternate greetings, example dialogue, system prompt, post-history
+  instructions.
+- **Persona** — name, description, user prompt, its own world book list. This is
+  the user's own side of a role-play; it must not stay hidden inside a
+  character, because a persona is reusable across characters and conversations.
+- **世界书** — entries with name, content, keywords, enabled/constant flags and
+  position. A world book is an independent resource that many characters,
+  personas and conversations may reference at once.
+- **提示词** — system prompt, user prompt, post-history instructions, format
+  rules, and the other fixed prompt segments. It is named 提示词 in the UI; the
+  internal Core type name is not user-facing vocabulary.
+
+The library never edits a conversation. A resource that this conversation
+happens to use is not owned by it.
+
+Character-card import formats, an advanced world-book editor and prompt
+templates are later work; the import control states that rather than being a
+dead button.
+
+### 1.8 What this conversation uses
+
+A conversation only ever stores **references** — `participants`, `persona_id`,
+`worldbook_ids`, `prompt_profile_id` — and picks them from the same library
+resources. It has its own surface (the conversation title, or "this
+conversation" in the overflow menu) for choosing participants, persona, world
+books and prompt profile.
+
+This boundary is the important one. If the library is where a world book is
+edited, and the conversation is where a copy of that world book is edited, then
+editing a conversation quietly forks a resource and the next conversation using
+the original shows the old text. Resource management and conversation binding
+are therefore separate screens with separate ownership, and the same resource is
+reused by as many conversations as want it.
+
+Character detail is ordinary hierarchical navigation into the character editor.
+No game-progression dashboard.
+
+### 1.9 Settings
+
+Settings is **app and service configuration only**:
+
+- Provider / API (endpoint address, credential, model selection, re-probe)
 - Appearance
-- Privacy / permissions
+- Diagnostics log
+- Data & backup
 - About
 
-### 1.9 Wide screen
+It deliberately does **not** contain character editing, persona editing, world
+book editing, prompt body editing, or the current conversation's bindings. A
+user who opens settings to change their endpoint must never be one edit away from
+rewriting a character's system prompt, and a prompt body that lives in settings
+belongs to the app rather than to a reusable conversation resource.
+
+### 1.10 Wide screen
 
 Wide layout is a **layout promotion of the same information architecture**, not a
 second application:
@@ -585,7 +647,32 @@ conversation_state(session_id)  send_turn(session_id, input) -> TurnEvent stream
 cancel_turn(session_id)         create_conversation(participants, persona_id,
                                                    worldbook_ids, prompt_profile_id)
                                create_session(character_id)  <- shortcut for one participant
+                               set_conversation_bindings(session_id, participants,
+                                                        persona_id, worldbook_ids,
+                                                        prompt_profile_id)
 ```
+
+Library resources need their own coarse surface too, or the library page can
+only ever be a preview of hard-coded data:
+
+```text
+list_personas()      persona(id)      save_persona(request)      delete_persona(id)
+list_world_books()   save_world_book(request)                    delete_world_book(id)
+list_prompt_profiles() prompt_profile(id) save_prompt_profile(request)
+                                               delete_prompt_profile(id)
+save_character(request)  character(id)  delete_character(id)
+```
+
+Two rules govern that surface:
+
+- **a summary row and an editor body are different shapes.** A list row carries
+  the fields a row can show; an editor gets the whole resource. Pre-filling an
+  editor from a summary starts a blank form over a fully-written resource, and
+  saving it destroys everything the summary did not carry.
+- **deleting a resource unbinds it.** A delete that leaves a dangling id in a
+  conversation or a character's world book list produces a screen that shows the
+  binding and then cannot honour it, so delete clears every reference and says
+  nothing.
 
 Rules:
 
@@ -738,7 +825,10 @@ Do not introduce:
 - three-column thinking on narrow screens;
 - a re-invented model selector;
 - platform capabilities inline in page code;
-- pixel-level parity between the three platforms.
+- pixel-level parity between the three platforms;
+- a per-resource-type button on the chat top bar instead of one library entry;
+- resource editing, or prompt body editing, inside settings;
+- a conversation holding its own copy of a world book or prompt profile.
 
 Accent colour is reserved for selection, primary actions, state and a very small
 amount of emphasis. Content over decoration.
@@ -752,6 +842,8 @@ amount of emphasis. Content over decoration.
 - [ ] No provider-specific field or event format leaked into presentation/UI.
 - [ ] Streaming states are handled, including the tool round and cancellation.
 - [ ] New readable data reuses the context protocol instead of a new tool.
+- [ ] A resource is edited in the library and only referenced by a conversation.
+- [ ] Settings gained no resource editing and no prompt body editing.
 - [ ] Wide layout is a layout promotion of the same state, not a second logic path.
 - [ ] Tests cover the new presentation behaviour where behaviour is non-trivial.
 - [ ] `cargo fmt --all -- --check` and `cargo test --workspace` pass.

@@ -193,6 +193,18 @@ export class Copy {
         return $r('app.string.provider_need_address');
       case 'turn_busy':
         return $r('app.string.error_turn_busy');
+      case 'entity_not_found':
+        return $r('app.string.error_entity_not_found');
+      case 'already_removed':
+        return $r('app.string.error_already_removed');
+      case 'library_unavailable':
+        return $r('app.string.error_library_unavailable');
+      case 'save_failed':
+        return $r('app.string.error_save_failed');
+      case 'delete_failed':
+        return $r('app.string.error_delete_failed');
+      case 'bind_failed':
+        return $r('app.string.error_bind_failed');
       default:
         return detail.length > 0 ? detail : $r('app.string.error_turn_failed');
     }

@@ -73,6 +73,34 @@ and a tabletop is a Narrator plus several characters. Neither is a "main
 character with extra text", so neither needs the storage model changed again when
 those UIs are built.
 
+### Managing a resource is not binding one
+
+`Character`, `Persona`, `WorldBook` and `PromptProfile` are edited as themselves.
+A conversation only stores ids, and rebinding a conversation never edits the
+resource it points at.
+
+That separation exists because the alternative is quietly destructive. If a
+conversation held its own copy of a world book, editing the conversation would
+fork the resource, the next conversation using the original would keep showing
+the old text, and neither copy would look wrong. So:
+
+- editing a resource edits that resource, for every conversation that references
+  it;
+- changing a conversation's bindings changes only the id list;
+- deleting a resource clears every reference to it — participants,
+  `persona_id`, `worldbook_ids`, `prompt_profile_id`, the character- and
+  persona-level default lists, and the global world-book list. A dangling id is
+  not a soft state: it renders as a binding the runtime cannot honour.
+
+Editing one field of a resource also edits only that field. Replacing a
+`PromptProfile` wholesale would let a form that knows about the four prompt
+strings silently drop the fixed segments it never rendered.
+
+Because personas and world books are also projected into the context store, a
+mutation to one of them re-derives the projection. Otherwise `search_context`
+keeps answering with a world book entry that was deleted a moment ago, which is
+a retrieval result that is confidently wrong rather than merely stale.
+
 ### 3. sujiu-ai
 
 Rust conversation runtime.

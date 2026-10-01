@@ -13,7 +13,9 @@ import sujiu from 'libsujiu_napi.so';
 import { SujiuBridge, SessionSummary, CharacterSummary, ModelSummary, ContextSourceSummary,
   ConversationSnapshot, MessageSummary, MessageRole, TurnEvent, TurnEventKind,
   TurnEventListener, ProviderDraft, EndpointExploration, ModelDiscovery,
-  StoredEndpoint, DiagnosticEntry } from './SujiuBridge';
+  StoredEndpoint, DiagnosticEntry, PersonaSummary, PersonaDraft, WorldBookSummary,
+  WorldBookEntry, WorldBookDraft, WorldBookEntryDraft, PromptProfileSummary,
+  PromptProfileDraft, CharacterDraft, ParticipantBinding, ConversationParticipant } from './SujiuBridge';
 
 interface NativeSession {
   id: string;
@@ -67,10 +69,101 @@ interface NativeMessage {
   toolCalls: NativeToolCall[];
 }
 
+interface NativeParticipant {
+  characterId: string;
+  name: string;
+  role: string;
+}
+
 interface NativeSnapshot {
   sessionId: string;
   character: NativeCharacter | null;
+  participants: NativeParticipant[];
+  personaId: string | null;
+  worldbookIds: string[];
+  promptProfileId: string | null;
   messages: NativeMessage[];
+}
+
+interface NativePersona {
+  id: string;
+  name: string;
+  description: string;
+  worldbookCount: number;
+}
+
+interface NativePersonaRequest {
+  id?: string;
+  name: string;
+  description: string;
+  userPrompt: string;
+  worldbookIds: string[];
+}
+
+interface NativeWorldBookEntry {
+  id: string;
+  name: string;
+  content: string;
+  keys: string[];
+  enabled: boolean;
+  constant: boolean;
+  position: string;
+}
+
+interface NativeWorldBook {
+  id: string;
+  name: string;
+  entries: NativeWorldBookEntry[];
+}
+
+interface NativeWorldBookEntryRequest {
+  id?: string;
+  name: string;
+  content: string;
+  keys: string[];
+  enabled?: boolean;
+  constant?: boolean;
+  position?: string;
+}
+
+interface NativeWorldBookRequest {
+  id?: string;
+  name: string;
+  entries: NativeWorldBookEntryRequest[];
+}
+
+interface NativePromptProfile {
+  id: string;
+  name: string;
+}
+
+interface NativePromptProfileRequest {
+  id?: string;
+  name: string;
+  systemPrompt: string;
+  userPrompt: string;
+  postHistoryInstructions: string;
+  formatRules: string;
+}
+
+interface NativeCharacterRequest {
+  id?: string;
+  name: string;
+  description: string;
+  personality: string;
+  scenario: string;
+  firstMessage: string;
+  alternateGreetings: string[];
+  exampleDialogue: string;
+  systemPrompt: string;
+  postHistoryInstructions: string;
+  worldbookIds: string[];
+}
+
+interface NativeParticipantRequest {
+  characterId: string;
+  role?: string;
+  displayName?: string;
 }
 
 interface NativeProviderConfig {
@@ -152,6 +245,47 @@ interface NativeRuntime {
   listContextSources(): NativeContextSource[];
   conversationState(sessionId: string): NativeSnapshot | null;
   createSession(characterId: string): string;
+  /**
+   * Every stored resource of one kind, as list rows.
+   *
+   * Four separate calls rather than one "library" call that returns everything:
+   * a page that shows four sections should not have to download the prompt
+   * bodies to render the character list, and a shape that returned everything
+   * would let a caller start treating the four as one resource again.
+   */
+  listPersonas(): NativePersona[];
+  /** One persona in full, for an editor. null when the id is unknown. */
+  persona(id: string): NativePersonaRequest | null;
+  savePersona(persona: NativePersonaRequest): string;
+  deletePersona(id: string): boolean;
+  listWorldBooks(): NativeWorldBook[];
+  /** World books carry their entries, so a book is edited as a whole. */
+  saveWorldBook(book: NativeWorldBookRequest): string;
+  deleteWorldBook(id: string): boolean;
+  listPromptProfiles(): NativePromptProfile[];
+  /** One prompt profile in full, for an editor. null when the id is unknown. */
+  promptProfile(id: string): NativePromptProfileRequest | null;
+  savePromptProfile(profile: NativePromptProfileRequest): string;
+  deletePromptProfile(id: string): boolean;
+  saveCharacter(character: NativeCharacterRequest): string;
+  /** One character in full, or null when the id is unknown. */
+  character(id: string): NativeCharacterRequest | null;
+  deleteCharacter(id: string): boolean;
+  /**
+   * Replaces one conversation's bindings.
+   *
+   * Declared as four separate arguments rather than one object because they are
+   * four answers to four independent questions — who is here, which persona, which
+   * world books, which prompt set — and folding them into one object would let a
+   * caller update one and appear to have updated all four.
+   */
+  setConversationBindings(
+    sessionId: string,
+    participants: NativeParticipantRequest[],
+    personaId?: string,
+    worldbookIds?: string[],
+    promptProfileId?: string
+  ): void;
   cancelTurn(): void;
   useDataDirectory(directory: string): Promise<void>;
   dataDirectory(): string | null;
@@ -343,9 +477,12 @@ function toContextSource(value: NativeContextSource): ContextSourceSummary {
 }
 
 /**
- * Maps a runtime failure onto a stable code. Unknown failures keep the code
- * `turn_failed` and pass the runtime text through as detail, so an unexpected
- * provider error stays visible instead of being swallowed by a generic string.
+ * The one place a runtime failure is turned into a stable code.
+ *
+ * `entity_not_found` is its own code rather than sharing the generic one: an
+ * editor saving a resource that was deleted from another screen has to be able
+ * to say "that is gone", which is a different fact from "the write failed" and
+ * a different thing for a user to do about it.
  */
 function toFailureCode(message: string): string {
   if (message.indexOf('no_provider_configured') === 0) {
@@ -356,6 +493,9 @@ function toFailureCode(message: string): string {
   }
   if (message.indexOf('session_not_found') === 0) {
     return 'session_not_found';
+  }
+  if (message.indexOf('entity_not_found') === 0) {
+    return 'entity_not_found';
   }
   return 'turn_failed';
 }
@@ -373,6 +513,146 @@ function toMessage(value: NativeMessage): MessageSummary {
     summary.toolStatus = calls[0].isError || calls[0].status === 'failed' ? 'failed' : 'done';
   }
   return summary;
+}
+
+function toParticipant(value: NativeParticipant): ConversationParticipant {
+  return {
+    characterId: value.characterId,
+    name: value.name,
+    role: value.role
+  } as ConversationParticipant;
+}
+
+function toPersona(value: NativePersona): PersonaSummary {
+  return {
+    id: value.id,
+    name: value.name,
+    description: value.description,
+    worldbookCount: value.worldbookCount
+  } as PersonaSummary;
+}
+
+function toPersonaDraft(value: NativePersonaRequest): PersonaDraft {
+  return {
+    id: value.id,
+    name: value.name,
+    description: value.description,
+    userPrompt: value.userPrompt,
+    worldbookIds: value.worldbookIds
+  } as PersonaDraft;
+}
+
+function toNativePersonaDraft(value: PersonaDraft): NativePersonaRequest {
+  return {
+    id: value.id,
+    name: value.name,
+    description: value.description,
+    userPrompt: value.userPrompt,
+    worldbookIds: value.worldbookIds
+  } as NativePersonaRequest;
+}
+
+function toWorldBookEntry(value: NativeWorldBookEntry): WorldBookEntry {
+  return {
+    id: value.id,
+    name: value.name,
+    content: value.content,
+    keys: value.keys,
+    enabled: value.enabled,
+    constant: value.constant,
+    position: value.position
+  } as WorldBookEntry;
+}
+
+function toWorldBook(value: NativeWorldBook): WorldBookSummary {
+  const entries: WorldBookEntry[] = [];
+  for (let i = 0; i < value.entries.length; i++) {
+    entries.push(toWorldBookEntry(value.entries[i]));
+  }
+  return { id: value.id, name: value.name, entries: entries } as WorldBookSummary;
+}
+
+function toNativeWorldBook(value: WorldBookDraft): NativeWorldBookRequest {
+  const entries: NativeWorldBookEntryRequest[] = [];
+  for (let i = 0; i < value.entries.length; i++) {
+    const entry: WorldBookEntryDraft = value.entries[i];
+    entries.push({
+      id: entry.id,
+      name: entry.name,
+      content: entry.content,
+      keys: entry.keys,
+      enabled: entry.enabled,
+      constant: entry.constant,
+      position: entry.position
+    } as NativeWorldBookEntryRequest);
+  }
+  return { id: value.id, name: value.name, entries: entries } as NativeWorldBookRequest;
+}
+
+function toPromptProfile(value: NativePromptProfile): PromptProfileSummary {
+  return { id: value.id, name: value.name } as PromptProfileSummary;
+}
+
+function toPromptProfileDraft(value: NativePromptProfileRequest): PromptProfileDraft {
+  return {
+    id: value.id,
+    name: value.name,
+    systemPrompt: value.systemPrompt,
+    userPrompt: value.userPrompt,
+    postHistoryInstructions: value.postHistoryInstructions,
+    formatRules: value.formatRules
+  } as PromptProfileDraft;
+}
+
+function toNativePromptProfile(value: PromptProfileDraft): NativePromptProfileRequest {
+  return {
+    id: value.id,
+    name: value.name,
+    systemPrompt: value.systemPrompt,
+    userPrompt: value.userPrompt,
+    postHistoryInstructions: value.postHistoryInstructions,
+    formatRules: value.formatRules
+  } as NativePromptProfileRequest;
+}
+
+function toCharacterDraft(value: NativeCharacterRequest): CharacterDraft {
+  return {
+    id: value.id,
+    name: value.name,
+    description: value.description,
+    personality: value.personality,
+    scenario: value.scenario,
+    firstMessage: value.firstMessage,
+    alternateGreetings: value.alternateGreetings,
+    exampleDialogue: value.exampleDialogue,
+    systemPrompt: value.systemPrompt,
+    postHistoryInstructions: value.postHistoryInstructions,
+    worldbookIds: value.worldbookIds
+  } as CharacterDraft;
+}
+
+function toNativeCharacter(value: CharacterDraft): NativeCharacterRequest {
+  return {
+    id: value.id,
+    name: value.name,
+    description: value.description,
+    personality: value.personality,
+    scenario: value.scenario,
+    firstMessage: value.firstMessage,
+    alternateGreetings: value.alternateGreetings,
+    exampleDialogue: value.exampleDialogue,
+    systemPrompt: value.systemPrompt,
+    postHistoryInstructions: value.postHistoryInstructions,
+    worldbookIds: value.worldbookIds
+  } as NativeCharacterRequest;
+}
+
+function toNativeParticipant(value: ParticipantBinding): NativeParticipantRequest {
+  return {
+    characterId: value.characterId,
+    role: value.role,
+    displayName: value.displayName
+  } as NativeParticipantRequest;
 }
 
 export class SujiuNativeBridge implements SujiuBridge {
@@ -490,10 +770,22 @@ export class SujiuNativeBridge implements SujiuBridge {
       for (let i = 0; i < sources.length; i++) {
         contextSources.push(toContextSource(sources[i]));
       }
+      const participants: ConversationParticipant[] = [];
+      const bound: NativeParticipant[] = snapshot.participants === undefined || snapshot.participants === null
+        ? [] : snapshot.participants;
+      for (let i = 0; i < bound.length; i++) {
+        participants.push(toParticipant(bound[i]));
+      }
       return Promise.resolve({
         session: session,
         messages: messages,
-        contextSources: contextSources
+        contextSources: contextSources,
+        participants: participants,
+        personaId: snapshot.personaId === null || snapshot.personaId === undefined
+          ? undefined : snapshot.personaId,
+        worldbookIds: snapshot.worldbookIds,
+        promptProfileId: snapshot.promptProfileId === null || snapshot.promptProfileId === undefined
+          ? undefined : snapshot.promptProfileId
       } as ConversationSnapshot);
     } catch (error) {
       return Promise.reject(new Error(`conversation_state failed: ${(error as Error).message}`));
@@ -512,6 +804,167 @@ export class SujiuNativeBridge implements SujiuBridge {
       return Promise.reject(new Error(`create_session: ${id} missing from the session list`));
     } catch (error) {
       return Promise.reject(new Error(`create_session failed: ${(error as Error).message}`));
+    }
+  }
+
+  listPersonas(): Promise<PersonaSummary[]> {
+    try {
+      const rows: NativePersona[] = this.runtime.listPersonas();
+      const result: PersonaSummary[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        result.push(toPersona(rows[i]));
+      }
+      return Promise.resolve(result);
+    } catch (error) {
+      return Promise.reject(new Error(`list_personas failed: ${(error as Error).message}`));
+    }
+  }
+
+  /**
+   * One persona in full.
+   *
+   * An unknown id stays an empty answer rather than becoming a rejection: the
+   * caller is an editor deciding what to show, and "this persona is gone" is
+   * something it renders, not an exception it has to guess the meaning of.
+   */
+  persona(id: string): Promise<PersonaDraft | undefined> {
+    try {
+      const value: NativePersonaRequest | null = this.runtime.persona(id);
+      return Promise.resolve(value === null || value === undefined ? undefined : toPersonaDraft(value));
+    } catch (error) {
+      return Promise.reject(new Error(`persona failed: ${(error as Error).message}`));
+    }
+  }
+
+  savePersona(draft: PersonaDraft): Promise<string> {
+    try {
+      return Promise.resolve(this.runtime.savePersona(toNativePersonaDraft(draft)));
+    } catch (error) {
+      return Promise.reject(new Error(`save_persona failed: ${(error as Error).message}`));
+    }
+  }
+
+  deletePersona(id: string): Promise<boolean> {
+    try {
+      return Promise.resolve(this.runtime.deletePersona(id));
+    } catch (error) {
+      return Promise.reject(new Error(`delete_persona failed: ${(error as Error).message}`));
+    }
+  }
+
+  listWorldBooks(): Promise<WorldBookSummary[]> {
+    try {
+      const rows: NativeWorldBook[] = this.runtime.listWorldBooks();
+      const result: WorldBookSummary[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        result.push(toWorldBook(rows[i]));
+      }
+      return Promise.resolve(result);
+    } catch (error) {
+      return Promise.reject(new Error(`list_world_books failed: ${(error as Error).message}`));
+    }
+  }
+
+  saveWorldBook(draft: WorldBookDraft): Promise<string> {
+    try {
+      return Promise.resolve(this.runtime.saveWorldBook(toNativeWorldBook(draft)));
+    } catch (error) {
+      return Promise.reject(new Error(`save_world_book failed: ${(error as Error).message}`));
+    }
+  }
+
+  deleteWorldBook(id: string): Promise<boolean> {
+    try {
+      return Promise.resolve(this.runtime.deleteWorldBook(id));
+    } catch (error) {
+      return Promise.reject(new Error(`delete_world_book failed: ${(error as Error).message}`));
+    }
+  }
+
+  listPromptProfiles(): Promise<PromptProfileSummary[]> {
+    try {
+      const rows: NativePromptProfile[] = this.runtime.listPromptProfiles();
+      const result: PromptProfileSummary[] = [];
+      for (let i = 0; i < rows.length; i++) {
+        result.push(toPromptProfile(rows[i]));
+      }
+      return Promise.resolve(result);
+    } catch (error) {
+      return Promise.reject(new Error(`list_prompt_profiles failed: ${(error as Error).message}`));
+    }
+  }
+
+  promptProfile(id: string): Promise<PromptProfileDraft | undefined> {
+    try {
+      const value: NativePromptProfileRequest | null = this.runtime.promptProfile(id);
+      return Promise.resolve(
+        value === null || value === undefined ? undefined : toPromptProfileDraft(value));
+    } catch (error) {
+      return Promise.reject(new Error(`prompt_profile failed: ${(error as Error).message}`));
+    }
+  }
+
+  savePromptProfile(draft: PromptProfileDraft): Promise<string> {
+    try {
+      return Promise.resolve(this.runtime.savePromptProfile(toNativePromptProfile(draft)));
+    } catch (error) {
+      return Promise.reject(new Error(`save_prompt_profile failed: ${(error as Error).message}`));
+    }
+  }
+
+  deletePromptProfile(id: string): Promise<boolean> {
+    try {
+      return Promise.resolve(this.runtime.deletePromptProfile(id));
+    } catch (error) {
+      return Promise.reject(new Error(`delete_prompt_profile failed: ${(error as Error).message}`));
+    }
+  }
+
+  saveCharacter(draft: CharacterDraft): Promise<string> {
+    try {
+      return Promise.resolve(this.runtime.saveCharacter(toNativeCharacter(draft)));
+    } catch (error) {
+      return Promise.reject(new Error(`save_character failed: ${(error as Error).message}`));
+    }
+  }
+
+  character(id: string): Promise<CharacterDraft | undefined> {
+    try {
+      const value: NativeCharacterRequest | null = this.runtime.character(id);
+      return Promise.resolve(value === null || value === undefined ? undefined : toCharacterDraft(value));
+    } catch (error) {
+      return Promise.reject(new Error(`character failed: ${(error as Error).message}`));
+    }
+  }
+
+  deleteCharacter(id: string): Promise<boolean> {
+    try {
+      return Promise.resolve(this.runtime.deleteCharacter(id));
+    } catch (error) {
+      return Promise.reject(new Error(`delete_character failed: ${(error as Error).message}`));
+    }
+  }
+
+  setConversationBindings(
+    sessionId: string,
+    participants: ParticipantBinding[],
+    personaId?: string,
+    worldbookIds?: string[],
+    promptProfileId?: string
+  ): Promise<void> {
+    try {
+      const bound: NativeParticipantRequest[] = [];
+      for (let i = 0; i < participants.length; i++) {
+        bound.push(toNativeParticipant(participants[i]));
+      }
+      // Declared as returning nothing and wrapped the same way `configureProvider`
+      // is. Both write synchronously, and chaining a `.then` onto a value that is
+      // not a promise reports failure for work that already succeeded.
+      this.runtime.setConversationBindings(
+        sessionId, bound, personaId, worldbookIds, promptProfileId);
+      return Promise.resolve();
+    } catch (error) {
+      return Promise.reject(new Error(`set_conversation_bindings failed: ${(error as Error).message}`));
     }
   }
 

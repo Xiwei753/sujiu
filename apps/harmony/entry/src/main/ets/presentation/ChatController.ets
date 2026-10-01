@@ -1,17 +1,26 @@
 import {
+  CharacterDraft,
   CharacterSummary,
   ContextSourceSummary,
+  ConversationParticipant,
   DiagnosticEntry,
   EndpointExploration,
   MessageRole,
   MessageSummary,
   ModelSummary,
+  ParticipantBinding,
+  PersonaDraft,
+  PersonaSummary,
+  PromptProfileDraft,
+  PromptProfileSummary,
   SessionSummary,
   ProviderDraft,
   StoredEndpoint,
   SujiuBridge,
   TurnEvent,
-  TurnEventKind
+  TurnEventKind,
+  WorldBookDraft,
+  WorldBookSummary
 } from '../bridge/SujiuBridge';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { AppearanceMode, CredentialService, PlatformServices } from '../platform/PlatformServices';
@@ -184,6 +193,34 @@ export class ChatController {
   errorCode: string = '';
   errorDetail: string = '';
   appearanceMode: AppearanceMode = AppearanceMode.System;
+
+  /**
+   * The stored resources a library page lists.
+   *
+   * Four separate lists, matching four separate domain entities. They are not
+   * folded into one "library" array because a shape that returned all of them at
+   * once would read as one resource again, and would force a page showing four
+   * sections to hold every prompt body in order to render the character list.
+   */
+  personas: PersonaSummary[] = [];
+  worldBooks: WorldBookSummary[] = [];
+  promptProfiles: PromptProfileSummary[] = [];
+
+  /**
+   * What the open conversation currently binds.
+   *
+   * Ids and references, never copies. This is the other half of the split from
+   * the three lists above: those answer "what do I have", these answer "what does
+   * this chat use". The same persona bound in two conversations is one persona,
+   * and editing it in the library is visible in both.
+   */
+  conversationParticipants: ConversationParticipant[] = [];
+  conversationPersonaId: string = '';
+  conversationWorldbookIds: string[] = [];
+  conversationPromptProfileId: string = '';
+
+  /** Whether a library write is in flight, so an editor can disable its save. */
+  libraryBusy: boolean = false;
 
   /**
    * Provider setup. The description is state; the credential is not. The
@@ -683,6 +720,238 @@ export class ChatController {
     this.bridge.listContextSources().then((sources: ContextSourceSummary[]) => {
       this.contextSources = sources;
     });
+    this.loadLibrary();
+  }
+
+  /**
+   * Reloads the four resource lists a library page shows.
+   *
+   * Called from `refresh` so that saving or deleting a resource is followed by
+   * the list it belongs to being correct. Reading a list that a write has already
+   * invalidated is how a deleted world book keeps showing up as bound.
+   */
+  loadLibrary(): void {
+    this.bridge.listPersonas().then((rows: PersonaSummary[]) => {
+      this.personas = rows;
+    }).catch((error: Error) => {
+      this.fail('library_unavailable', error.message);
+    });
+    this.bridge.listWorldBooks().then((rows: WorldBookSummary[]) => {
+      this.worldBooks = rows;
+    }).catch((error: Error) => {
+      this.fail('library_unavailable', error.message);
+    });
+    this.bridge.listPromptProfiles().then((rows: PromptProfileSummary[]) => {
+      this.promptProfiles = rows;
+    }).catch((error: Error) => {
+      this.fail('library_unavailable', error.message);
+    });
+  }
+
+  personaById(id: string): PersonaSummary | undefined {
+    return this.personas.find((item: PersonaSummary) => item.id === id);
+  }
+
+  worldBookById(id: string): WorldBookSummary | undefined {
+    return this.worldBooks.find((item: WorldBookSummary) => item.id === id);
+  }
+
+  promptProfileById(id: string): PromptProfileSummary | undefined {
+    return this.promptProfiles.find((item: PromptProfileSummary) => item.id === id);
+  }
+
+  /**
+   * Whether a conversation binds this resource, for a checkmark in the picker.
+   *
+   * Compares ids and resolves the name for display separately. Comparing names
+   * would make two personas that share a name indistinguishable, and renaming one
+   * would silently unbind it.
+   */
+  isPersonaBound(id: string): boolean {
+    return this.conversationPersonaId === id;
+  }
+
+  isWorldBookBound(id: string): boolean {
+    return this.conversationWorldbookIds.includes(id);
+  }
+
+  isPromptProfileBound(id: string): boolean {
+    return this.conversationPromptProfileId === id;
+  }
+
+  isCharacterBound(characterId: string): boolean {
+    return this.conversationParticipants.some(
+      (item: ConversationParticipant) => item.characterId === characterId);
+  }
+
+  /**
+   * The four things one conversation binds, written to the runtime.
+   *
+   * Empty answers are sent as empty, not as "leave it alone". A binding screen
+   * where unticking the last world book cannot unbind it is a screen whose
+   * picture and the stored conversation disagree, and the model is the one that
+   * has to live with the difference.
+   *
+   * Nothing here edits a resource. That is the boundary: this chooses among
+   * stored things, and the library is where they are written.
+   */
+  bindResources(
+    participants: string[],
+    personaId: string,
+    worldbookIds: string[],
+    promptProfileId: string
+  ): void {
+    const sessionId: string = this.currentSessionId;
+    if (sessionId.length === 0) {
+      this.fail('session_not_found');
+      return;
+    }
+    const bindings: ParticipantBinding[] = participants.map((characterId: string) => {
+      return { characterId: characterId } as ParticipantBinding;
+    });
+    this.libraryBusy = true;
+    this.bridge.setConversationBindings(
+      sessionId,
+      bindings,
+      personaId.length === 0 ? undefined : personaId,
+      worldbookIds,
+      promptProfileId.length === 0 ? undefined : promptProfileId
+    ).then(() => {
+      this.libraryBusy = false;
+      this.clearError();
+      // Read the bindings back rather than assuming them. The runtime decides
+      // what a participant resolves to, and a page that showed the pre-write
+      // selection would be reporting an answer it never received.
+      this.loadConversation(sessionId);
+      this.loadLibrary();
+    }).catch((error: Error) => {
+      this.libraryBusy = false;
+      this.fail('bind_failed', error.message);
+    });
+  }
+
+  /**
+   * Saves any stored resource and reloads the lists afterwards.
+   *
+   * One place for four kinds on purpose. A save that left the lists alone would
+   * make a resource look unsaved on the next screen, and four hand-written copies
+   * of that logic is four chances to forget the reload.
+   */
+  private writeLibrary<T>(work: () => Promise<T>, onDone: (value: T) => void): void {
+    this.libraryBusy = true;
+    this.clearError();
+    work().then((value: T) => {
+      this.libraryBusy = false;
+      onDone(value);
+      this.loadLibrary();
+      this.refreshSessions();
+    }).catch((error: Error) => {
+      this.libraryBusy = false;
+      this.fail('save_failed', error.message);
+    });
+  }
+
+  /** The names a binding screen shows, resolved from ids, in the ids' order. */
+  worldBookNames(ids: string[]): string[] {
+    const names: string[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const book: WorldBookSummary | undefined = this.worldBookById(ids[i]);
+      names.push(book === undefined ? ids[i] : book.name);
+    }
+    return names;
+  }
+
+  /**
+   * One character in full, for an editor to prefill from.
+   *
+   * Resolves to nothing when the id is unknown or blank, which is the same
+   * answer a "new character" editor wants: an empty form. An editor that had to
+   * special-case the difference would end up carrying a half-built character for
+   * a resource that is not there.
+   */
+  loadCharacterDraft(id: string): Promise<CharacterDraft | undefined> {
+    if (id.length === 0) {
+      return Promise.resolve(undefined);
+    }
+    return this.bridge.character(id);
+  }
+
+  loadPersonaDraft(id: string): Promise<PersonaDraft | undefined> {
+    if (id.length === 0) {
+      return Promise.resolve(undefined);
+    }
+    return this.bridge.persona(id);
+  }
+
+  loadPromptProfileDraft(id: string): Promise<PromptProfileDraft | undefined> {
+    if (id.length === 0) {
+      return Promise.resolve(undefined);
+    }
+    return this.bridge.promptProfile(id);
+  }
+
+  saveCharacter(draft: CharacterDraft): void {
+    this.writeLibrary(
+      () => this.bridge.saveCharacter(draft),
+      (_id: string) => {
+        this.characters = [];
+        this.searchCharacters(this.characterQuery);
+      });
+  }
+
+  savePersona(draft: PersonaDraft): void {
+    this.writeLibrary(
+      () => this.bridge.savePersona(draft),
+      (_id: string) => {
+        this.characters = [];
+        this.searchCharacters(this.characterQuery);
+      });
+  }
+
+  saveWorldBook(draft: WorldBookDraft): void {
+    this.writeLibrary(() => this.bridge.saveWorldBook(draft), (_id: string) => {
+    });
+  }
+
+  savePromptProfile(draft: PromptProfileDraft): void {
+    this.writeLibrary(() => this.bridge.savePromptProfile(draft), (_id: string) => {
+    });
+  }
+
+  private removeResource(work: () => Promise<boolean>): void {
+    this.libraryBusy = true;
+    this.clearError();
+    work().then((removed: boolean) => {
+      this.libraryBusy = false;
+      if (!removed) {
+        // Nothing was there. Saying so beats a spinner that stops with no
+        // explanation, and it is the ordinary outcome when the same resource is
+        // deleted from two screens.
+        this.fail('already_removed');
+      }
+      this.loadLibrary();
+      this.characters = [];
+      this.searchCharacters(this.characterQuery);
+    }).catch((error: Error) => {
+      this.libraryBusy = false;
+      this.fail('delete_failed', error.message);
+    });
+  }
+
+  deleteCharacter(id: string): void {
+    this.removeResource(() => this.bridge.deleteCharacter(id));
+  }
+
+  deletePersona(id: string): void {
+    this.removeResource(() => this.bridge.deletePersona(id));
+  }
+
+  deleteWorldBook(id: string): void {
+    this.removeResource(() => this.bridge.deleteWorldBook(id));
+  }
+
+  deletePromptProfile(id: string): void {
+    this.removeResource(() => this.bridge.deletePromptProfile(id));
   }
 
   openSession(sessionId: string): void {
@@ -872,6 +1141,13 @@ export class ChatController {
       });
       this.contextSources = snapshot.contextSources;
       this.currentCharacter = this.characterById(snapshot.session.characterId);
+      // The bindings are read from the snapshot rather than kept locally, so the
+      // binding screen always shows what is stored. Optimistically applying a
+      // checkbox would leave the two disagreeing whenever a write was refused.
+      this.conversationParticipants = snapshot.participants;
+      this.conversationPersonaId = snapshot.personaId ?? '';
+      this.conversationWorldbookIds = snapshot.worldbookIds;
+      this.conversationPromptProfileId = snapshot.promptProfileId ?? '';
       if (!this.currentModel && this.models.length > 0) {
         this.currentModel = this.models[0];
       }

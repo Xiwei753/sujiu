@@ -426,6 +426,14 @@ pub struct SendTurnRequest {
 #[derive(Debug)]
 pub enum TurnError {
     SessionNotFound(String),
+    /// A library entity an edit named does not exist.
+    ///
+    /// Separate from [`TurnError::SessionNotFound`] because the two mean
+    /// opposite things to a caller: a missing conversation is "that chat is
+    /// gone", while a missing entity on a save is "the thing you were editing is
+    /// gone, so writing would have silently created a second copy". Reporting
+    /// both as a missing id would leave a frontend unable to tell which.
+    EntityNotFound(String),
     NoProviderConfigured,
     NoUsableProtocol(String),
     MissingCredential,
@@ -443,6 +451,7 @@ impl std::fmt::Display for TurnError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::SessionNotFound(id) => write!(formatter, "session_not_found: {id}"),
+            Self::EntityNotFound(id) => write!(formatter, "entity_not_found: {id}"),
             Self::NoProviderConfigured => {
                 write!(formatter, "no_provider_configured")
             }
@@ -456,13 +465,13 @@ impl std::fmt::Display for TurnError {
     }
 }
 
-struct Inner {
+pub(crate) struct Inner {
     /// Every domain entity the app stores, as entities. The source of truth:
     /// the context store below is a projection of part of it.
-    library: Library,
-    store: Arc<InMemoryContextStore>,
+    pub(crate) library: Library,
+    pub(crate) store: Arc<InMemoryContextStore>,
     tools: Arc<ToolRegistry>,
-    endpoint: Option<EndpointConfig>,
+    pub(crate) endpoint: Option<EndpointConfig>,
     storage_state: StorageState,
 }
 
@@ -538,7 +547,7 @@ const CAPABILITIES_KEY: &str = "sujiu-capabilities.json";
 
 /// The stateful runtime exported across the FFI boundary.
 pub struct SujiuRuntime {
-    inner: Mutex<Inner>,
+    pub(crate) inner: Mutex<Inner>,
     cancel: Mutex<Option<CancelToken>>,
     /// What each configured endpoint was found to speak.
     ///
@@ -840,7 +849,7 @@ impl SujiuRuntime {
     /// documents and rebuilt into the search view on every launch, so writing
     /// the view here too would store the same lore twice and leave two
     /// documents that could disagree.
-    fn persist(&self) -> std::io::Result<()> {
+    pub(crate) fn persist(&self) -> std::io::Result<()> {
         if self.storage_protection().is_some() {
             return Ok(());
         }

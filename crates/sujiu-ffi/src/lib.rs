@@ -26,6 +26,7 @@ pub use sujiu_core::CORE_VERSION;
 
 pub mod documents;
 pub mod events;
+pub mod library;
 pub mod runtime;
 pub mod seed;
 pub mod storage;

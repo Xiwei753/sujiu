@@ -1,7 +1,6 @@
 import { common } from '@kit.AbilityKit';
 import { KeyboardAvoidMode } from '@kit.ArkUI';
 import {
-  CharacterSummary,
   DiagnosticEntry,
   ModelSummary,
   ProviderDraft,
@@ -9,8 +8,22 @@ import {
 } from '../bridge/SujiuBridge';
 import { AppGraph } from '../app/Controller';
 import { Composer } from '../components/Composer';
+import { ConversationContents } from '../components/ConversationContents';
 import { ConversationView } from '../components/ConversationView';
 import { SafeArea } from '../ui/SafeArea';
+import {
+  CharacterEditor,
+  PersonaEditor,
+  PromptEditor,
+  WorldBookEditor
+} from '../components/LibraryEditors';
+import {
+  CharacterLibrary,
+  LibraryHub,
+  PersonaLibrary,
+  PromptLibrary,
+  WorldBookLibrary
+} from '../components/Library';
 import { HistoryPanel } from '../components/HistoryPanel';
 import { CharacterSelectorSheet, ContextSheet, ModelSelectorSheet } from '../components/SelectorSheets';
 import { AppearanceMode } from '../platform/PlatformServices';
@@ -26,10 +39,25 @@ enum SheetKind {
   More = 'more'
 }
 
-/** Route names for ArkUI `Navigation`; the stack itself is platform owned. */
+/**
+ * Route names for ArkUI `Navigation`; the stack itself is platform owned.
+ *
+ * The library is a hub with four lists under it rather than four top-bar
+ * entries, which is the navigation half of the split: a main screen with one
+ * button per resource kind grows a button per kind forever and never says what
+ * any of them is for.
+ */
 enum RouteName {
   Library = 'Library',
-  CharacterDetail = 'CharacterDetail',
+  Characters = 'Characters',
+  CharacterEdit = 'CharacterEdit',
+  Personas = 'Personas',
+  PersonaEdit = 'PersonaEdit',
+  WorldBooks = 'WorldBooks',
+  WorldBookEdit = 'WorldBookEdit',
+  Prompts = 'Prompts',
+  PromptEdit = 'PromptEdit',
+  ConversationContents = 'ConversationContents',
   Settings = 'Settings'
 }
 
@@ -234,6 +262,20 @@ struct Index {
         .textAlign(TextAlign.Center)
         .accessibilityText(this.a11y($r('app.string.a11y_more')))
         .onClick(() => this.openSheet(SheetKind.More));
+
+      this.topBarEntry('▤', $r('app.string.a11y_library'), () => {
+        this.pathStack.pushPath({ name: RouteName.Library });
+      });
+
+      // Rightmost, and last in source order, on purpose. Settings is the one
+      // thing a user looks for after anything else has failed, and a fixed
+      // position in the corner is the only way it can be found without reading
+      // the screen. It is a glyph in the theme's own colour rather than a
+      // platform icon, so it follows the light and dark palettes instead of
+      // arriving as a fixed blue that belongs to neither.
+      this.topBarEntry('⚙', $r('app.string.settings_title'), () => {
+        this.pathStack.pushPath({ name: RouteName.Settings });
+      });
     }
     .width('100%')
     // The window is laid out full screen so the navigation indicator yields to
@@ -243,6 +285,26 @@ struct Index {
     // inset can change without touching the spacing.
     .padding({ left: 8, right: 8, top: SafeArea.topVp + 6, bottom: 6 })
     .backgroundColor(this.theme.pageBackground);
+  }
+
+  /**
+   * One of the two fixed top-right entries.
+   *
+   * Both are drawn by this one builder, so "visually consistent" is not a promise
+   * about matching numbers — it is one definition, used twice. Neither carries a
+   * background: a filled button on each side of the bar would out-shout the
+   * conversation title, which is the thing the bar exists to name.
+   */
+  @Builder
+  private topBarEntry(glyph: string, label: Resource, action: () => void) {
+    Text(glyph)
+      .fontSize(20)
+      .fontColor(this.theme.textPrimary)
+      .width(40)
+      .height(40)
+      .textAlign(TextAlign.Center)
+      .accessibilityText(this.a11y(label))
+      .onClick(() => action());
   }
 
   /**
@@ -358,7 +420,7 @@ struct Index {
     }
   }
 
-  /** Overflow menu: the few actions that must not live in the top bar. */
+  /** Overflow menu: what does not belong in the two fixed top-right entries. */
   @Builder
   private moreSheet() {
     Column({ space: 4 }) {
@@ -376,24 +438,24 @@ struct Index {
         .padding({ left: 24, right: 24, top: 10, bottom: 10 })
         .onClick(() => this.openSheet(SheetKind.Context));
 
-      Text($r('app.string.sheet_item_new_chat'))
+      Text($r('app.string.sheet_item_conversation_contents'))
         .fontSize(16)
         .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, right: 24, top: 10, bottom: 10 })
         .onClick(() => {
           this.closeSheet();
-          this.controller.newSession();
+          this.pathStack.pushPath({ name: RouteName.ConversationContents });
         });
 
-      Text($r('app.string.sheet_item_settings'))
+      Text($r('app.string.sheet_item_new_chat'))
         .fontSize(16)
         .fontColor(this.theme.textPrimary)
         .width('100%')
         .padding({ left: 24, right: 24, top: 10, bottom: 16 })
         .onClick(() => {
           this.closeSheet();
-          this.pathStack.pushPath({ name: RouteName.Settings });
+          this.controller.newSession();
         });
     }
     .alignItems(HorizontalAlign.Start)
@@ -451,9 +513,81 @@ struct Index {
     // whole app.
     NavDestination() {
       if (name === RouteName.Library) {
-        this.libraryView()
-      } else if (name === RouteName.CharacterDetail) {
-        this.characterDetailView(param as string)
+        LibraryHub({
+          controller: this.controller,
+          theme: this.theme,
+          onBack: () => this.pathStack.pop(),
+          onOpenCharacters: () => this.pathStack.pushPath({ name: RouteName.Characters }),
+          onOpenPersonas: () => this.pathStack.pushPath({ name: RouteName.Personas }),
+          onOpenWorldBooks: () => this.pathStack.pushPath({ name: RouteName.WorldBooks }),
+          onOpenPrompts: () => this.pathStack.pushPath({ name: RouteName.Prompts })
+        })
+      } else if (name === RouteName.Characters) {
+        CharacterLibrary({
+          controller: this.controller,
+          theme: this.theme,
+          onBack: () => this.pathStack.pop(),
+          onNew: () => this.pathStack.pushPath({ name: RouteName.CharacterEdit, param: '' }),
+          onOpenCharacter: (id: string) => this.pathStack.pushPath({ name: RouteName.CharacterEdit, param: id })
+        })
+      } else if (name === RouteName.CharacterEdit) {
+        CharacterEditor({
+          controller: this.controller,
+          theme: this.theme,
+          characterId: param as string,
+          onBack: () => this.pathStack.pop()
+        })
+      } else if (name === RouteName.Personas) {
+        PersonaLibrary({
+          controller: this.controller,
+          theme: this.theme,
+          onBack: () => this.pathStack.pop(),
+          onNew: () => this.pathStack.pushPath({ name: RouteName.PersonaEdit, param: '' }),
+          onOpenPersona: (id: string) => this.pathStack.pushPath({ name: RouteName.PersonaEdit, param: id })
+        })
+      } else if (name === RouteName.PersonaEdit) {
+        PersonaEditor({
+          controller: this.controller,
+          theme: this.theme,
+          personaId: param as string,
+          onBack: () => this.pathStack.pop()
+        })
+      } else if (name === RouteName.WorldBooks) {
+        WorldBookLibrary({
+          controller: this.controller,
+          theme: this.theme,
+          onBack: () => this.pathStack.pop(),
+          onNew: () => this.pathStack.pushPath({ name: RouteName.WorldBookEdit, param: '' }),
+          onOpenWorldBook: (id: string) => this.pathStack.pushPath({ name: RouteName.WorldBookEdit, param: id })
+        })
+      } else if (name === RouteName.WorldBookEdit) {
+        WorldBookEditor({
+          controller: this.controller,
+          theme: this.theme,
+          worldBookId: param as string,
+          onBack: () => this.pathStack.pop()
+        })
+      } else if (name === RouteName.Prompts) {
+        PromptLibrary({
+          controller: this.controller,
+          theme: this.theme,
+          onBack: () => this.pathStack.pop(),
+          onNew: () => this.pathStack.pushPath({ name: RouteName.PromptEdit, param: '' }),
+          onOpenProfile: (id: string) => this.pathStack.pushPath({ name: RouteName.PromptEdit, param: id })
+        })
+      } else if (name === RouteName.PromptEdit) {
+        PromptEditor({
+          controller: this.controller,
+          theme: this.theme,
+          profileId: param as string,
+          onBack: () => this.pathStack.pop()
+        })
+      } else if (name === RouteName.ConversationContents) {
+        ConversationContents({
+          controller: this.controller,
+          theme: this.theme,
+          onBack: () => this.pathStack.pop()
+        })
       } else {
         this.settingsView()
       }
@@ -873,76 +1007,6 @@ struct Index {
     // Padded as well, because it is the same window. A settings page that began
     // under the status bar would look like a page whose own header is missing.
     .padding({ top: SafeArea.topVp, left: 12, right: 12, bottom: 12 })
-    .backgroundColor(this.theme.pageBackground);
-  }
-
-  @Builder
-  private libraryView() {
-    Column() {
-      this.pageHeader($r('app.string.library_title'));
-
-      List({ space: 12 }) {
-        ForEach(this.controller.characters, (character: CharacterSummary) => {
-          ListItem() {
-            Row({ space: 12 }) {
-              Text('👤').fontSize(20);
-              Column({ space: 2 }) {
-                Text(character.name)
-                  .fontSize(15)
-                  .fontColor(this.theme.textPrimary)
-                  .width('100%');
-                Text(character.description)
-                  .fontSize(12)
-                  .fontColor(this.theme.textSecondary)
-                  .maxLines(2)
-                  .textOverflow({ overflow: TextOverflow.Ellipsis })
-                  .width('100%');
-              }
-              .alignItems(HorizontalAlign.Start)
-              .layoutWeight(1);
-            }
-            .width('100%')
-            .padding(16)
-            .borderRadius(14)
-            .backgroundColor(this.theme.surface)
-            .onClick(() => this.pathStack.pushPath({ name: RouteName.CharacterDetail, param: character.id }));
-          }
-        }, (character: CharacterSummary) => character.id);
-      }
-      .width('100%')
-      .layoutWeight(1)
-      .padding(16)
-      .backgroundColor(this.theme.pageBackground);
-    }
-    .width('100%')
-    .height('100%');
-  }
-
-  @Builder
-  private characterDetailView(characterId: string) {
-    Column({ space: 12 }) {
-      this.pageHeader(
-        this.controller.characterById(characterId)?.name ?? $r('app.string.title_default_character')
-      );
-
-      Text(this.controller.characterById(characterId)?.description ?? '')
-        .fontSize(15)
-        .fontColor(this.theme.textPrimary)
-        .width('100%');
-
-      Button($r('app.string.character_detail_chat'))
-        .width('100%')
-        .backgroundColor(this.theme.accent)
-        .fontColor(this.theme.textOnAccent)
-        .onClick(() => {
-          this.controller.selectCharacter(characterId);
-          this.pathStack.clear();
-        });
-    }
-    .alignItems(HorizontalAlign.Start)
-    .width('100%')
-    .height('100%')
-    .padding(16)
     .backgroundColor(this.theme.pageBackground);
   }
 

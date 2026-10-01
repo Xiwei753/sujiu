@@ -89,6 +89,133 @@ export interface ContextSource {
   recordCount: number;
 }
 
+/**
+ * A persona, as a list row.
+ *
+ * A persona is a separate stored resource, not a column on a character. Its own
+ * call is what lets a frontend list and delete one without opening a character,
+ * which is what used to happen and is why personas went missing from the UI.
+ */
+export interface Persona {
+  id: string;
+  name: string;
+  description: string;
+  /** How many world books this persona brings of its own. */
+  worldbookCount: number;
+}
+
+/**
+ * A persona in full, for an editor.
+ *
+ * A different shape from `Persona` on purpose: an editor needs the bodies, and a
+ * summary row cannot tell "empty" from "unchanged".
+ */
+export interface PersonaRequest {
+  /** Omitted creates; an unknown id is refused rather than silently duplicated. */
+  id?: string;
+  name: string;
+  description: string;
+  userPrompt: string;
+  worldbookIds: string[];
+}
+
+/** One lore entry. Lives inside a book; has no meaning outside one. */
+export interface WorldBookEntry {
+  id: string;
+  name: string;
+  /** Unshortened: truncating lore here is a presentation choice, not a bridge one. */
+  content: string;
+  /** Trigger words. Without one, the entry fires only when `constant` is set. */
+  keys: string[];
+  enabled: boolean;
+  constant: boolean;
+  /** `before_character`, `after_character` or `near_history`. */
+  position: string;
+}
+
+export interface WorldBookEntryRequest {
+  /** Omitted for a new entry. Present ids are kept, so record URIs stay valid. */
+  id?: string;
+  name: string;
+  content: string;
+  keys: string[];
+  /** Omitted means enabled: an entry the author cannot see is worse than none. */
+  enabled?: boolean;
+  constant?: boolean;
+  /** Unrecognised labels fall back to `after_character`. */
+  position?: string;
+}
+
+/**
+ * A world book, with its entries.
+ *
+ * An independent resource, meant to be bound to many characters, personas and
+ * conversations at once. Binding carries an id, never a copy.
+ */
+export interface WorldBook {
+  id: string;
+  name: string;
+  entries: WorldBookEntry[];
+}
+
+export interface WorldBookRequest {
+  /** Omitted creates; an unknown id is refused rather than silently duplicated. */
+  id?: string;
+  name: string;
+  entries: WorldBookEntryRequest[];
+}
+
+/**
+ * A prompt profile, as a list row.
+ *
+ * The domain calls this a prompt profile; a screen may call it Prompts and never
+ * mention the type name. The bodies are absent here, as they are for every other
+ * resource row.
+ */
+export interface PromptProfile {
+  id: string;
+  name: string;
+}
+
+/**
+ * A prompt profile in full, for an editor.
+ *
+ * Reusable conversation content — a system prompt, a user prompt, post-history
+ * instructions, format rules — and not an app setting. Fixed segments already
+ * inside a profile survive an edit made through this shape.
+ */
+export interface PromptProfileRequest {
+  /** Omitted creates; an unknown id is refused rather than silently duplicated. */
+  id?: string;
+  name: string;
+  systemPrompt: string;
+  userPrompt: string;
+  postHistoryInstructions: string;
+  formatRules: string;
+}
+
+/**
+ * A character in full, for an editor.
+ *
+ * Editing has to be possible, not only importing: a user who can add a character
+ * but not correct its words would have to delete and recreate it, losing every
+ * conversation bound to it.
+ */
+export interface CharacterRequest {
+  /** Omitted creates; an unknown id is refused rather than silently duplicated. */
+  id?: string;
+  name: string;
+  description: string;
+  personality: string;
+  scenario: string;
+  firstMessage: string;
+  alternateGreetings: string[];
+  exampleDialogue: string;
+  systemPrompt: string;
+  postHistoryInstructions: string;
+  worldbookIds: string[];
+}
+
 export interface ToolCall {
   id: string;
   name: string;
@@ -266,6 +393,57 @@ export class SujiuRuntimeBridge {
     worldbookIds?: string[],
     promptProfileId?: string
   ): string;
+  /**
+   * Replace what one conversation binds: participants, persona, world books and
+   * prompt profile.
+   *
+   * This changes which stored resources a chat *uses* and never edits those
+   * resources, so one persona bound in two conversations stays one persona. The
+   * transcript is left alone: changing who is in a room is not rewriting what
+   * has already been said in it.
+   *
+   * Throws when the conversation is unknown, and when a bound persona, character
+   * or prompt profile does not exist. Naming a resource that is not there is a
+   * mistake worth reporting, not a reason to store a dangling id.
+   */
+  setConversationBindings(
+    sessionId: string,
+    participants: ParticipantRequest[],
+    personaId?: string,
+    worldbookIds?: string[],
+    promptProfileId?: string
+  ): void;
+  /**
+   * Every stored persona, as list rows. Its own call rather than a column on a
+   * character, because a persona is a separate entity.
+   */
+  listPersonas(): Persona[];
+  /** One persona in full, or null when the id is unknown. */
+  persona(id: string): PersonaRequest | null;
+  /** Create or edit. Returns the id. Throws `entity_not_found` on a stale id. */
+  savePersona(persona: PersonaRequest): string;
+  /** Delete and unbind everywhere. False when the id was already unknown. */
+  deletePersona(id: string): boolean;
+  /** Every stored world book, each with its entries. */
+  listWorldBooks(): WorldBook[];
+  saveWorldBook(book: WorldBookRequest): string;
+  deleteWorldBook(id: string): boolean;
+  /** Every stored prompt profile, as list rows. */
+  listPromptProfiles(): PromptProfile[];
+  /** One prompt profile in full, or null when the id is unknown. */
+  promptProfile(id: string): PromptProfileRequest | null;
+  savePromptProfile(profile: PromptProfileRequest): string;
+  deletePromptProfile(id: string): boolean;
+  saveCharacter(character: CharacterRequest): string;
+  /**
+   * One character in full, or null when the id is unknown.
+   *
+   * `listCharacters` answers with summaries, and a summary carries no scenario,
+   * no first message and no prompt bodies. An editor prefilled from one starts
+   * blank over a character that is fully written.
+   */
+  character(id: string): CharacterRequest | null;
+  deleteCharacter(id: string): boolean;
   /** Throws when `provider.baseUrl` is blank. Nothing else is validated here. */
   configureProvider(provider: ProviderConfig): void;
   /**

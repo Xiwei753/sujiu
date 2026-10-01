@@ -50,10 +50,39 @@ export interface MessageSummary {
   toolStatus?: string;
 }
 
+/**
+ * Who is in a conversation, as the runtime reports it.
+ *
+ * The name is resolved here so a screen can render a participant without a
+ * second lookup, and it is the character's current name rather than a snapshot of
+ * it: a participant is a reference, and the reference resolves to whatever the
+ * character says it is now.
+ */
+export interface ConversationParticipant {
+  characterId: string;
+  name: string;
+  /** `character` or `narrator`. */
+  role: string;
+}
+
+/**
+ * One conversation, its messages, and what it binds.
+ *
+ * The bindings are ids and nothing more. They are reported on the snapshot
+ * because "which persona is this chat using" is a question about the
+ * conversation, but the answer is a pointer: editing the persona is somebody
+ * else's job, in the library.
+ */
 export interface ConversationSnapshot {
   session: SessionSummary;
   messages: MessageSummary[];
   contextSources: ContextSourceSummary[];
+  participants: ConversationParticipant[];
+  /** Absent when this conversation uses no persona, which is a normal state. */
+  personaId?: string;
+  worldbookIds: string[];
+  /** Absent when this conversation uses no saved prompt set. */
+  promptProfileId?: string;
 }
 
 export enum TurnEventKind {
@@ -219,6 +248,171 @@ export interface DiagnosticEntry {
   detail: string;
 }
 
+/**
+ * A stored persona, as a list row.
+ *
+ * A persona is a first-class resource, not a column on a character. It used to
+ * be reachable only by opening a character, which made it invisible: a user
+ * could not list them, name them, or delete one without touching a character.
+ * The bodies are deliberately absent here — a row is what you scan, and the
+ * editor is a separate call that returns them.
+ */
+export interface PersonaSummary {
+  id: string;
+  name: string;
+  description: string;
+  /** How many world books this persona brings of its own. */
+  worldbookCount: number;
+}
+
+/**
+ * A persona in full, for an editor.
+ *
+ * A different shape from the row, not a fuller one. An editor needs something to
+ * prefill and something to distinguish "empty" from "unchanged", and a summary
+ * row can give it neither.
+ */
+export interface PersonaDraft {
+  /** Absent for a persona that does not exist yet, which means create. */
+  id?: string;
+  name: string;
+  description: string;
+  /** The persona's own words as the user. Goes to the model verbatim. */
+  userPrompt: string;
+  /** Referenced world books, by id. Sharing is the point; copying is not. */
+  worldbookIds: string[];
+}
+
+/**
+ * One lore entry inside a world book.
+ *
+ * An entry has no meaning outside the book that holds it, so the runtime sends
+ * a whole book at a time: an editor cannot save one entry without the rest.
+ */
+export interface WorldBookEntry {
+  id: string;
+  name: string;
+  /**
+   * The entry's text, unshortened.
+   *
+   * A preview here would be a truncation rule baked into the bridge, and picking
+   * the interesting sentence of a piece of lore is not this layer's decision.
+   */
+  content: string;
+  /** Trigger words. An entry with none fires only when `constant` is set. */
+  keys: string[];
+  enabled: boolean;
+  /** Injected whether or not a key matched. */
+  constant: boolean;
+  /** `before_character`, `after_character` or `near_history`. */
+  position: string;
+}
+
+/**
+ * One lore entry as an editor holds it before saving.
+ *
+ * `id` absent means a new entry, and `enabled` absent means the runtime's
+ * default, which is enabled: an entry somebody just wrote and cannot see is
+ * worse than one that works.
+ */
+export interface WorldBookEntryDraft {
+  id?: string;
+  name: string;
+  content: string;
+  keys: string[];
+  enabled?: boolean;
+  constant?: boolean;
+  position?: string;
+}
+
+/**
+ * A stored world book.
+ *
+ * An independent resource. One book is meant to be bound to many characters,
+ * personas and conversations at once, which is why binding carries an id and
+ * never a copy.
+ */
+export interface WorldBookSummary {
+  id: string;
+  name: string;
+  entries: WorldBookEntry[];
+}
+
+export interface WorldBookDraft {
+  /** Absent for a book that does not exist yet, which means create. */
+  id?: string;
+  name: string;
+  entries: WorldBookEntryDraft[];
+}
+
+/**
+ * A stored prompt profile, as a list row.
+ *
+ * The domain calls this a prompt profile because that is what it is. A screen
+ * calls it Prompts and never says the type name: an internal Rust type name is
+ * not something a user has to recognise to manage their own writing.
+ *
+ * The bodies are absent here, for the same reason a persona row omits its own.
+ */
+export interface PromptProfileSummary {
+  id: string;
+  name: string;
+}
+
+/**
+ * A prompt profile in full, for an editor.
+ *
+ * This is reusable conversation content — a system prompt, a user prompt,
+ * post-history instructions and format rules — and it is emphatically not an app
+ * setting. Two conversations may bind the same profile, and changing it changes
+ * both.
+ */
+export interface PromptProfileDraft {
+  /** Absent for a profile that does not exist yet, which means create. */
+  id?: string;
+  name: string;
+  systemPrompt: string;
+  userPrompt: string;
+  postHistoryInstructions: string;
+  formatRules: string;
+}
+
+/**
+ * A character in full, for an editor.
+ *
+ * Editing has to be possible, not only importing: a user who can add a
+ * character but not correct its words has to delete and recreate it, and that
+ * loses every conversation bound to it.
+ */
+export interface CharacterDraft {
+  /** Absent for a character that does not exist yet, which means create. */
+  id?: string;
+  name: string;
+  description: string;
+  personality: string;
+  scenario: string;
+  firstMessage: string;
+  alternateGreetings: string[];
+  exampleDialogue: string;
+  systemPrompt: string;
+  postHistoryInstructions: string;
+  /** Referenced world books, by id. */
+  worldbookIds: string[];
+}
+
+/**
+ * One character taking part in a conversation, and how.
+ *
+ * A participant is a reference to a stored character, not a copy of it. Editing
+ * the character afterwards is visible in every conversation it is in.
+ */
+export interface ParticipantBinding {
+  characterId: string;
+  /** `character` or `narrator`. Left out, the runtime uses `character`. */
+  role?: string;
+  displayName?: string;
+}
+
 export interface SujiuBridge {
   listSessions(): Promise<SessionSummary[]>;
   listCharacters(query?: string): Promise<CharacterSummary[]>;
@@ -227,6 +421,88 @@ export interface SujiuBridge {
   conversationState(sessionId: string): Promise<ConversationSnapshot>;
   /** Creates an empty session so a brand new chat can send its first message. */
   createSession(characterId: string): Promise<SessionSummary>;
+
+  /** Every stored persona, as list rows. Its own call, not part of a character. */
+  listPersonas(): Promise<PersonaSummary[]>;
+  /** One persona in full, for an editor. Undefined when there is no such id. */
+  persona(id: string): Promise<PersonaDraft | undefined>;
+  /**
+   * Creates or edits a persona and resolves to its id.
+   *
+   * `id` absent means create and the runtime allocates one; `id` present and
+   * unknown means the resource this editor holds is gone, and the runtime refuses
+   * rather than silently making a second persona under a new id. An editor that
+   * ignores this failure would fork the user's writing without telling them.
+   */
+  savePersona(draft: PersonaDraft): Promise<string>;
+  /** Deletes a persona and unbinds it everywhere. Resolves false when unknown. */
+  deletePersona(id: string): Promise<boolean>;
+
+  /** Every stored world book, each with its entries. */
+  listWorldBooks(): Promise<WorldBookSummary[]>;
+  /**
+   * Creates or edits a world book and resolves to its id.
+   *
+   * Entry ids that already exist are kept. Allocating a fresh id for an entry
+   * that was only edited would change the context record it is addressed by, so
+   * a model holding an earlier reference to that lore could no longer read it.
+   */
+  saveWorldBook(draft: WorldBookDraft): Promise<string>;
+  /** Deletes a world book and unbinds it everywhere. Resolves false when unknown. */
+  deleteWorldBook(id: string): Promise<boolean>;
+
+  /** Every stored prompt profile, as list rows. */
+  listPromptProfiles(): Promise<PromptProfileSummary[]>;
+  /** One prompt profile in full, for an editor. Undefined when there is no such id. */
+  promptProfile(id: string): Promise<PromptProfileDraft | undefined>;
+  /**
+   * Creates or edits a prompt profile and resolves to its id.
+   *
+   * Fixed segments already inside the profile survive an edit. An editor that
+   * only knows the four prompt bodies must not be able to erase prompt segments
+   * it has no field for, by saving a name.
+   */
+  savePromptProfile(draft: PromptProfileDraft): Promise<string>;
+  /** Deletes a prompt profile and unbinds it everywhere. Resolves false when unknown. */
+  deletePromptProfile(id: string): Promise<boolean>;
+
+  /** Creates or edits a character and resolves to its id. */
+  saveCharacter(draft: CharacterDraft): Promise<string>;
+  /**
+   * One character in full, for an editor to prefill from.
+   *
+   * Not the summary from `listCharacters`. A summary has no scenario, no first
+   * message and no prompt bodies, so an editor prefilled from one starts blank
+   * over a character that is fully written — and saving that replaces everything
+   * with whatever survived in three fields.
+   *
+   * Resolves to nothing for a blank or unknown id, which is exactly what a "new
+   * character" form wants: an empty form.
+   */
+  character(id: string): Promise<CharacterDraft | undefined>;
+  /** Deletes a character and unbinds it everywhere. Resolves false when unknown. */
+  deleteCharacter(id: string): Promise<boolean>;
+
+  /**
+   * Replaces what one conversation binds: its participants, persona, world books
+   * and prompt profile.
+   *
+   * This is the conversation half of the split, and it is the whole reason the
+   * split exists. It changes which stored resources this chat *uses* and never
+   * edits those resources, so one persona bound in two conversations stays one
+   * persona and fixing it fixes both.
+   *
+   * The transcript is left alone. Changing who is in a room is not rewriting
+   * what has already been said in it, and dropping steps to make the room look
+   * consistent would delete a record the next request has to replay.
+   */
+  setConversationBindings(
+    sessionId: string,
+    participants: ParticipantBinding[],
+    personaId?: string,
+    worldbookIds?: string[],
+    promptProfileId?: string
+  ): Promise<void>;
   /**
    * The wire protocols this runtime speaks, best first, from the runtime itself.
    *
