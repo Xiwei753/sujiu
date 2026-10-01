@@ -21,6 +21,13 @@ Three things are checked:
 3. No hand-written native contract has come back. A second copy of the surface
    cannot drift if it does not exist, so its return is worth a line of CI.
 
+4. No editor sends an empty world-book list. The runtime replaces
+   `worldbook_ids` wholesale on save, so an editor that does not carry them back
+   is not leaving them alone — it is unbinding them, silently, and the lore
+   stops reaching the model. The compiler cannot see this: `[]` is a perfectly
+   well-typed `string[]`, so the shape agrees with the declaration and the
+   meaning is lost. This one shipped and was caught by reading, not by a tool.
+
 Argument counts, parameter types and return types are deliberately not checked
 here. They were wrong twice (`useDataDirectory` declared as a promise, and
 `rememberedEndpoint` as returning `undefined`), and both are now compile errors
@@ -173,13 +180,44 @@ def check_no_handwritten_contract() -> None:
         fail(problems)
 
 
+def check_no_dropped_bindings() -> None:
+    """An editor must not send an empty world-book list.
+
+    `worldbook_ids: []` is valid at every layer: it is a `string[]` in ArkTS, an
+    `Option`/`Vec` on the wire, and a legal value in the Rust request. So the
+    compiler and the generated declaration both accept it while it means
+    "unbind everything", and the only thing that notices is a user who saved a
+    character and later found its lore gone.
+
+    A create has nothing to preserve and is written with an empty id, so the
+    check only fires on a draft that is editing something that exists.
+    """
+    editors = REPO_ROOT / "apps/harmony/entry/src/main/ets/components/LibraryEditors.ets"
+    if not editors.is_file():
+        fail([f"{editors.relative_to(REPO_ROOT)} is missing."])
+
+    source = editors.read_text(encoding="utf-8")
+    problems: list[str] = []
+    for match in re.finditer(r"worldbookIds:\s*\[\s*\]", source):
+        line = source[: match.start()].count("\n") + 1
+        problems.append(
+            f"{editors.relative_to(REPO_ROOT)}:{line} saves worldbookIds as an empty list. "
+            f"The runtime replaces the field wholesale, so this unbinds every world book the "
+            f"resource carried and nothing reports it. Carry the loaded ids, or pick them."
+        )
+    if problems:
+        fail(problems)
+
+
 def main() -> None:
     check_association()
     check_calls()
     check_no_handwritten_contract()
+    check_no_dropped_bindings()
     print(
         "The HarmonyOS bridge reads the generated declaration: the module is wired as a "
-        "package, every call it makes exists, and it declares no native contract of its own."
+        "package, every call it makes exists, it declares no native contract of its own, "
+        "and no editor drops a binding on save."
     )
 
 

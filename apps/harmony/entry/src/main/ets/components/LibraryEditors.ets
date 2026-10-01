@@ -120,6 +120,60 @@ struct EditorIntro {
   }
 }
 
+/**
+ * Picks which stored world books one resource carries with it.
+ *
+ * This exists because the alternative was a form that sent an empty list: the
+ * runtime replaces `worldbook_ids` wholesale on save, so an editor that does not
+ * carry them back does not "leave them alone", it unbinds them. Saving a
+ * character's description would silently detach its lore, and because
+ * `world_books_of` reads that field, the lore would stop reaching the model with
+ * nothing to report it.
+ *
+ * It binds by id and shows the stored name. Copying a world book into a character
+ * would make two books that can disagree.
+ */
+@Component
+struct WorldBookPicker {
+  @ObjectLink controller: ChatController;
+  @ObjectLink theme: AppTheme;
+  @Prop selected: string[] = [];
+  onToggle: (id: string) => void = (_id: string) => {};
+
+  build() {
+    Column({ space: 6 }) {
+      if (this.controller.worldBooks.length === 0) {
+        Text($r('app.string.library_empty_world_books'))
+          .fontSize(13)
+          .fontColor(this.theme.textSecondary)
+          .width('100%');
+      } else {
+        ForEach(this.controller.worldBooks, (book: WorldBookSummary) => {
+          Row({ space: 12 }) {
+            Text(book.name)
+              .fontSize(15)
+              .fontColor(this.theme.textPrimary)
+              .layoutWeight(1)
+              .maxLines(1)
+              .textOverflow({ overflow: TextOverflow.Ellipsis });
+            Text(this.selected.includes(book.id) ? '✓' : '')
+              .fontSize(16)
+              .fontColor(this.theme.textPrimary)
+              .width(24)
+              .textAlign(TextAlign.Center);
+          }
+          .width('100%')
+          .padding(14)
+          .borderRadius(12)
+          .backgroundColor(this.theme.surface)
+          .onClick(() => this.onToggle(book.id));
+        }, (book: WorldBookSummary) => book.id);
+      }
+    }
+    .width('100%');
+  }
+}
+
 @Component
 export struct CharacterEditor {
   @ObjectLink controller: ChatController;
@@ -137,6 +191,7 @@ export struct CharacterEditor {
   @State private exampleDialogue: string = '';
   @State private systemPrompt: string = '';
   @State private postHistory: string = '';
+  @State private worldBookIds: string[] = [];
 
   aboutToAppear(): void {
     const wanted: string = this.characterId;
@@ -157,7 +212,14 @@ export struct CharacterEditor {
       this.exampleDialogue = draft.exampleDialogue;
       this.systemPrompt = draft.systemPrompt;
       this.postHistory = draft.postHistoryInstructions;
+      this.worldBookIds = draft.worldbookIds;
     });
+  }
+
+  private toggleWorldBook(id: string): void {
+    this.worldBookIds = this.worldBookIds.includes(id) ?
+      this.worldBookIds.filter((item: string) => item !== id) :
+      this.worldBookIds.concat([id]);
   }
 
   build() {
@@ -179,6 +241,17 @@ export struct CharacterEditor {
           EditorField({ label: $r('app.string.library_field_example_dialogue'), theme: this.theme, value: this.exampleDialogue, tall: true, onValue: (t: string) => this.exampleDialogue = t });
           EditorField({ label: $r('app.string.library_field_system_prompt'), theme: this.theme, value: this.systemPrompt, tall: true, onValue: (t: string) => this.systemPrompt = t });
           EditorField({ label: $r('app.string.library_field_post_history'), theme: this.theme, value: this.postHistory, tall: true, onValue: (t: string) => this.postHistory = t });
+          Text($r('app.string.library_field_world_books'))
+            .fontSize(11)
+            .fontColor(this.theme.textSecondary)
+            .width('100%')
+            .margin({ top: 8 });
+          WorldBookPicker({
+            controller: this.controller,
+            theme: this.theme,
+            selected: this.worldBookIds,
+            onToggle: (id: string) => this.toggleWorldBook(id)
+          });
         }
         .width('100%')
         .padding(16);
@@ -208,7 +281,7 @@ export struct CharacterEditor {
             exampleDialogue: this.exampleDialogue,
             systemPrompt: this.systemPrompt,
             postHistoryInstructions: this.postHistory,
-            worldbookIds: []
+            worldbookIds: this.worldBookIds
           } as CharacterDraft);
           this.onBack();
         },
@@ -235,6 +308,7 @@ export struct PersonaEditor {
   @State private name: string = '';
   @State private description: string = '';
   @State private userPrompt: string = '';
+  @State private worldBookIds: string[] = [];
 
   aboutToAppear(): void {
     const wanted: string = this.personaId;
@@ -249,7 +323,14 @@ export struct PersonaEditor {
       this.name = draft.name;
       this.description = draft.description;
       this.userPrompt = draft.userPrompt;
+      this.worldBookIds = draft.worldbookIds;
     });
+  }
+
+  private toggleWorldBook(id: string): void {
+    this.worldBookIds = this.worldBookIds.includes(id) ?
+      this.worldBookIds.filter((item: string) => item !== id) :
+      this.worldBookIds.concat([id]);
   }
 
   build() {
@@ -266,6 +347,17 @@ export struct PersonaEditor {
           EditorField({ label: $r('app.string.library_field_name'), theme: this.theme, value: this.name, onValue: (t: string) => this.name = t });
           EditorField({ label: $r('app.string.library_field_description'), theme: this.theme, value: this.description, tall: true, onValue: (t: string) => this.description = t });
           EditorField({ label: $r('app.string.library_field_user_prompt'), theme: this.theme, value: this.userPrompt, tall: true, onValue: (t: string) => this.userPrompt = t });
+          Text($r('app.string.library_field_world_books'))
+            .fontSize(11)
+            .fontColor(this.theme.textSecondary)
+            .width('100%')
+            .margin({ top: 8 });
+          WorldBookPicker({
+            controller: this.controller,
+            theme: this.theme,
+            selected: this.worldBookIds,
+            onToggle: (id: string) => this.toggleWorldBook(id)
+          });
         }
         .width('100%')
         .padding(16);
@@ -283,7 +375,7 @@ export struct PersonaEditor {
             name: this.name,
             description: this.description,
             userPrompt: this.userPrompt,
-            worldbookIds: []
+            worldbookIds: this.worldBookIds
           } as PersonaDraft);
           this.onBack();
         },
