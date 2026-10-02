@@ -1318,9 +1318,17 @@ fn a_second_compaction_is_given_the_previous_summary_and_only_the_new_turns() {
         "{prompt_text}"
     );
     assert!(
-        !prompt_text.contains("blinking"),
+        !prompt_text.contains("Why is the light blinking?"),
         "the archived turn is represented by the summary now, and re-reading it would be \
          paying for the same history again: {prompt_text}"
+    );
+    // The turn that *is* moving keeps its tool result, because that is often the
+    // only place a fact about the scene was ever written down. An assistant that
+    // says "found it" and moves on must not take the fact with it.
+    assert!(
+        prompt_text.contains("TOOL RESULT (search_context)"),
+        "the tool result reaches the summarizer, or a fact the model looked up is lost \
+         with the turn: {prompt_text}"
     );
 
     drop(runtime);

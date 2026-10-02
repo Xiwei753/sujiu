@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    model::{ModelMessage, ToolCall, ToolCallState, ToolContent, ToolOutput},
+    model::{ModelMessage, ModelRole, ToolCall, ToolCallState, ToolContent, ToolOutput},
     ChatRole,
 };
 
@@ -576,6 +576,27 @@ pub struct CompactionInput {
 impl CompactionInput {
     /// A plain-text rendering for a summarizer prompt, with the previous summary
     /// first so the model extends it instead of starting over.
+    ///
+    /// The rendering is built from [`Turn::model_messages`] — the same
+    /// provider-neutral messages the model was shown — rather than from a
+    /// hand-written subset of a turn. A summarizer that sees less than the model
+    /// saw will write a summary of a conversation that never happened: ask for a
+    /// world-book lookup, let the tool answer with the one fact the scene turned
+    /// on, let the assistant reply "found it", and a rendering of the assistant's
+    /// visible text alone hands the summarizer nothing but "found it". The fact
+    /// is still in the archived transcript, and it is gone from the prompt.
+    ///
+    /// Tool **arguments** are included because the model supplied them and a
+    /// result is often only meaningful next to what was asked for. Tool
+    /// **results** are included through the same `model_text()` the model was
+    /// given, so an adapter's decision about what a result looks like applies
+    /// here too.
+    ///
+    /// Reasoning is **not** rendered. It is provider state rather than a visible
+    /// fact of the conversation, it may have been produced by a different
+    /// provider than the one being asked to summarize, and folding it in would
+    /// write private deliberation into a summary that later turns read as what
+    /// was said.
     pub fn to_prompt_text(&self) -> String {
         let mut text = String::new();
 
@@ -587,19 +608,79 @@ impl CompactionInput {
 
         text.push_str("Turns to fold into that summary:\n");
         for turn in &self.turns {
-            text.push_str("\nUSER: ");
-            text.push_str(turn.user.as_str());
-            for step in turn.steps.iter().filter_map(|step| step.text.as_deref()) {
-                if step.trim().is_empty() {
-                    continue;
-                }
-                text.push_str("\nASSISTANT: ");
-                text.push_str(step.trim());
+            for message in turn.model_messages() {
+                push_compaction_line(&mut text, &message);
             }
         }
 
         text
     }
+}
+
+/// One model message as a line of summarizer material.
+fn push_compaction_line(text: &mut String, message: &ModelMessage) {
+    match message {
+        ModelMessage::Text { role, content } => {
+            // Every role the model layer knows, because a summarizer that is
+            // handed "SYSTEM:" for an instruction it was shown as "DEVELOPER:"
+            // is being told the conversation had a different shape.
+            let label = match role {
+                ModelRole::System => "SYSTEM",
+                ModelRole::Developer => "DEVELOPER",
+                ModelRole::User => "USER",
+                ModelRole::Assistant => "ASSISTANT",
+            };
+            push_line(text, label, None, content);
+        }
+        ModelMessage::Assistant {
+            content,
+            speaker,
+            calls,
+            ..
+        } => {
+            if let Some(content) = content.as_deref().filter(|text| !text.trim().is_empty()) {
+                push_line(text, "ASSISTANT", speaker.as_deref(), content);
+            }
+
+            // A step that only asked for tools still has to show up, or the
+            // summarizer is told the assistant acted when nothing was asked.
+            for call in calls {
+                push_line(
+                    text,
+                    "ASSISTANT CALLED",
+                    speaker.as_deref(),
+                    &format!("{}({})", call.name, call.arguments),
+                );
+            }
+        }
+        ModelMessage::ToolResult {
+            name,
+            content,
+            is_error,
+            ..
+        } => {
+            let label = if *is_error {
+                "TOOL ERROR"
+            } else {
+                "TOOL RESULT"
+            };
+            push_line(text, label, Some(name.as_str()), content);
+        }
+    }
+}
+
+/// One labelled block, with an empty block skipped rather than written blank.
+fn push_line(text: &mut String, label: &str, name: Option<&str>, body: &str) {
+    if body.trim().is_empty() {
+        return;
+    }
+
+    text.push('\n');
+    match name {
+        Some(name) => text.push_str(&format!("{label} ({name}): ")),
+        None => text.push_str(&format!("{label}: ")),
+    }
+    text.push_str(body.trim());
 }
 
 /// What one turn cost, as the provider accounted for it.
@@ -1496,6 +1577,58 @@ mod tests {
         // already stands for — every compaction would re-bill the whole
         // conversation and grow until the summarizer ran out of context.
         assert_eq!(archived.summary, "first: 1 turns then 1 more");
+    }
+
+    #[test]
+    fn a_summary_is_written_from_what_the_model_saw_not_from_what_was_said() {
+        let mut turn = Turn::new("turn-1", "what is the vault code?");
+        turn.steps.push(AssistantStep {
+            text: None,
+            reasoning: Some(crate::model::ReasoningSidecar::new(
+                "the user probably wants the archive code",
+                ProviderIdentity::default(),
+            )),
+            tool_calls: vec![ToolCallRecord {
+                id: "call-1".into(),
+                name: "search_context".into(),
+                title: None,
+                arguments: json!({"query": "vault code"}),
+                result: ToolResultRecord::completed(ToolOutput::text(
+                    "the vault code is vault-code-7",
+                )),
+            }],
+            ..AssistantStep::default()
+        });
+        // The assistant says almost nothing. The fact it is summarising lives in
+        // the tool result, and a rendering of visible text alone loses it.
+        turn.steps.push(AssistantStep::text_only("Found it."));
+
+        let material = CompactionInput {
+            previous_summary: String::new(),
+            turns: vec![turn],
+        }
+        .to_prompt_text();
+
+        assert!(
+            material.contains("vault-code-7"),
+            "the tool result is the only place the fact was ever written down: {material}"
+        );
+        assert!(
+            material.contains("search_context"),
+            "and it is meaningless without knowing which tool answered: {material}"
+        );
+        assert!(
+            material.contains("vault code"),
+            "the model supplied the arguments, so the summarizer is told what was asked: \
+             {material}"
+        );
+
+        // Reasoning is provider state, not something that was said.
+        assert!(
+            !material.contains("the user probably wants the archive code"),
+            "private deliberation must not be written into a summary later turns read as \
+             what was said: {material}"
+        );
     }
 
     #[test]

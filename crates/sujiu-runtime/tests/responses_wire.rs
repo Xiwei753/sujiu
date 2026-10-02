@@ -1298,6 +1298,98 @@ fn a_long_conversation_is_compacted_by_the_kernel_without_breaking_pairing() {
     drop(mock.server);
 }
 
+/// A fact the model only ever saw in a tool result has to reach the summarizer.
+///
+/// The transcript is not the model's memory. A turn where the assistant says
+/// "Found it." and the archive holds the only copy of a fact — inside the tool
+/// result — compacts into a summary that mentions nothing, and the fact is then
+/// in neither the prompt nor the summary: it exists in storage and has left the
+/// conversation. The summarizer is handed what the model was shown, so this is
+/// checked on the wire rather than on a rendered string.
+#[test]
+fn a_fact_that_only_a_tool_result_knows_reaches_the_summarizer() {
+    const TURNS: usize = 3;
+
+    let mut script = Vec::new();
+    for _ in 0..TURNS {
+        script.push(SEARCH);
+        // The assistant contributes nothing worth summarising. If the fact
+        // survives, it survived through the tool result.
+        script.push(Step::Text {
+            text: "Found it.",
+            usage: Usage::plain(80, 12),
+        });
+    }
+
+    let mock = Mock::start(script);
+    let runtime = runtime_for(&mock.base_url(), "mock-model");
+    runtime.set_compaction_policy(CompactionPolicy {
+        max_input_chars: 6_000,
+        keep_recent_turns: 1,
+    });
+    let session = runtime.create_session(Some("character-lin"));
+
+    for turn in 0..TURNS {
+        run_turn(
+            &runtime,
+            &session,
+            &format!("Tell me about shift {} and the vault.", turn),
+        );
+    }
+
+    let sent = mock.drain_requests();
+    let summaries: Vec<&Captured> = sent
+        .iter()
+        .filter(|request| {
+            request.body["stream"] != json!(true) && request.body.get("tools").is_none()
+        })
+        .collect();
+    assert!(
+        !summaries.is_empty(),
+        "the budget was reached and a summary was requested: {} request(s) were sent",
+        sent.len()
+    );
+
+    let material = |request: &Captured| {
+        items(request)
+            .last()
+            .and_then(|item| item["content"].as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    assert!(
+        material(&summaries[0]).contains("false positive"),
+        "the tool result is the only place this was ever written down, so the summarizer \
+         has to be given it: {:?}",
+        material(&summaries[0])
+    );
+
+    // Nothing was thrown away to make that happen. The call and its result are
+    // still in the transcript, retrievable, and still paired.
+    let state = runtime.conversation_state(&session).expect("state");
+    let calls: Vec<&sujiu_runtime::runtime::ToolCallSummary> = state
+        .messages
+        .iter()
+        .flat_map(|message| message.tool_calls.iter())
+        .collect();
+    assert_eq!(
+        calls.len(),
+        TURNS,
+        "every call is still in the transcript: {} message(s)",
+        state.messages.len()
+    );
+    for call in &calls {
+        assert_eq!(call.status, "completed");
+        assert!(
+            !call.result_text.is_empty(),
+            "and the result the fact came from is still attached to it"
+        );
+    }
+
+    drop(runtime);
+    drop(mock.server);
+}
+
 /// A summary that could not be written must leave the transcript alone.
 ///
 /// Folding turns into nothing would move them out of the model's reach while
