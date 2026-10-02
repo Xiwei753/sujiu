@@ -20,23 +20,29 @@ import {
 import {
   CharacterLibrary,
   LibraryHub,
+  PageHeader,
   PersonaLibrary,
   PromptLibrary,
   WorldBookLibrary
 } from '../components/Library';
 import { HistoryPanel } from '../components/HistoryPanel';
-import { CharacterSelectorSheet, ContextSheet, ModelSelectorSheet } from '../components/SelectorSheets';
+import { ContextSheet, ModelSelectorSheet } from '../components/SelectorSheets';
 import { AppearanceMode } from '../platform/PlatformServices';
 import { ChatController, EndpointState } from '../presentation/ChatController';
 import { Copy } from '../ui/Copy';
 import { AppTheme } from '../ui/theme/Theme';
 
+/**
+ * Bottom sheets the chat surface can open.
+ *
+ * There is no overflow entry here, and that is the point rather than an
+ * omission. The top bar's five slots are the whole navigation of this surface,
+ * and a fourth kind here would be a place for a screen that has nowhere to be.
+ */
 enum SheetKind {
   None = 'none',
   Models = 'models',
-  Characters = 'characters',
-  Context = 'context',
-  More = 'more'
+  Context = 'context'
 }
 
 /**
@@ -58,7 +64,21 @@ enum RouteName {
   Prompts = 'Prompts',
   PromptEdit = 'PromptEdit',
   ConversationContents = 'ConversationContents',
-  Settings = 'Settings'
+  Settings = 'Settings',
+  /**
+   * Settings has pages of its own, not one long form.
+   *
+   * Each category is a route rather than a section of one screen, because a
+   * category is a thing the user chooses to go and read. Drawing them all at
+   * once on one scrollable page is what turned a settings screen into a console:
+   * the endpoint probe, the protocol status, eighty-one models and a log viewer
+   * were all on the same surface as the appearance choice, so none of them read
+   * as a category.
+   */
+  SettingsProvider = 'SettingsProvider',
+  SettingsAppearance = 'SettingsAppearance',
+  SettingsDiagnostics = 'SettingsDiagnostics',
+  SettingsAbout = 'SettingsAbout'
 }
 
 /** Width at which history becomes a permanent sidebar (layout promotion). */
@@ -69,6 +89,15 @@ const APPEARANCE_MODES: AppearanceMode[] = [
   AppearanceMode.Light,
   AppearanceMode.Dark
 ];
+
+/**
+ * Radio group name for the appearance choice.
+ *
+ * Named so the three rows are one exclusive set. Without it each radio is its
+ * own group and all three can end up ticked at once, which is a state no screen
+ * should be able to reach.
+ */
+const APPEARANCE_GROUP: string = 'sujiu_appearance';
 
 /**
  * Chat is the home surface and the root `NavDestination`.
@@ -100,15 +129,6 @@ struct Index {
    * field can be rebuilt to show it. See providerField.
    */
   @State private providerFieldEpoch: number = 0;
-  /**
-   * Whether the diagnostic log is expanded.
-   *
-   * View state, not controller state: the log belongs to the runtime and stays
-   * loaded whether or not anyone is looking at it. Collapsing it hides lines,
-   * and hiding is the point — a hundred log lines above the save button would
-   * bury the one control that commits the configuration.
-   */
-  @State private showDiagnostics: boolean = false;
   /** True right after a successful copy, so the user knows the paste is safe. */
   @State private diagnosticsCopied: boolean = false;
 
@@ -210,7 +230,19 @@ struct Index {
     return Copy.resolve(this.getUIContext().getHostContext() as common.Context, resource);
   }
 
+  /**
+   * Opens one of the chat surface's sheets.
+   *
+   * The context list is re-read here rather than at launch, because the set of
+   * sources a conversation can reach changes with its bindings and with what
+   * earlier turns imported. A list frozen at startup shows a source the model
+   * cannot reach any more, or hides one it started reaching after the first
+   * turn — and this is the moment the answer is actually asked for.
+   */
   private openSheet(kind: SheetKind): void {
+    if (kind === SheetKind.Context) {
+      this.controller.loadContextSources();
+    }
     this.sheet = kind;
     this.showSheet = true;
   }
@@ -220,22 +252,38 @@ struct Index {
     this.sheet = SheetKind.None;
   }
 
+  /**
+   * The chat top bar.
+   *
+   * Exactly five slots, in this order: history, conversation title, model, then
+   * the library and settings on the right with settings rightmost. There is no
+   * overflow menu, and there is not going to be one added back. An earlier
+   * version had a `⋯` here holding three items, and each of the three already
+   * had a correct home elsewhere — the conversation's own contents under the
+   * title, new chat under the history drawer's own button, and context under
+   * both — so the menu was not carrying anything the bar had no slot for. It
+   * was carrying the impression that the bar had a slot it did not.
+   *
+   * The three left slots are `Text` because they are *labels*: they name the
+   * current conversation and its current model, and a button frame around a
+   * name would claim something about them that is not true. The two right slots
+   * are icon buttons because they go somewhere, and they use the platform's own
+   * symbols rather than Unicode characters — a `▤` or `⚙` is a font dependency,
+   * which is exactly the drift this screen had.
+   */
   @Builder
   private topBar() {
     Row({ space: 4 }) {
       if (!this.wideLayout) {
-        Text('☰')
-          .fontSize(20)
-          .fontColor(this.theme.textPrimary)
-          .width(40)
-          .height(40)
-          .textAlign(TextAlign.Center)
-          .accessibilityText(this.a11y($r('app.string.a11y_chat_history')))
-          .onClick(() => {
-            this.drawerOpen = !this.drawerOpen;
-          });
+        this.topBarEntry($r('sys.symbol.line_3_horizontal'), $r('app.string.a11y_chat_history'), () => {
+          this.drawerOpen = !this.drawerOpen;
+        });
       }
 
+      // The title is the current conversation's own name, and tapping it opens
+      // that conversation's contents — who is in it, which persona, world books
+      // and prompt set it uses. It used to open a character picker, which put
+      // resource *selection* behind the only label that names the conversation.
       Text(Copy.sessionTitle('', this.controller.currentCharacter?.name ?? ''))
         .fontSize(16)
         .fontWeight(FontWeight.Medium)
@@ -243,37 +291,33 @@ struct Index {
         .layoutWeight(1)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
-        .onClick(() => this.openSheet(SheetKind.Characters));
+        .onClick(() => {
+          this.pathStack.pushPath({ name: RouteName.ConversationContents });
+        });
 
+      // The model shares the free width with the title rather than taking all
+      // of it. A weight here is what keeps a long model id from squeezing the
+      // conversation's own name down to an ellipsis: two flexing labels
+      // truncate, one flexible label next to an inflexible one gets crushed.
       Text(
         this.controller.currentModel?.name ?? $r('app.string.title_default_model')
       )
         .fontSize(12)
         .fontColor(this.theme.textSecondary)
+        .layoutWeight(1)
         .maxLines(1)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .onClick(() => this.openSheet(SheetKind.Models));
 
-      Text('⋯')
-        .fontSize(20)
-        .fontColor(this.theme.textPrimary)
-        .width(40)
-        .height(40)
-        .textAlign(TextAlign.Center)
-        .accessibilityText(this.a11y($r('app.string.a11y_more')))
-        .onClick(() => this.openSheet(SheetKind.More));
-
-      this.topBarEntry('▤', $r('app.string.a11y_library'), () => {
+      this.topBarEntry($r('sys.symbol.book'), $r('app.string.a11y_library'), () => {
         this.pathStack.pushPath({ name: RouteName.Library });
       });
 
       // Rightmost, and last in source order, on purpose. Settings is the one
       // thing a user looks for after anything else has failed, and a fixed
       // position in the corner is the only way it can be found without reading
-      // the screen. It is a glyph in the theme's own colour rather than a
-      // platform icon, so it follows the light and dark palettes instead of
-      // arriving as a fixed blue that belongs to neither.
-      this.topBarEntry('⚙', $r('app.string.settings_title'), () => {
+      // the screen.
+      this.topBarEntry($r('sys.symbol.gearshape'), $r('app.string.settings_title'), () => {
         this.pathStack.pushPath({ name: RouteName.Settings });
       });
     }
@@ -288,21 +332,28 @@ struct Index {
   }
 
   /**
-   * One of the two fixed top-right entries.
+   * One icon button in the top bar.
    *
-   * Both are drawn by this one builder, so "visually consistent" is not a promise
-   * about matching numbers — it is one definition, used twice. Neither carries a
-   * background: a filled button on each side of the bar would out-shout the
-   * conversation title, which is the thing the bar exists to name.
+   * One builder for all three call sites, so "they match" is one definition
+   * rather than three that happen to agree today.
+   *
+   * The button is `ButtonStyleMode.TEXTUAL`, which is the platform's own name for
+   * "an icon that goes somewhere, with no fill behind it". That is not a
+   * preference for a paler look: `ButtonStyleMode.EMPHASIZED` is the default,
+   * and on this device it renders a pale emphasised disc behind each of the
+   * three, which puts three filled discs around a conversation title and turns
+   * the bar into decoration. Naming the mode is also what keeps the press
+   * feedback platform-owned rather than something we would have to repaint.
    */
   @Builder
-  private topBarEntry(glyph: string, label: Resource, action: () => void) {
-    Text(glyph)
-      .fontSize(20)
-      .fontColor(this.theme.textPrimary)
+  private topBarEntry(symbol: Resource, label: Resource, action: () => void) {
+    Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+      SymbolGlyph(symbol)
+        .fontSize(20)
+        .fontColor([this.theme.textPrimary]);
+    }
       .width(40)
       .height(40)
-      .textAlign(TextAlign.Center)
       .accessibilityText(this.a11y(label))
       .onClick(() => action());
   }
@@ -400,66 +451,9 @@ struct Index {
           this.controller.chooseModel(modelId);
         }
       });
-    } else if (this.sheet === SheetKind.Characters) {
-      CharacterSelectorSheet({
-        controller: this.controller,
-        theme: this.theme,
-        onPick: (characterId: string) => {
-          this.controller.selectCharacter(characterId);
-          this.closeSheet();
-        },
-        onOpenLibrary: () => {
-          this.closeSheet();
-          this.pathStack.pushPath({ name: RouteName.Library });
-        }
-      });
     } else if (this.sheet === SheetKind.Context) {
       ContextSheet({ controller: this.controller, theme: this.theme });
-    } else {
-      this.moreSheet();
     }
-  }
-
-  /** Overflow menu: what does not belong in the two fixed top-right entries. */
-  @Builder
-  private moreSheet() {
-    Column({ space: 4 }) {
-      Text($r('app.string.sheet_title_more'))
-        .fontSize(18)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(this.theme.textPrimary)
-        .width('100%')
-        .padding({ left: 24, top: 16, bottom: 8 });
-
-      Text($r('app.string.sheet_item_context'))
-        .fontSize(16)
-        .fontColor(this.theme.textPrimary)
-        .width('100%')
-        .padding({ left: 24, right: 24, top: 10, bottom: 10 })
-        .onClick(() => this.openSheet(SheetKind.Context));
-
-      Text($r('app.string.sheet_item_conversation_contents'))
-        .fontSize(16)
-        .fontColor(this.theme.textPrimary)
-        .width('100%')
-        .padding({ left: 24, right: 24, top: 10, bottom: 10 })
-        .onClick(() => {
-          this.closeSheet();
-          this.pathStack.pushPath({ name: RouteName.ConversationContents });
-        });
-
-      Text($r('app.string.sheet_item_new_chat'))
-        .fontSize(16)
-        .fontColor(this.theme.textPrimary)
-        .width('100%')
-        .padding({ left: 24, right: 24, top: 10, bottom: 16 })
-        .onClick(() => {
-          this.closeSheet();
-          this.controller.newSession();
-        });
-    }
-    .alignItems(HorizontalAlign.Start)
-    .width('100%');
   }
 
   build() {
@@ -586,8 +580,17 @@ struct Index {
         ConversationContents({
           controller: this.controller,
           theme: this.theme,
-          onBack: () => this.pathStack.pop()
+          onBack: () => this.pathStack.pop(),
+          onOpenContext: () => this.openSheet(SheetKind.Context)
         })
+      } else if (name === RouteName.SettingsProvider) {
+        this.settingsProviderView()
+      } else if (name === RouteName.SettingsAppearance) {
+        this.settingsAppearanceView()
+      } else if (name === RouteName.SettingsDiagnostics) {
+        this.settingsDiagnosticsView()
+      } else if (name === RouteName.SettingsAbout) {
+        this.settingsAboutView()
       } else {
         this.settingsView()
       }
@@ -602,7 +605,7 @@ struct Index {
       //
       // Gated on the settings route because this runs for every destination,
       // and because the fields below are only ever drawn there.
-      if (name === RouteName.Settings) {
+      if (name === RouteName.Settings || name === RouteName.SettingsProvider) {
         this.openSettingsOnStoredEndpoint();
       }
     })
@@ -702,21 +705,6 @@ struct Index {
   }
 
   /**
-   * Expands or collapses the log, loading it the first time.
-   *
-   * Loading on expand rather than on every render is deliberate: a settings
-   * screen that reads the whole log on each keystroke would be doing work for a
-   * panel nobody opened.
-   */
-  private toggleDiagnostics(): void {
-    this.showDiagnostics = !this.showDiagnostics;
-    this.diagnosticsCopied = false;
-    if (this.showDiagnostics) {
-      this.controller.loadDiagnostics();
-    }
-  }
-
-  /**
    * Copies the whole log for a bug report.
    *
    * The text comes from the runtime already redacted, so this path has nothing
@@ -770,17 +758,22 @@ struct Index {
         Text($r('app.string.provider_models_count_short', this.controller.discoveredModelCount))
           .fontSize(12)
           .fontColor(this.theme.textSecondary);
-        // A chevron that names the action, because a triangle on its own has to
-        // be guessed at and a settings screen is the wrong place to test a
-        // gesture vocabulary on.
-        Text(this.modelListOpen ? $r('app.string.provider_models_hide') : $r('app.string.provider_models_show'))
+        // A labelled control, not a triangle to be guessed at, and not a
+        // hand-painted link: a settings screen is the wrong place to invent a
+        // gesture vocabulary. The whole header row toggles, and this button is
+        // what says so.
+        Button(this.modelListOpen
+          ? $r('app.string.provider_models_hide')
+          : $r('app.string.provider_models_show'), { type: ButtonType.Normal })
           .fontSize(12)
-          .fontColor(this.theme.accent);
+          .fontColor(this.theme.accent)
+          .backgroundColor(Color.Transparent)
+          .padding({ left: 8, right: 8 })
+          .onClick(() => {
+            this.modelListOpen = !this.modelListOpen;
+          });
       }
-      .width('100%')
-      .onClick(() => {
-        this.modelListOpen = !this.modelListOpen;
-      });
+      .width('100%');
 
       if (this.modelListOpen) {
         // Clipped to its own box on purpose. Without this the last visible row
@@ -887,7 +880,7 @@ struct Index {
       if (this.controller.providerNoticeCode.length > 0) {
         Text(Copy.errorText(this.controller.providerNoticeCode, ''))
           .fontSize(12)
-          .fontColor(this.theme.dangerAccent)
+          .fontColor(this.theme.danger)
           .width('100%');
       }
     }
@@ -896,274 +889,349 @@ struct Index {
   }
 
   /**
-   * Green for the states that mean it worked, red for the ones that need a
-   * field changed, muted for everything in between.
+   * Colour for the endpoint state line.
    *
-   * The distinction that matters is success versus not. A working protocol with
-   * no model list is a success — the endpoint chats — and colouring it as a
-   * failure pushes the user to abandon a configuration that is fine.
+   * Only failures are coloured. The earlier version had a green token for
+   * success, which meant inventing a fourth status semantic the platform does
+   * not have, and it meant a working endpoint was marked in a colour the rest of
+   * the screen never used. The state text already says in words whether the probe
+   * worked — "usable", "models found", "no address yet" — so success needs no
+   * colour to be legible, and a line that goes red is unambiguous.
    */
-  private endpointStateColor(): string {
+  private endpointStateColor(): ResourceColor {
     const state: EndpointState =
       this.controller.endpointState(this.providerBaseUrl, this.providerKey);
-    if (state === EndpointState.Usable || state === EndpointState.ModelsFound) {
-      return this.theme.successText;
-    }
     if (state === EndpointState.AuthFailed || state === EndpointState.NoSuchEndpoint ||
       state === EndpointState.NetworkError || state === EndpointState.ServerError ||
       state === EndpointState.RateLimited || state === EndpointState.NoUsableProtocol) {
-      return this.theme.dangerAccent;
+      return this.theme.danger;
     }
     return this.theme.textSecondary;
   }
 
   /**
-   * The diagnostic log.
+   * The diagnostic log, on its own page.
    *
    * This is the answer to "why did that not work", and it is the reason the log
    * was written before the rest of this flow: a failed probe with no record is
    * a failure the user can only describe and not diagnose. Every line arrives
    * already redacted, so this can be read on screen or copied into a bug report
    * without a filtering pass that could be got wrong.
+   *
+   * It is a page of its own rather than a disclosure inside the provider form,
+   * for a reason that is about the reader. Beside the save button it was the
+   * third thing competing for attention on one screen: the form is what a user
+   * opens in order to change a setting, and the log is what they open after that
+   * failed. Folding them together made both worse — the form grew a hundred
+   * lines above its own commit control, and the log was a button labelled "show"
+   * that gave no hint of what it would show.
    */
   @Builder
-  private diagnosticsView() {
-    Column({ space: 6 }) {
-      Row({ space: 8 }) {
-        Button(this.showDiagnostics
-          ? $r('app.string.provider_diagnostics_hide')
-          : $r('app.string.provider_diagnostics_show'))
-          .fontSize(13)
-          .backgroundColor(this.theme.surfaceMuted)
-          .fontColor(this.theme.textPrimary)
-          .layoutWeight(1)
-          .onClick(() => this.toggleDiagnostics());
-        if (this.showDiagnostics && this.controller.diagnostics.length > 0) {
-          Button($r('app.string.provider_diagnostics_copy'))
-            .fontSize(13)
-            .backgroundColor(this.theme.surfaceMuted)
-            .fontColor(this.theme.textPrimary)
-            .onClick(() => this.copyDiagnostics());
-          Button($r('app.string.provider_diagnostics_clear'))
-            .fontSize(13)
-            .backgroundColor(this.theme.surfaceMuted)
-            .fontColor(this.theme.textPrimary)
-            .onClick(() => this.clearDiagnostics());
-        }
-      }
-      .width('100%');
-      if (this.showDiagnostics) {
-        if (this.diagnosticsCopied) {
-          Text($r('app.string.provider_diagnostics_copied'))
-            .fontSize(12)
-            .fontColor(this.theme.textSecondary)
-            .width('100%');
-        } else if (this.controller.diagnostics.length === 0) {
-          Text($r('app.string.provider_diagnostics_empty'))
-            .fontSize(12)
-            .fontColor(this.theme.textSecondary)
-            .width('100%');
-        } else {
-          // Newest last, so the end of the list is where the answer is. The
-          // whole log is shown rather than a tail: the line that explains a
-          // failure is rarely the last one, and a log that only shows the end
-          // hides the request that caused it.
-          ForEach(this.controller.diagnostics, (entry: DiagnosticEntry) => {
-            Text(entry.detail)
-              .fontSize(11)
-              .fontColor(
-                entry.kind === 'discovery' ? this.theme.textSecondary : this.theme.textPrimary
-              )
-              .width('100%');
-          }, (entry: DiagnosticEntry) => `${entry.atMs}-${entry.stage}-${entry.message}`);
-          Text($r('app.string.provider_diagnostics_note'))
-            .fontSize(11)
-            .fontColor(this.theme.textSecondary)
-            .width('100%');
-        }
-      }
-    }
-    .alignItems(HorizontalAlign.Start)
-    .width('100%');
-  }
+  private settingsDiagnosticsView() {
+    Column() {
+      PageHeader({
+        theme: this.theme,
+        title: $r('app.string.settings_category_diagnostics'),
+        onBack: () => this.pathStack.pop()
+      });
 
-  @Builder
-  private pageHeader(title: ResourceStr) {
-    Row({ space: 8 }) {
-      Text('←')
-        .fontSize(20)
-        .fontColor(this.theme.textPrimary)
-        .width(40)
-        .height(40)
-        .textAlign(TextAlign.Center)
-        .accessibilityText(this.a11y($r('app.string.a11y_back')))
-        .onClick(() => this.pathStack.pop());
-      Text(title)
-        .fontSize(18)
-        .fontWeight(FontWeight.Medium)
-        .fontColor(this.theme.textPrimary);
+      Scroll() {
+        Column({ space: 8 }) {
+          // Neither button is emphasised, and both go dead when the log is
+          // empty. This page has no primary action: the user came here to read,
+          // and the two controls are ways of taking the log somewhere else or
+          // throwing it away. An emphasised "clear log" on an empty log is also
+          // the one button on this page that would destroy the evidence the
+          // page exists to preserve.
+          Row({ space: 8 }) {
+            Button($r('app.string.provider_diagnostics_copy'), {
+              buttonStyle: ButtonStyleMode.NORMAL
+            })
+              .fontSize(13)
+              .layoutWeight(1)
+              .enabled(this.controller.diagnostics.length > 0)
+              .onClick(() => this.copyDiagnostics());
+            Button($r('app.string.provider_diagnostics_clear'), {
+              buttonStyle: ButtonStyleMode.NORMAL
+            })
+              .fontSize(13)
+              .enabled(this.controller.diagnostics.length > 0)
+              .onClick(() => this.clearDiagnostics());
+          }
+          .width('100%');
+
+          if (this.diagnosticsCopied) {
+            Text($r('app.string.provider_diagnostics_copied'))
+              .fontSize(12)
+              .fontColor(this.theme.textSecondary)
+              .width('100%');
+          } else if (this.controller.diagnostics.length === 0) {
+            Text($r('app.string.provider_diagnostics_empty'))
+              .fontSize(13)
+              .fontColor(this.theme.textSecondary)
+              .width('100%');
+          } else {
+            // Newest last, so the end of the list is where the answer is. The
+            // whole log is shown rather than a tail: the line that explains a
+            // failure is rarely the last one, and a log that only shows the end
+            // hides the request that caused it.
+            ForEach(this.controller.diagnostics, (entry: DiagnosticEntry) => {
+              Text(entry.detail)
+                .fontSize(11)
+                .fontColor(
+                  entry.kind === 'discovery' ? this.theme.textSecondary : this.theme.textPrimary
+                )
+                .width('100%');
+            }, (entry: DiagnosticEntry) => `${entry.atMs}-${entry.stage}-${entry.message}`);
+            Text($r('app.string.provider_diagnostics_note'))
+              .fontSize(11)
+              .fontColor(this.theme.textSecondary)
+              .width('100%');
+          }
+        }
+        .width('100%')
+        .padding(16);
+      }
+      .width('100%')
+      .align(Alignment.Top)
+      .layoutWeight(1);
     }
     .width('100%')
-    // Padded as well, because it is the same window. A settings page that began
-    // under the status bar would look like a page whose own header is missing.
-    .padding({ top: SafeArea.topVp, left: 12, right: 12, bottom: 12 })
+    .height('100%')
     .backgroundColor(this.theme.pageBackground);
   }
 
+  /**
+   * One row on the settings category list.
+   *
+   * A platform list row: label, optional current value as the secondary line,
+   * and the platform chevron. The value line is what makes the first level
+   * useful before anything is opened — "Provider & API — not configured" tells
+   * the reader whether their next step is typing or debugging.
+   */
   @Builder
-  private settingsView() {
-    Column() {
-      this.pageHeader($r('app.string.settings_title'));
+  private settingsRow(label: ResourceStr, value: string, action: () => void) {
+    Row({ space: 12 }) {
+      Column({ space: 3 }) {
+        Text(label)
+          .fontSize(16)
+          .fontColor(this.theme.textPrimary)
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis });
+        if (value.length > 0) {
+          Text(value)
+            .fontSize(12)
+            .fontColor(this.theme.textSecondary)
+            .width('100%')
+            .maxLines(1)
+            .textOverflow({ overflow: TextOverflow.Ellipsis });
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1);
+      SymbolGlyph($r('sys.symbol.chevron_right'))
+        .fontSize(16)
+        .fontColor([this.theme.textSecondary]);
+    }
+    .width('100%')
+    .padding(16)
+    .onClick(() => action());
+  }
 
-      List({ space: 8 }) {
-        ListItem() {
-          Text($r('app.string.settings_section_provider'))
-            .fontSize(11)
+  /**
+   * The provider form, on its own page.
+   *
+   * Address, key, ask, model, save — the order the work happens in, not a
+   * cosmetic arrangement. A model field placed before the probe asks for the one
+   * thing the user cannot know yet, and makes the endpoint un-saveable until
+   * they have guessed the answer the runtime could have looked up.
+   */
+  @Builder
+  private settingsProviderView() {
+    Column() {
+      PageHeader({
+        theme: this.theme,
+        title: $r('app.string.settings_category_provider'),
+        onBack: () => this.pathStack.pop()
+      });
+
+      Scroll() {
+        Column({ space: 12 }) {
+          Text($r('app.string.provider_hint'))
+            .fontSize(12)
             .fontColor(this.theme.textSecondary)
             .width('100%');
-        }
-        ListItem() {
-          Column({ space: 8 }) {
-            Text($r('app.string.provider_hint'))
+          this.providerField('baseUrl', $r('app.string.provider_base_url'));
+          this.providerField('apiKey', $r('app.string.provider_api_key'));
+          if (this.controller.hasCredential) {
+            Text($r('app.string.provider_key_stored'))
               .fontSize(12)
               .fontColor(this.theme.textSecondary)
               .width('100%');
-            // The order is the order the work happens in, and it is not
-            // cosmetic: address, then key, then ask, then model. A model field
-            // placed before the probe asks the user for the one thing they
-            // cannot know yet, and makes the endpoint un-saveable until they
-            // have guessed the answer the runtime could have looked up.
-            this.providerField('baseUrl', $r('app.string.provider_base_url'));
-            this.providerField('apiKey', $r('app.string.provider_api_key'));
-            if (this.controller.hasCredential) {
-              Text($r('app.string.provider_key_stored'))
-                .fontSize(12)
-                .fontColor(this.theme.textSecondary)
-                .width('100%');
-            }
-            Button(this.controller.exploringEndpoint
-              ? $r('app.string.provider_exploring')
-              : $r('app.string.provider_explore'))
+          }
+          // An address alone is enough to ask. Refusing the button without a
+          // key would also be a way of saying "not configured yet" before
+          // anything has been typed, which is not the same message.
+          //
+          // NORMAL, not the default EMPHASIZED. Probing is a question, and Save
+          // at the bottom of the page is the answer; two emphasized buttons on
+          // one form is a page asking the reader to pick between them.
+          Button(this.controller.exploringEndpoint
+            ? $r('app.string.provider_exploring')
+            : $r('app.string.provider_explore'), { buttonStyle: ButtonStyleMode.NORMAL })
+            .fontSize(13)
+            .width('100%')
+            .enabled(!this.controller.exploringEndpoint && this.providerBaseUrl.trim().length > 0)
+            .onClick(() => this.exploreProvider());
+          Text($r('app.string.provider_explore_hint'))
+            .fontSize(12)
+            .fontColor(this.theme.textSecondary)
+            .width('100%');
+          // The status line, always. Which state this is tells the user what to
+          // do next, and a form that only shows one when it fails leaves them
+          // unable to tell a working endpoint from an untested one.
+          Text(Copy.endpointState(
+            this.controller.endpointState(this.providerBaseUrl, this.providerKey),
+            this.controller.discoveredModelCount
+          ))
+            .fontSize(12)
+            .fontColor(this.endpointStateColor())
+            .width('100%');
+          if (this.controller.explored) {
+            this.exploredProvider()
+          }
+          // The model comes last, because it is the outcome of the probe. It
+          // stays editable in every state: a gateway with no listing route still
+          // chats, and taking the text field away there would close the only
+          // door the user has left.
+          this.providerField('model', $r('app.string.provider_model'));
+          Text($r('app.string.provider_model_hint'))
+            .fontSize(12)
+            .fontColor(this.theme.textSecondary)
+            .width('100%');
+          if (this.controller.hasProvider) {
+            // Re-probing is separate from saving. A user who suspects the stored
+            // key is wrong needs to ask again without committing anything, and
+            // folding that into the save button would make every re-check a
+            // configuration change.
+            Button($r('app.string.provider_reprobe'), { buttonStyle: ButtonStyleMode.NORMAL })
               .fontSize(13)
-              .backgroundColor(this.theme.surfaceMuted)
-              .fontColor(this.theme.textPrimary)
-              // An address alone is enough to ask. Refusing the button without a
-              // key would also be a way of saying "not configured yet" before
-              // anything has been typed, which is not the same message.
-              .enabled(!this.controller.exploringEndpoint && this.providerBaseUrl.trim().length > 0)
               .width('100%')
-              .onClick(() => this.exploreProvider());
-            Text($r('app.string.provider_explore_hint'))
-              .fontSize(12)
-              .fontColor(this.theme.textSecondary)
-              .width('100%');
-            // The status line, always. Which state this is tells the user what
-            // to do next, and a form that only shows one when it fails leaves
-            // them unable to tell a working endpoint from an untested one.
-            Text(Copy.endpointState(
-              this.controller.endpointState(this.providerBaseUrl, this.providerKey),
-              this.controller.discoveredModelCount
-            ))
-              .fontSize(12)
-              .fontColor(this.endpointStateColor())
-              .width('100%');
-            if (this.controller.explored) {
-              this.exploredProvider()
-            }
-            // The model comes last, because it is the outcome of the probe. It
-            // stays editable in every state: a gateway with no listing route
-            // still chats, and taking the text field away there would close the
-            // only door the user has left.
-            this.providerField('model', $r('app.string.provider_model'));
-            Text($r('app.string.provider_model_hint'))
-              .fontSize(12)
-              .fontColor(this.theme.textSecondary)
-              .width('100%');
-            if (this.controller.hasProvider) {
-              // Re-probing is separate from saving. A user who suspects the
-              // stored key is wrong needs to ask again without committing
-              // anything, and folding that into the save button would make
-              // every re-check a configuration change.
-              Button($r('app.string.provider_reprobe'))
-                .fontSize(13)
-                .backgroundColor(this.theme.surfaceMuted)
-                .fontColor(this.theme.textPrimary)
-                .enabled(!this.controller.exploringEndpoint && this.providerBaseUrl.trim().length > 0)
-                .width('100%')
-                // This one asks again. Everywhere else the runtime answers from
-                // what the endpoint already said, which is what keeps opening
-                // this screen free — and which would also keep showing a stale
-                // answer to a user who has just corrected their key.
-                .onClick(() => this.exploreProvider(true));
-            }
-            Row({ space: 8 }) {
-              Button($r('app.string.provider_save'))
-                .fontSize(13)
-                .backgroundColor(this.theme.accent)
-                .fontColor(this.theme.textOnAccent)
-                .enabled(!this.controller.savingProvider)
-                .onClick(() => this.saveProvider());
-              if (this.controller.hasProvider) {
-                Button($r('app.string.provider_clear'))
-                  .fontSize(13)
-                  .backgroundColor(this.theme.surfaceMuted)
-                  .fontColor(this.theme.textPrimary)
-                  .onClick(() => this.clearProvider());
-              }
-            }
-            if (this.controller.errorCode === 'provider_not_saved') {
-              Text(Copy.errorText(this.controller.errorCode, this.controller.errorDetail))
-                .fontSize(12)
-                .fontColor(this.theme.dangerAccent)
-                .width('100%');
-            }
+              .enabled(!this.controller.exploringEndpoint && this.providerBaseUrl.trim().length > 0)
+              // This one asks again. Everywhere else the runtime answers from
+              // what the endpoint already said, which is what keeps opening this
+              // screen free — and which would also keep showing a stale answer
+              // to a user who has just corrected their key.
+              .onClick(() => this.exploreProvider(true));
           }
-          .alignItems(HorizontalAlign.Start)
-          .width('100%');
-        }
-        ListItem() {
-          Text($r('app.string.settings_section_diagnostics'))
-            .fontSize(11)
-            .fontColor(this.theme.textSecondary)
-            .width('100%');
-        }
-        ListItem() {
-          this.diagnosticsView()
-        }
-        ListItem() {
-          Text($r('app.string.settings_section_appearance'))
-            .fontSize(11)
-            .fontColor(this.theme.textSecondary)
-            .width('100%');
-        }
-        ListItem() {
           Row({ space: 8 }) {
-            ForEach(APPEARANCE_MODES, (mode: AppearanceMode) => {
-              Text(Copy.appearanceMode(mode))
+            // The one primary action on this page, and so the one button that
+            // wears the emphasis fill.
+            Button($r('app.string.provider_save'))
+              .fontSize(13)
+              .layoutWeight(1)
+              .backgroundColor(this.theme.accent)
+              .fontColor(this.theme.textOnAccent)
+              .enabled(!this.controller.savingProvider)
+              .onClick(() => this.saveProvider());
+            if (this.controller.hasProvider) {
+              // NORMAL for the same reason as probe: this row has exactly one
+              // primary action in it, and it is Save.
+              Button($r('app.string.provider_clear'), { buttonStyle: ButtonStyleMode.NORMAL })
                 .fontSize(13)
-                .padding({ left: 14, right: 14, top: 8, bottom: 8 })
-                .borderRadius(16)
-                .backgroundColor(
-                  this.controller.appearanceMode === mode
-                    ? this.theme.accent
-                    : this.theme.surfaceMuted
-                )
-                .fontColor(
-                  this.controller.appearanceMode === mode
-                    ? this.theme.textOnAccent
-                    : this.theme.textPrimary
-                )
-                .onClick(() => this.controller.setAppearance(mode));
-            }, (mode: AppearanceMode) => mode);
+                .onClick(() => this.clearProvider());
+            }
           }
           .width('100%');
+          if (this.controller.errorCode === 'provider_not_saved') {
+            Text(Copy.errorText(this.controller.errorCode, this.controller.errorDetail))
+              .fontSize(12)
+              .fontColor(this.theme.danger)
+              .width('100%');
+          }
         }
-        ListItem() {
-          Text($r('app.string.settings_section_about'))
-            .fontSize(11)
-            .fontColor(this.theme.textSecondary)
-            .width('100%');
-        }
+        .alignItems(HorizontalAlign.Start)
+        .width('100%')
+        .padding(16);
+      }
+      .width('100%')
+      .align(Alignment.Top)
+      .layoutWeight(1);
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.theme.pageBackground);
+  }
+
+  /**
+   * Appearance, on its own page.
+   *
+   * Radio buttons rather than a row of chips the app painted itself. Three
+   * mutually exclusive options in a vertical settings list is what a radio
+   * group is for, and the previous version was three `Text` elements with
+   * hand-applied padding and radius: no press feedback, no selected semantics
+   * for a screen reader, and a blue fill the app had chosen rather than one the
+   * platform had.
+   *
+   * `checked` is passed in rather than inferred from a click, because the
+   * selection can also change from the platform's own dark-mode switch; a group
+   * that only knew what was tapped would show the wrong tick.
+   */
+  @Builder
+  private settingsAppearanceView() {
+    Column() {
+      PageHeader({
+        theme: this.theme,
+        title: $r('app.string.settings_category_appearance'),
+        onBack: () => this.pathStack.pop()
+      });
+
+      List() {
+        ForEach(APPEARANCE_MODES, (mode: AppearanceMode) => {
+          ListItem() {
+            Row({ space: 12 }) {
+              Text(Copy.appearanceMode(mode))
+                .fontSize(16)
+                .fontColor(this.theme.textPrimary)
+                .layoutWeight(1);
+              Radio({ value: mode, group: APPEARANCE_GROUP })
+                .checked(this.controller.appearanceMode === mode)
+                .onChange((checked: boolean) => {
+                  if (checked) {
+                    this.controller.setAppearance(mode);
+                  }
+                });
+            }
+            .width('100%')
+            .padding(16);
+          }
+        }, (mode: AppearanceMode) => mode);
+      }
+      .width('100%')
+      .layoutWeight(1);
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.theme.pageBackground);
+  }
+
+  /**
+   * About, on its own page.
+   *
+   * Two rows of label and value. Nothing here is interactive, so nothing gets a
+   * chevron: a row that looks tappable and is not is worse than a plain line.
+   */
+  @Builder
+  private settingsAboutView() {
+    Column() {
+      PageHeader({
+        theme: this.theme,
+        title: $r('app.string.settings_category_about'),
+        onBack: () => this.pathStack.pop()
+      });
+
+      List() {
         ListItem() {
           Column({ space: 2 }) {
             Text($r('app.string.settings_about_platform'))
@@ -1176,7 +1244,8 @@ struct Index {
               .width('100%');
           }
           .alignItems(HorizontalAlign.Start)
-          .width('100%');
+          .width('100%')
+          .padding(16);
         }
         ListItem() {
           Column({ space: 2 }) {
@@ -1184,21 +1253,93 @@ struct Index {
               .fontSize(15)
               .fontColor(this.theme.textPrimary)
               .width('100%');
-            Text(this.controller.runtimeSummary())
+            // The bridge reports which runtime; the words describing it are
+            // copy, so they are resolved here where the locale applies.
+            Text(`${this.controller.runtimeSummary()} · ${Copy.resolve(getContext(this), $r('app.string.settings_about_runtime_native'))}`)
               .fontSize(12)
               .fontColor(this.theme.textSecondary)
               .width('100%');
           }
           .alignItems(HorizontalAlign.Start)
-          .width('100%');
+          .width('100%')
+          .padding(16);
         }
       }
       .width('100%')
-      .layoutWeight(1)
-      .padding(16)
-      .backgroundColor(this.theme.pageBackground);
+      .layoutWeight(1);
     }
     .width('100%')
-    .height('100%');
+    .height('100%')
+    .backgroundColor(this.theme.pageBackground);
+  }
+
+  /**
+   * Settings, first level: the category list.
+   *
+   * Four rows and nothing else. This is the native settings pattern: a page that
+   * names its categories and lets the reader choose one, rather than a page
+   * where the configuration, the probe result, the model list and a log viewer
+   * are all laid out at once and compete.
+   *
+   * There is deliberately no "Data & backup" row. The documentation lists the
+   * category as planned work, `sujiu-runtime` exports nothing and imports
+   * nothing, and a row that opens an empty page would be a feature the user can
+   * see and cannot use. The category appears here when there is something behind
+   * it — see the status table in `docs/UI_ARCHITECTURE.md`.
+   */
+  @Builder
+  private settingsView() {
+    Column() {
+      PageHeader({ theme: this.theme, title: $r('app.string.settings_title'), onBack: () => this.pathStack.pop() });
+
+      List() {
+        ListItem() {
+          this.settingsRow(
+            $r('app.string.settings_category_provider'),
+            this.providerSummary(),
+            () => this.pathStack.pushPath({ name: RouteName.SettingsProvider })
+          );
+        }
+        ListItem() {
+          this.settingsRow($r('app.string.settings_category_appearance'), '', () => {
+            this.pathStack.pushPath({ name: RouteName.SettingsAppearance });
+          });
+        }
+        ListItem() {
+          this.settingsRow($r('app.string.settings_category_diagnostics'), '', () => {
+            this.pathStack.pushPath({ name: RouteName.SettingsDiagnostics });
+          });
+        }
+        ListItem() {
+          this.settingsRow($r('app.string.settings_category_about'), '', () => {
+            this.pathStack.pushPath({ name: RouteName.SettingsAbout });
+          });
+        }
+      }
+      .width('100%')
+      .layoutWeight(1);
+    }
+    .width('100%')
+    .height('100%')
+    .backgroundColor(this.theme.pageBackground);
+  }
+
+  /**
+   * The provider category's current value, as one line.
+   *
+   * The host when there is one, because that is the thing a user recognises;
+   * "configured" on its own does not say which endpoint, and "not configured"
+   * is what a user needs to see before they decide whether to open the page at
+   * all.
+   */
+  private providerSummary(): string {
+    const stored: StoredEndpoint | null = this.controller.storedEndpoint;
+    if (stored === null || stored.baseUrl.length === 0) {
+      return Copy.resolve(
+        this.getUIContext().getHostContext() as common.Context,
+        $r('app.string.settings_provider_summary_none')
+      );
+    }
+    return stored.baseUrl;
   }
 }

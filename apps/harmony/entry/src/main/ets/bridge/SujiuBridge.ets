@@ -29,10 +29,19 @@ export interface ModelSummary {
   contextLabel: string;
 }
 
+/**
+ * One context source as the chat page lists it.
+ *
+ * `name` is whatever the runtime stored, because a user may have named their
+ * own world book; the platform does not rewrite it. `kind` is the stable
+ * `ContextKind` code from the shared context protocol, not a display string:
+ * turning it into words is presentation, so the resource table owns it and
+ * `Copy.contextSourceKind` resolves it at the point of rendering.
+ */
 export interface ContextSourceSummary {
   id: string;
   name: string;
-  kindLabel: string;
+  kind: string;
   recordCount: number;
 }
 

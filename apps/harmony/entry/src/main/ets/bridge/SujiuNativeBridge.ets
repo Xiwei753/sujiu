@@ -206,7 +206,7 @@ function toContextSource(value: ContextSourceDto): ContextSourceSummary {
   return {
     id: value.id,
     name: value.name,
-    kindLabel: value.kind.replace(/([a-z])([A-Z])/g, '$1 $2'),
+    kind: value.kind,
     recordCount: value.recordCount
   } as ContextSourceSummary;
 }
@@ -411,11 +411,19 @@ export class SujiuNativeBridge implements SujiuBridge {
     this.runtime = create();
   }
 
+  /**
+   * Which runtime this process is actually talking to.
+   *
+   * Only the identity and the version. The "native runtime" half of the About
+   * row is a *description*, and it has to come from the resource table: when
+   * this method baked the English words into its return value, a Chinese user
+   * read `native runtime` on a screen whose every other line was translated.
+   */
   runtimeSummary(): string {
     try {
-      return `sujiu-runtime ${this.runtime.coreVersion()} · native runtime`;
+      return `sujiu-runtime ${this.runtime.coreVersion()}`;
     } catch (error) {
-      return 'sujiu-runtime · native runtime';
+      return 'sujiu-runtime';
     }
   }
 

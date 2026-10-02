@@ -568,6 +568,22 @@ export class ChatController {
     }
   }
 
+  /**
+   * Reloads the context sources a conversation can read from.
+   *
+   * Called when the sheet is opened rather than only at launch. The set of
+   * sources is not fixed: it grows when a turn imports a world book, shrinks
+   * when a binding is removed, and a list frozen at startup shows a source the
+   * model cannot reach any more — or hides one it started reaching after the
+   * first turn. Opening the sheet is the moment the answer is asked for, so it
+   * is the moment it is read.
+   */
+  loadContextSources(): void {
+    this.bridge.listContextSources().then((sources: ContextSourceSummary[]) => {
+      this.contextSources = sources;
+    });
+  }
+
   /** The whole log as text, for pasting into a bug report. Already redacted. */
   async diagnosticsText(): Promise<string> {
     try {
@@ -987,9 +1003,17 @@ export class ChatController {
     this.generationState = GenerationState.Cancelled;
   }
 
-  selectCharacter(characterId: string): void {
-    this.currentCharacter = this.characterById(characterId);
-  }
+  /**
+   * There is deliberately no `selectCharacter`.
+   *
+   * There used to be one, for a character picker hanging off the conversation
+   * title, and it set a field the conversation does not own. `currentCharacter`
+   * is read back from the session the runtime reports, so a local assignment
+   * could make the title name a character the transcript was never written
+   * with — the title and the conversation disagreeing, with no way to tell
+   * which is right. Who is in a conversation is a binding on the conversation,
+   * and `bindResources` is how it changes.
+   */
 
   searchCharacters(query: string): void {
     this.characterQuery = query;

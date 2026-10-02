@@ -42,24 +42,36 @@ There is no permanent bottom tab bar and no permanent dashboard.
 
 ### 1.2 Top bar
 
-Lightweight, single row:
+Lightweight, single row. **Exactly five slots, and there is no overflow menu:**
 
-- open the history drawer (narrow layouts only);
-- the conversation title, which opens this conversation's own contents;
-- the current model selector;
-- overflow menu (context & sources, this conversation's contents, new chat);
-- **two fixed entries at the right: library, then settings — the gear is
-  rightmost and stays rightmost.**
+```text
+历史入口 | 会话标题 | 模型                      资料库 | 设置
+```
 
-The two fixed entries exist because they are the two places the whole app can
-go, and neither of them is a property of the current conversation. Everything
-that *is* a property of the current conversation stays in the conversation's own
-surface instead of competing for a top-bar slot, and the overflow menu carries
-them. A third top-bar button for a resource kind would be a per-resource-type
-dashboard in miniature.
+| Slot | Opens | Not |
+| --- | --- | --- |
+| history entry (narrow layouts only) | the history drawer / side bar | a permanent list on the conversation page |
+| conversation title | this conversation's own contents (§1.8) | a character picker, a resource editor, a settings shortcut |
+| model | the model selector sheet | provider credentials or endpoint configuration |
+| library | the resource library (§1.7) | one button per resource kind |
+| settings (rightmost, stays rightmost) | app and service configuration (§1.9) | the diagnostics console, resource editing |
+
+There is deliberately **no `⋯`**. The overflow menu it served was a bag of
+leftovers: two of its three items were already reachable elsewhere (this
+conversation's contents from the title, new chat from the `+` in the history
+panel), and the third — context & sources — has its single entry point inside the
+conversation's own page (§1.6). A menu that duplicates three reachable
+destinations is not a menu, and re-adding one is a regression, not a feature.
+
+The two fixed entries exist because they are the two places the whole app can go,
+and neither of them is a property of the current conversation. Everything that
+*is* a property of the current conversation stays in the conversation's own
+surface instead of competing for a top-bar slot. A third top-bar button for a
+resource kind would be a per-resource-type dashboard in miniature.
 
 Both entries are rendered by one shared definition so they cannot drift into two
-different-looking buttons. The library uses its own icon; settings uses a gear.
+different-looking buttons, and both use **platform system symbols** rather than
+Unicode characters drawn as text (see §2.7).
 
 The model selector is a sheet/menu showing the current model plus the small set
 of necessary facts (name, capability/status, provider). Provider credentials and
@@ -107,8 +119,7 @@ Narrow screen: drawer. Wide screen: the same list becomes a permanent side bar.
 
 ### 1.6 Context & sources
 
-Context transparency is a lightweight sheet opened from the chat page, never a
-dashboard:
+Context transparency is a lightweight sheet, never a dashboard:
 
 ```text
 This turn
@@ -122,9 +133,29 @@ Tool calls           1
 View details
 ```
 
+**Its single entry point is the conversation's own page** — the conversation title
+(§1.2) → *Context & sources* (§1.8). It is not a top-bar button, it is not inside
+the model sheet, and it is not a settings item. One destination, one entry; if a
+second entry appears anywhere, one of them is wrong.
+
 This screen maps to existing Rust data: `ContextSource`, `ContextRecord`,
 `list_context_sources`, `search_context`, `read_context` and tool call records.
 It exists for transparency and debugging; it is not a required step per turn.
+
+Two different things are shown here and they have different rules, which is worth
+stating because conflating them produces the same class of bug in both
+directions:
+
+- the **kind** (`World lore`, `Story event`, …) is one of the seven `ContextKind`
+  codes from the shared context protocol, so it is protocol vocabulary and the
+  frontends resolve it through their own resource tables. A frontend that
+  prettified the code itself leaked a protocol identifier into the UI.
+- the **name** is whatever the runtime stored, because a user may have named their
+  own world book and the UI must not rename it. Seeds the runtime writes are a
+  separate question from user-authored names, and today the built-in seeds are
+  English. Translating them belongs in the seed, not in a per-frontend map that
+  would also rewrite the user's own name; that is recorded here as remaining work
+  rather than half-fixed in one frontend.
 
 ### 1.7 Library, and what a conversation actually uses
 
@@ -171,9 +202,22 @@ dead button.
 
 A conversation only ever stores **references** — `participants`, `persona_id`,
 `worldbook_ids`, `prompt_profile_id` — and picks them from the same library
-resources. It has its own surface (the conversation title, or "this
-conversation" in the overflow menu) for choosing participants, persona, world
-books and prompt profile.
+resources.
+
+Its only entry point is **the conversation title in the top bar**. That page —
+"this conversation" — is the single place where a conversation's own state is
+edited, and it holds exactly two groups:
+
+```text
+In this chat      participants, persona, world books, prompts   (references only)
+Context & sources what the runtime actually put in front of the model   (§1.6)
+```
+
+It does **not** edit any resource body. Choosing a participant here is not a
+character picker for its own sake: it picks *this conversation's* participants out
+of the library, and the library stays where the characters themselves are
+managed. There is no second way in — no overflow-menu item, no settings row — so
+"which screen owns the conversation's bindings" cannot drift again.
 
 This boundary is the important one. If the library is where a world book is
 edited, and the conversation is where a copy of that world book is edited, then
@@ -187,19 +231,58 @@ No game-progression dashboard.
 
 ### 1.9 Settings
 
-Settings is **app and service configuration only**:
+Settings is **app and service configuration only**, and it uses the platform's
+native settings pattern. The **first level is a category list**, not the
+configuration itself:
 
-- Provider / API (endpoint address, credential, model selection, re-probe)
-- Appearance
-- Diagnostics log
-- Data & backup
-- About
+```text
+设置
+  Provider / API
+  外观
+  诊断
+  数据与备份        (planned — not shipped, see the status table)
+  关于
+```
+
+Each of those is an ordinary **second-level page** reached by tapping the row.
+The first level carries no fields, no status text and no log.
+
+| Category | Page contains |
+| --- | --- |
+| Provider / API | 接口地址 → API Key → 探测接口 → 模型选择 → 重新探测 → 保存 / 移除 |
+| 外观 | follow system / light / dark |
+| 诊断 | the diagnostic log, copy log, clear log — **its own page, never folded into the provider form** |
+| 数据与备份 | *not implemented on any platform yet* |
+| 关于 | app name, version, platform, runtime |
+
+Two rules make this a structure and not a suggestion:
+
+- **Diagnostics is not part of the Provider form.** A user configuring an
+  endpoint is not debugging it, and a provider page that can expand a log is a
+  console wearing a settings page's clothes.
+- **No category is drawn because the documentation mentions it.** The status
+  table below is the contract; a category marked *planned* is not rendered as a
+  disabled or fake row.
 
 It deliberately does **not** contain character editing, persona editing, world
 book editing, prompt body editing, or the current conversation's bindings. A
 user who opens settings to change their endpoint must never be one edit away from
 rewriting a character's system prompt, and a prompt body that lives in settings
 belongs to the app rather than to a reusable conversation resource.
+
+#### Category status
+
+| Category | Runtime capability | HarmonyOS | Android | Desktop |
+| --- | --- | --- | --- | --- |
+| Provider / API | endpoint + credential + model discovery | page | page | page |
+| 外观 | appearance mode | page | inline row | inline row |
+| 诊断 | diagnostic log, copy, clear | page | **missing** | **missing** |
+| 数据与备份 | **no export/import API exists in `sujiu-runtime`** | not drawn | not drawn | not drawn |
+| 关于 | platform + runtime summary | page | inline row | inline row |
+
+A *missing* entry is real debt and is listed in §5.6. A *planned* entry is a
+documented intention with no capability behind it, and drawing it anyway would be
+inventing a feature.
 
 ### 1.10 Wide screen
 
@@ -560,6 +643,36 @@ line of its last message without the whole message crossing the FFI boundary,
 so `SessionSummary.preview` is collapsed and length-bounded on purpose. It
 invents nothing, and a platform is free to render or further clip it.
 
+### 2.7 Visual language: the platform theme owns ordinary controls
+
+The document fixes information architecture; the platform owns how a control
+looks. Both halves are required, and the second one has been violated enough to
+be worth stating.
+
+**Use the platform's own semantics.**
+
+- Ordinary controls — buttons, list rows, sheets, text fields, selection state,
+  dividers, status colours — take the platform theme. On HarmonyOS that means
+  ArkUI components plus `sys.color.*` resources; on Android, Material 3 and its
+  `ColorScheme`; on Desktop, the Qt Quick Controls style.
+- An app theme may define tokens only for semantics the platform genuinely
+  cannot express. "The user's own turn" and "a destructive action" qualify.
+  "Button background", "selected chip", "section accent" do not — those have a
+  platform answer, and overriding them is how a Material-blue look ends up
+  painted across a HarmonyOS app.
+- **No brand colour as a large surface.** Black-and-white dominant, accent used
+  for real selection, a primary action, or a status — not for decoration.
+- Light and dark are the same semantics in two palettes. A token that only
+  exists in one of them is a bug.
+
+**Do not use Unicode characters as an icon set.** `☰ ⋯ ▤ ⚙ ← › ✓ ✕` rendered as
+`Text` inside a hand-drawn button is not an icon: it changes with the device
+font, it does not align to a box, it has no press feedback, and it carries no
+light/dark semantics. Use the platform's system symbols — ArkUI
+`$r('sys.symbol.*')`, Material icons, or standard Qt glyphs — or a real icon
+asset. If the platform has no symbol for something, the answer is a text label,
+not a nearby codepoint.
+
 The consequence for translators: they edit one JSON file per locale and never
 read ArkTS. The consequence for reviewers: grepping the Rust or presentation
 sources for a user-visible sentence is a bug, and so is grepping a view for a
@@ -870,6 +983,51 @@ Desktop still ships a preview bridge behind the same interface, so its
 presentation code is already written against §4. Replacing it with the
 FFI-backed implementation must not change any UI or presentation file.
 
+#### Information-architecture parity
+
+HarmonyOS is the reference implementation of §1. The other two are audited
+against it, and this table is the honest state rather than the intended one:
+
+| Surface | HarmonyOS | Android | Desktop |
+| --- | --- | --- | --- |
+| Top bar: five slots, no overflow | implemented | implemented | implemented |
+| Conversation title → this conversation | implemented | **missing** | **missing** |
+| Settings first level = category list | implemented | implemented (2 of 4 categories) | implemented (2 of 4 categories) |
+| Diagnostics as its own page | implemented | **missing** | **missing** |
+| No Unicode characters as icons | implemented | implemented | implemented |
+| User copy in resources | implemented | partial (`strings.xml` added; most screens still inline) | partial (`qsTr()` with no `.ts` catalogues) |
+| Four-resource library split | implemented | **missing** (characters only) | **missing** (characters only) |
+| Context inspector has an entry point | implemented | **unreachable** | **unreachable** |
+
+Three of these rows are worth reading carefully, because they are the difference
+between "unified" and "consistent about where it is not".
+
+**Settings categories.** Android and Desktop each list only the categories whose
+capability exists in their bridge. Neither bridge exposes endpoint configuration
+or a diagnostics log, so Provider & API and Diagnostics are not drawn — a row
+whose page cannot exist is a button that leads nowhere, which §1.9 forbids. The
+category *structure* matches §1.9; the *coverage* does not, and it grows when the
+bridge grows rather than when a screen is drawn.
+
+**Context inspector.** On Android and Desktop the context surface exists but is
+no longer reachable, because §1.6 gives it exactly one entry — the conversation
+title → this conversation's contents — and neither frontend has that page. They
+used to hang off the three-dot overflow that this round removed. Removing an
+entry point without adding the destination it should have pointed at is a real
+loss of function, and it is recorded here and in both TODO files instead of
+being papered over by inventing a second way in.
+
+**Conversation title.** For the same reason the title is a label on Android and
+Desktop. It is not a character picker: that was the drift §1.2 describes, and a
+title that opens a different resource's editor teaches the wrong thing about
+what the title means.
+
+A row marked **missing** or **unreachable** is tracked debt in
+`apps/android/TODO.md` and `apps/desktop/TODO.md`; it is not a platform
+difference, because §1 applies to all three. HarmonyOS is the reference, and
+porting a destination means porting the page it lands on, not just the button
+that used to open it.
+
 ---
 
 ## 6. Directories
@@ -927,6 +1085,16 @@ Do not introduce:
 Accent colour is reserved for selection, primary actions, state and a very small
 amount of emphasis. Content over decoration.
 
+Also do not introduce:
+
+- an overflow menu in the chat top bar (§1.2); the five slots are the whole list;
+- a settings first level that lays out the configuration itself (§1.9);
+- the diagnostics log inside the provider form;
+- a category row for a capability the runtime does not have (data & backup);
+- Unicode characters rendered as icons (§2.7);
+- a locale string byte-identical to the English source, outside the maintained
+  allowlist in `scripts/check-i18n.py`.
+
 ---
 
 ## 8. Review checklist for UI changes
@@ -938,6 +1106,11 @@ amount of emphasis. Content over decoration.
 - [ ] New readable data reuses the context protocol instead of a new tool.
 - [ ] A resource is edited in the library and only referenced by a conversation.
 - [ ] Settings gained no resource editing and no prompt body editing.
+- [ ] The settings first level is a category list, and diagnostics is its own page.
+- [ ] The top bar still has exactly the five §1.2 slots and no three-dot menu.
+- [ ] No new icon is a Unicode character; symbols come from the platform (§2.7).
+- [ ] No ordinary control paints its own colour where the platform theme applies.
+- [ ] Every new string has a real `zh_CN` translation; `scripts/check-i18n.sh` passes.
 - [ ] Wide layout is a layout promotion of the same state, not a second logic path.
 - [ ] Tests cover the new presentation behaviour where behaviour is non-trivial.
 - [ ] `cargo fmt --all -- --check` and `cargo test --workspace` pass.

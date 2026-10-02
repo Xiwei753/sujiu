@@ -8,8 +8,14 @@
 # up in English on a Chinese device without a single build or lint warning.
 #
 # So the check is not "are the translations good" — it cannot judge that. It is
-# "is every key the UI can ask for present in every locale we claim to ship". A
-# missing key is a build failure, because it is invisible everywhere else.
+# "is every key the UI can ask for present in every locale we claim to ship", plus
+# "is the locale value actually different from the English it copies". A missing
+# key is a build failure, because it is invisible everywhere else, and so is a
+# key whose zh_CN value is byte-identical to the English base value: commit
+# a154337c reverse-translated sixty existing Chinese strings back to English and
+# every key was present, so nothing failed. scripts/check-i18n.py owns that second
+# rule, including the per-key allowlist of terms that are genuinely the same word
+# in both languages.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -37,4 +43,4 @@ if [ "$status" -ne 0 ]; then
   exit 1
 fi
 
-echo "Every string in base has a $locales translation, and no translation is an orphan."
+echo "Every string in base has a $locales translation, none is still the English base value, and no translation is an orphan."

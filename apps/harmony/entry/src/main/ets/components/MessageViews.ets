@@ -19,7 +19,12 @@ export struct CollapsibleSection {
   build() {
     Column() {
       Row({ space: 6 }) {
-        Text(this.expanded ? '▾' : '▸').fontSize(14).fontColor(this.theme.textSecondary);
+        // The disclosure indicator is the platform chevron, rotated rather than
+        // swapped between two characters, so it can never render as a tofu box.
+        SymbolGlyph($r('sys.symbol.chevron_right'))
+          .fontSize(14)
+          .fontColor([this.theme.textSecondary])
+          .rotate({ angle: this.expanded ? 90 : 0 });
         Text(this.title).fontSize(13).fontColor(this.theme.textSecondary);
       }
       .width('100%')

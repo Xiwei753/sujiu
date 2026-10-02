@@ -21,10 +21,6 @@
       "value": "Chat history"
     },
     {
-      "name": "a11y_more",
-      "value": "More"
-    },
-    {
       "name": "a11y_back",
       "value": "Back"
     },
@@ -45,28 +41,12 @@
       "value": "Stop generating"
     },
     {
-      "name": "sheet_title_more",
-      "value": "More"
-    },
-    {
-      "name": "sheet_item_context",
-      "value": "Context in this chat"
-    },
-    {
-      "name": "sheet_item_new_chat",
-      "value": "New chat"
-    },
-    {
-      "name": "sheet_item_settings",
-      "value": "Settings"
+      "name": "a11y_library",
+      "value": "Library"
     },
     {
       "name": "composer_placeholder",
       "value": "Message"
-    },
-    {
-      "name": "title_default_character",
-      "value": "Character"
     },
     {
       "name": "title_default_model",
@@ -83,10 +63,6 @@
     {
       "name": "message_tools",
       "value": "Tools (%1$d)"
-    },
-    {
-      "name": "message_tool_line",
-      "value": "%1$s: %2$s"
     },
     {
       "name": "status_submitting",
@@ -161,44 +137,268 @@
       "value": "%d from this endpoint"
     },
     {
-      "name": "character_sheet_search",
-      "value": "Search characters"
-    },
-    {
-      "name": "character_sheet_open_library",
-      "value": "Open library"
-    },
-    {
       "name": "context_sheet_title",
-      "value": "Context"
+      "value": "Context & sources"
+    },
+    {
+      "name": "context_sheet_intro",
+      "value": "What the model can read out of this conversation. Sources are stored, not generated."
     },
     {
       "name": "context_sheet_empty",
-      "value": "No context sources in this session yet."
+      "value": "No context sources in this conversation yet."
     },
     {
       "name": "context_source_meta",
       "value": "%1$s · %2$d records"
     },
     {
+      "name": "context_kind_world_lore",
+      "value": "World lore"
+    },
+    {
+      "name": "context_kind_story_event",
+      "value": "Story event"
+    },
+    {
+      "name": "context_kind_character_memory",
+      "value": "Character memory"
+    },
+    {
+      "name": "context_kind_chat_history",
+      "value": "Chat history"
+    },
+    {
+      "name": "context_kind_persona",
+      "value": "Persona"
+    },
+    {
+      "name": "context_kind_note",
+      "value": "Note"
+    },
+    {
+      "name": "context_kind_other",
+      "value": "Other"
+    },
+    {
       "name": "library_title",
       "value": "Library"
     },
     {
-      "name": "character_detail_chat",
-      "value": "Chat with this character"
+      "name": "library_intro",
+      "value": "What you have stored. Characters, personas, world books and prompts are saved once and used again, by any conversation."
+    },
+    {
+      "name": "library_section_characters",
+      "value": "Characters"
+    },
+    {
+      "name": "library_section_personas",
+      "value": "Personas"
+    },
+    {
+      "name": "library_section_world_books",
+      "value": "World books"
+    },
+    {
+      "name": "library_section_prompts",
+      "value": "Prompts"
+    },
+    {
+      "name": "library_import",
+      "value": "Import"
+    },
+    {
+      "name": "library_import_note",
+      "value": "Import is not available on this platform yet. You can write one by hand now."
+    },
+    {
+      "name": "library_save",
+      "value": "Save"
+    },
+    {
+      "name": "library_delete",
+      "value": "Delete"
+    },
+    {
+      "name": "library_empty_characters",
+      "value": "No characters yet."
+    },
+    {
+      "name": "library_empty_personas",
+      "value": "No personas yet."
+    },
+    {
+      "name": "library_empty_world_books",
+      "value": "No world books yet."
+    },
+    {
+      "name": "library_empty_prompts",
+      "value": "No prompts yet."
+    },
+    {
+      "name": "library_field_name",
+      "value": "Name"
+    },
+    {
+      "name": "library_field_description",
+      "value": "Description"
+    },
+    {
+      "name": "library_field_personality",
+      "value": "Personality"
+    },
+    {
+      "name": "library_field_scenario",
+      "value": "Scenario"
+    },
+    {
+      "name": "library_field_first_message",
+      "value": "First message"
+    },
+    {
+      "name": "library_field_alternate_greetings",
+      "value": "Other greetings, one per line"
+    },
+    {
+      "name": "library_field_example_dialogue",
+      "value": "Example dialogue"
+    },
+    {
+      "name": "library_field_system_prompt",
+      "value": "System prompt"
+    },
+    {
+      "name": "library_field_user_prompt",
+      "value": "User prompt"
+    },
+    {
+      "name": "library_field_post_history",
+      "value": "Post-history instructions"
+    },
+    {
+      "name": "library_field_format_rules",
+      "value": "Format rules"
+    },
+    {
+      "name": "library_field_content",
+      "value": "Content"
+    },
+    {
+      "name": "library_field_keys",
+      "value": "Keywords, comma separated"
+    },
+    {
+      "name": "library_field_world_books",
+      "value": "World books"
+    },
+    {
+      "name": "library_field_enabled",
+      "value": "On"
+    },
+    {
+      "name": "library_field_constant",
+      "value": "Always"
+    },
+    {
+      "name": "library_add_entry",
+      "value": "Add entry"
+    },
+    {
+      "name": "library_remove_entry",
+      "value": "Remove entry"
+    },
+    {
+      "name": "library_entry_count",
+      "value": "%d entries"
+    },
+    {
+      "name": "library_prompt_intro",
+      "value": "Fixed prompt text for a conversation: what the model is told, what the user is told, what comes after the history, and how to answer. Reusable, not a setting."
+    },
+    {
+      "name": "library_world_book_intro",
+      "value": "Lore that is brought into a conversation when its keywords appear. One world book can be used by any number of characters, personas and conversations."
+    },
+    {
+      "name": "library_persona_intro",
+      "value": "Who the user is playing. A persona is its own resource: it is not part of a character, and it can be used by any number of conversations."
+    },
+    {
+      "name": "library_new_character",
+      "value": "New character"
+    },
+    {
+      "name": "library_new_persona",
+      "value": "New persona"
+    },
+    {
+      "name": "library_new_world_book",
+      "value": "New world book"
+    },
+    {
+      "name": "library_new_prompt",
+      "value": "New prompt set"
+    },
+    {
+      "name": "binding_title",
+      "value": "This conversation"
+    },
+    {
+      "name": "binding_intro",
+      "value": "What this one chat uses, out of what is already stored. Editing any of it happens in the library, and the same item can be used by many conversations."
+    },
+    {
+      "name": "binding_participants",
+      "value": "In this chat"
+    },
+    {
+      "name": "binding_persona",
+      "value": "Persona"
+    },
+    {
+      "name": "binding_world_books",
+      "value": "World books"
+    },
+    {
+      "name": "binding_prompts",
+      "value": "Prompts"
+    },
+    {
+      "name": "binding_context",
+      "value": "Context & sources"
+    },
+    {
+      "name": "binding_apply",
+      "value": "Apply"
+    },
+    {
+      "name": "binding_empty",
+      "value": "Nothing is stored yet. Add something in the library first."
     },
     {
       "name": "settings_title",
       "value": "Settings"
     },
     {
-      "name": "settings_section_appearance",
+      "name": "settings_category_provider",
+      "value": "Provider & API"
+    },
+    {
+      "name": "settings_category_appearance",
       "value": "Appearance"
     },
     {
-      "name": "settings_section_about",
+      "name": "settings_category_diagnostics",
+      "value": "Diagnostics"
+    },
+    {
+      "name": "settings_category_about",
       "value": "About"
+    },
+    {
+      "name": "settings_provider_summary_none",
+      "value": "Not configured"
     },
     {
       "name": "settings_about_platform",
@@ -207,6 +407,10 @@
     {
       "name": "settings_about_runtime",
       "value": "Runtime"
+    },
+    {
+      "name": "settings_about_runtime_native",
+      "value": "native runtime"
     },
     {
       "name": "appearance_system",
@@ -219,34 +423,6 @@
     {
       "name": "appearance_dark",
       "value": "Dark"
-    },
-    {
-      "name": "error_turn_failed",
-      "value": "The reply could not be completed."
-    },
-    {
-      "name": "error_new_chat_failed",
-      "value": "A new chat could not be started."
-    },
-    {
-      "name": "error_no_provider_configured",
-      "value": "No model service is configured yet."
-    },
-    {
-      "name": "error_missing_credential",
-      "value": "The API key is missing."
-    },
-    {
-      "name": "error_session_not_found",
-      "value": "That conversation no longer exists."
-    },
-    {
-      "name": "error_turn_busy",
-      "value": "A reply is already in progress."
-    },
-    {
-      "name": "settings_section_provider",
-      "value": "PROVIDER"
     },
     {
       "name": "provider_hint",
@@ -283,10 +459,6 @@
     {
       "name": "provider_protocol_none",
       "value": "No protocol could be established."
-    },
-    {
-      "name": "provider_models_found",
-      "value": "Models it lists"
     },
     {
       "name": "provider_models_count_short",
@@ -417,22 +589,6 @@
       "value": "Ask again"
     },
     {
-      "name": "settings_section_diagnostics",
-      "value": "DIAGNOSTICS"
-    },
-    {
-      "name": "provider_diagnostics_show",
-      "value": "Show diagnostics"
-    },
-    {
-      "name": "provider_diagnostics_hide",
-      "value": "Hide diagnostics"
-    },
-    {
-      "name": "provider_diagnostics_empty",
-      "value": "Nothing recorded yet."
-    },
-    {
       "name": "provider_diagnostics_copy",
       "value": "Copy log"
     },
@@ -445,8 +601,36 @@
       "value": "Clear log"
     },
     {
+      "name": "provider_diagnostics_empty",
+      "value": "Nothing recorded yet."
+    },
+    {
       "name": "provider_diagnostics_note",
       "value": "API keys are never written here — a key appears only as a masked fragment."
+    },
+    {
+      "name": "error_turn_failed",
+      "value": "The reply could not be completed."
+    },
+    {
+      "name": "error_new_chat_failed",
+      "value": "A new chat could not be started."
+    },
+    {
+      "name": "error_no_provider_configured",
+      "value": "No model service is configured yet."
+    },
+    {
+      "name": "error_missing_credential",
+      "value": "The API key is missing."
+    },
+    {
+      "name": "error_session_not_found",
+      "value": "That conversation no longer exists."
+    },
+    {
+      "name": "error_turn_busy",
+      "value": "A reply is already in progress."
     },
     {
       "name": "error_provider_not_saved",
@@ -475,230 +659,6 @@
     {
       "name": "error_bind_failed",
       "value": "This conversation's contents could not be updated."
-    },
-    {
-      "name": "a11y_library",
-      "value": "Library"
-    },
-    {
-      "name": "library_intro",
-      "value": "What you have stored. Characters, personas, world books and prompts are saved once and used again, by any conversation."
-    },
-    {
-      "name": "library_section_characters",
-      "value": "Characters"
-    },
-    {
-      "name": "library_section_personas",
-      "value": "Personas"
-    },
-    {
-      "name": "library_section_world_books",
-      "value": "World books"
-    },
-    {
-      "name": "library_section_prompts",
-      "value": "Prompts"
-    },
-    {
-      "name": "library_section_counts",
-      "value": "%1$d of %2$d"
-    },
-    {
-      "name": "library_new",
-      "value": "New"
-    },
-    {
-      "name": "library_import",
-      "value": "Import"
-    },
-    {
-      "name": "library_edit",
-      "value": "Edit"
-    },
-    {
-      "name": "library_view",
-      "value": "View"
-    },
-    {
-      "name": "library_save",
-      "value": "Save"
-    },
-    {
-      "name": "library_delete",
-      "value": "Delete"
-    },
-    {
-      "name": "library_delete_confirm",
-      "value": "Delete this permanently? Conversations using it will stop using it."
-    },
-    {
-      "name": "library_empty_characters",
-      "value": "No characters yet."
-    },
-    {
-      "name": "library_empty_personas",
-      "value": "No personas yet."
-    },
-    {
-      "name": "library_empty_world_books",
-      "value": "No world books yet."
-    },
-    {
-      "name": "library_empty_prompts",
-      "value": "No prompts yet."
-    },
-    {
-      "name": "library_import_note",
-      "value": "Import is not available on this platform yet. You can write one by hand now."
-    },
-    {
-      "name": "library_field_name",
-      "value": "Name"
-    },
-    {
-      "name": "library_field_description",
-      "value": "Description"
-    },
-    {
-      "name": "library_field_personality",
-      "value": "Personality"
-    },
-    {
-      "name": "library_field_scenario",
-      "value": "Scenario"
-    },
-    {
-      "name": "library_field_first_message",
-      "value": "First message"
-    },
-    {
-      "name": "library_field_alternate_greetings",
-      "value": "Other greetings, one per line"
-    },
-    {
-      "name": "library_field_example_dialogue",
-      "value": "Example dialogue"
-    },
-    {
-      "name": "library_field_system_prompt",
-      "value": "System prompt"
-    },
-    {
-      "name": "library_field_user_prompt",
-      "value": "User prompt"
-    },
-    {
-      "name": "library_field_post_history",
-      "value": "Post-history instructions"
-    },
-    {
-      "name": "library_field_format_rules",
-      "value": "Format rules"
-    },
-    {
-      "name": "library_field_content",
-      "value": "Content"
-    },
-    {
-      "name": "library_field_keys",
-      "value": "Keywords, comma separated"
-    },
-    {
-      "name": "library_field_world_books",
-      "value": "World books"
-    },
-    {
-      "name": "library_add_entry",
-      "value": "Add entry"
-    },
-    {
-      "name": "library_remove_entry",
-      "value": "Remove entry"
-    },
-    {
-      "name": "library_entry_count",
-      "value": "%d entries"
-    },
-    {
-      "name": "library_world_book_count",
-      "value": "%d world books"
-    },
-    {
-      "name": "library_prompt_intro",
-      "value": "Fixed prompt text for a conversation: what the model is told, what the user is told, what comes after the history, and how to answer. Reusable, not a setting."
-    },
-    {
-      "name": "library_world_book_intro",
-      "value": "Lore that is brought into a conversation when its keywords appear. One world book can be used by any number of characters, personas and conversations."
-    },
-    {
-      "name": "library_persona_intro",
-      "value": "Who the user is playing. A persona is its own resource: it is not part of a character, and it can be used by any number of conversations."
-    },
-    {
-      "name": "binding_title",
-      "value": "This conversation"
-    },
-    {
-      "name": "binding_intro",
-      "value": "What this one chat uses, out of what is already stored. Editing any of it happens in the library, and the same item can be used by many conversations."
-    },
-    {
-      "name": "binding_participants",
-      "value": "In this chat"
-    },
-    {
-      "name": "binding_persona",
-      "value": "Persona"
-    },
-    {
-      "name": "binding_world_books",
-      "value": "World books"
-    },
-    {
-      "name": "binding_prompts",
-      "value": "Prompts"
-    },
-    {
-      "name": "binding_none",
-      "value": "None"
-    },
-    {
-      "name": "binding_apply",
-      "value": "Apply"
-    },
-    {
-      "name": "binding_empty",
-      "value": "Nothing is stored yet. Add something in the library first."
-    },
-    {
-      "name": "library_field_enabled",
-      "value": "On"
-    },
-    {
-      "name": "library_field_constant",
-      "value": "Always"
-    },
-    {
-      "name": "library_new_character",
-      "value": "New character"
-    },
-    {
-      "name": "library_new_persona",
-      "value": "New persona"
-    },
-    {
-      "name": "library_new_world_book",
-      "value": "New world book"
-    },
-    {
-      "name": "library_new_prompt",
-      "value": "New prompt set"
-    },
-    {
-      "name": "sheet_item_conversation_contents",
-      "value": "This conversation"
     }
   ]
 }

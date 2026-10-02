@@ -2,64 +2,55 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Lightweight top bar: history, current character, current model, overflow.
+// Chat top bar: exactly five slots, in the order `docs/UI_ARCHITECTURE.md` §1.2
+// fixes.
+//
+//     历史入口 | 会话标题 | 模型            资料库 | 设置
+//
+// There is deliberately no overflow menu. It used to be the only place library
+// and settings were reachable from, which meant the two most-used destinations
+// in the app were hidden behind three dots next to a wide, empty toolbar.
+//
+// Every slot is a flat `ToolButton` with a text label rather than a glyph.
+// Qt Quick Controls ships no icon set, and this project carries no icon
+// resources, so an "icon" here could only be a Unicode character standing in
+// for one — the thing that reads differently in every font and tells a
+// screen reader nothing. A label says what it is; if a real icon theme is
+// added later it replaces the label, not the other way round.
 ToolBar {
     id: topBar
 
     signal historyRequested()
-    signal characterRequested()
     signal modelRequested()
-    signal contextRequested()
+    signal libraryRequested()
     signal settingsRequested()
-    signal characterLibraryRequested()
 
     RowLayout {
         anchors.fill: parent
         spacing: 4
 
         ToolButton {
-            text: qsTr("☰")
-            font.pixelSize: 18
+            text: qsTr("Chats")
             onClicked: topBar.historyRequested()
             ToolTip.visible: hovered
             ToolTip.text: qsTr("Chat history")
         }
 
-        Button {
+        // The conversation title is the entry to this conversation's contents
+        // and bindings. This frontend has no such page yet, so the slot is a
+        // label rather than a control that opens the character picker — see
+        // apps/desktop/TODO.md.
+        Label {
+            text: App.currentCharacterName
+            elide: Text.ElideRight
             Layout.maximumWidth: 220
-            flat: true
-            onClicked: topBar.characterRequested()
-
-            contentItem: RowLayout {
-                spacing: 6
-                Label {
-                    text: App.currentCharacterName
-                    elide: Text.ElideRight
-                    Layout.fillWidth: true
-                }
-                Label {
-                    text: "⌄"
-                    opacity: 0.6
-                }
-            }
+            Layout.leftMargin: 8
         }
 
-        Button {
-            flat: true
+        ToolButton {
+            text: App.currentModelName
             onClicked: topBar.modelRequested()
-
-            contentItem: RowLayout {
-                spacing: 6
-                Label {
-                    text: App.currentModelName
-                    elide: Text.ElideRight
-                    Layout.maximumWidth: 180
-                }
-                Label {
-                    text: "⌄"
-                    opacity: 0.6
-                }
-            }
+            Layout.maximumWidth: 200
         }
 
         Item {
@@ -67,32 +58,17 @@ ToolBar {
         }
 
         ToolButton {
-            id: overflowButton
+            text: qsTr("Library")
+            onClicked: topBar.libraryRequested()
+            ToolTip.visible: hovered
+            ToolTip.text: qsTr("Characters, Personas, world books and prompts")
+        }
 
-            text: qsTr("⋯")
-            font.pixelSize: 18
-            onClicked: overflowMenu.popup()
-
-            Menu {
-                id: overflowMenu
-
-                y: overflowButton.height
-                x: -width + overflowButton.width
-
-                MenuItem {
-                    text: qsTr("Context & sources")
-                    onTriggered: topBar.contextRequested()
-                }
-                MenuItem {
-                    text: qsTr("Character library")
-                    onTriggered: topBar.characterLibraryRequested()
-                }
-                MenuSeparator {}
-                MenuItem {
-                    text: qsTr("Settings")
-                    onTriggered: topBar.settingsRequested()
-                }
-            }
+        ToolButton {
+            text: qsTr("Settings")
+            onClicked: topBar.settingsRequested()
+            ToolTip.visible: hovered
+            ToolTip.text: qsTr("App and service configuration")
         }
     }
 }

@@ -76,19 +76,17 @@ export struct HistoryPanel {
           .fontWeight(FontWeight.Medium)
           .fontColor(this.theme.textPrimary)
           .layoutWeight(1);
-        // Custom content plus zero padding: a fixed-size Button keeps the
-        // default label padding, which leaves no room for the label and
-        // silently renders an empty circle.
-        Button() {
-          Text('+')
+        // New chat lives here and only here. TEXTUAL style is the platform's own
+        // name for an icon button with no fill; a hand-painted disc behind a
+        // character was both a second button style and a Unicode glyph
+        // pretending to be an icon.
+        Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+          SymbolGlyph($r('sys.symbol.plus'))
             .fontSize(18)
-            .fontColor(this.theme.textPrimary);
+            .fontColor([this.theme.textPrimary]);
         }
           .width(32)
           .height(32)
-          .padding(0)
-          .borderRadius(16)
-          .backgroundColor(this.theme.surfaceMuted)
           .accessibilityText(this.a11y($r('app.string.a11y_new_chat')))
           .onClick(() => {
             this.controller.newSession();

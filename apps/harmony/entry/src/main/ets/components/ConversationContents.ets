@@ -13,11 +13,18 @@
  *
  * The transcript is not touched by anything on this screen. Changing who is in
  * the room is not rewriting what has already been said in it.
+ *
+ * This screen is reachable only by tapping the conversation title in the top bar,
+ * which is the single entry point the information architecture gives it. It is
+ * also where Context & sources is opened from, for the same reason it is not a
+ * top-bar button: context belongs to a conversation, so the place to reach it
+ * is the conversation.
  */
 import { CharacterSummary, PersonaSummary, PromptProfileSummary, WorldBookSummary } from '../bridge/SujiuBridge';
 import { ChatController } from '../presentation/ChatController';
 import { AppTheme } from '../ui/theme/Theme';
 import { SafeArea } from '../ui/SafeArea';
+import { PageHeader } from './Library';
 
 /** A section label inside the binding page. */
 @Component
@@ -37,9 +44,10 @@ struct BindingSection {
 /**
  * One pickable stored resource, with its bound state.
  *
- * A checkmark rather than a filled-in look, and the name comes from the stored
- * resource. Binding resolves ids to names for display and for nothing else: if
- * this component held a copy of a persona, the two would be able to disagree.
+ * A platform checkmark rather than a filled-in look, and the name comes from the
+ * stored resource. Binding resolves ids to names for display and for nothing
+ * else: if this component held a copy of a persona, the two would be able to
+ * disagree.
  */
 @Component
 struct BindingRow {
@@ -69,11 +77,16 @@ struct BindingRow {
       }
       .alignItems(HorizontalAlign.Start)
       .layoutWeight(1);
-      Text(this.bound ? '✓' : '')
-        .fontSize(16)
-        .fontColor(this.theme.textPrimary)
-        .width(24)
-        .textAlign(TextAlign.Center);
+      // Only the bound rows carry a checkmark, and the slot is always present so
+      // the names do not shift sideways as they are ticked.
+      if (this.bound) {
+        SymbolGlyph($r('sys.symbol.checkmark'))
+          .fontSize(16)
+          .fontColor([this.theme.accent])
+          .width(24);
+      } else {
+        Blank().width(24);
+      }
     }
     .width('100%')
     .padding(14)
@@ -83,11 +96,57 @@ struct BindingRow {
   }
 }
 
+/**
+ * A row that goes somewhere instead of choosing something.
+ *
+ * Distinct from `BindingRow` because the two answer different questions and the
+ * reader can tell: one is a checkbox over stored resources, the other navigates.
+ */
+@Component
+struct ContentsLinkRow {
+  @Prop label: ResourceStr = '';
+  @Prop detail: ResourceStr = '';
+  @ObjectLink theme: AppTheme;
+  onOpen: () => void = () => {};
+
+  build() {
+    Row({ space: 12 }) {
+      Column({ space: 3 }) {
+        Text(this.label)
+          .fontSize(15)
+          .fontColor(this.theme.textPrimary)
+          .width('100%')
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis });
+        if (this.detail !== '') {
+          Text(this.detail)
+            .fontSize(12)
+            .fontColor(this.theme.textSecondary)
+            .width('100%')
+            .maxLines(2)
+            .textOverflow({ overflow: TextOverflow.Ellipsis });
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .layoutWeight(1);
+      SymbolGlyph($r('sys.symbol.chevron_right'))
+        .fontSize(16)
+        .fontColor([this.theme.textSecondary]);
+    }
+    .width('100%')
+    .padding(14)
+    .borderRadius(12)
+    .backgroundColor(this.theme.surface)
+    .onClick(() => this.onOpen());
+  }
+}
+
 @Component
 export struct ConversationContents {
   @ObjectLink controller: ChatController;
   @ObjectLink theme: AppTheme;
   onBack: () => void = () => {};
+  onOpenContext: () => void = () => {};
 
   @State private participantIds: string[] = [];
   @State private personaId: string = '';
@@ -127,23 +186,10 @@ export struct ConversationContents {
 
   build() {
     Column() {
-      Row({ space: 8 }) {
-        Text('←')
-          .fontSize(20)
-          .fontColor(this.theme.textPrimary)
-          .width(40)
-          .height(40)
-          .textAlign(TextAlign.Center)
-          .onClick(() => this.onBack());
-        Text($r('app.string.binding_title'))
-          .fontSize(18)
-          .fontWeight(FontWeight.Medium)
-          .fontColor(this.theme.textPrimary)
-          .layoutWeight(1);
-      }
-      .width('100%')
-      .padding({ top: SafeArea.topVp, left: 12, right: 12, bottom: 12 })
-      .backgroundColor(this.theme.pageBackground);
+      // The shared header rather than a second copy of it. Two headers is how
+      // one of them ends up with the safe-area padding missing and the page
+      // looks broken rather than unfinished.
+      PageHeader({ theme: this.theme, title: $r('app.string.binding_title'), onBack: () => this.onBack() });
 
       Scroll() {
         Column({ space: 8 }) {
@@ -228,14 +274,24 @@ export struct ConversationContents {
               });
             });
           }
+
+          BindingSection({ theme: this.theme, label: $r('app.string.binding_context') });
+          ContentsLinkRow({
+            theme: this.theme,
+            label: $r('app.string.context_sheet_title'),
+            onOpen: () => this.onOpenContext()
+          });
         }
         .width('100%')
         .padding(16);
       }
       .layoutWeight(1)
+      .align(Alignment.Top)
       .width('100%');
 
       Row() {
+        // Apply is the one primary action on this screen, so it is the one
+        // button that wears the emphasis colour.
         Button($r('app.string.binding_apply'))
           .width('100%')
           .height(46)

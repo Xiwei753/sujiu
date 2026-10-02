@@ -2,12 +2,14 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Chat is the app. Everything else is reachable from the top bar overflow menu.
+// Chat is the home surface. The top bar's five slots are the whole of the
+// top-level information architecture; nothing else needs an entry from here.
 Item {
     id: shell
 
     // Inspector visibility is view state: it is not part of the conversation
-    // model and never reaches Rust.
+    // model and never reaches Rust. It currently has no toggle — see the pane
+    // at the bottom of this file.
     property bool inspectorVisible: false
 
     signal settingsRequested()
@@ -52,11 +54,9 @@ Item {
                 Layout.fillWidth: true
 
                 onHistoryRequested: historyDrawer.open()
-                onCharacterRequested: characterSheet.open()
                 onModelRequested: modelSheet.open()
-                onContextRequested: shell.toggleInspector()
                 onSettingsRequested: shell.settingsRequested()
-                onCharacterLibraryRequested: shell.characterLibraryRequested()
+                onLibraryRequested: shell.characterLibraryRequested()
             }
 
             ConversationView {
@@ -71,6 +71,12 @@ Item {
             }
         }
 
+        // The context inspector has no entry point yet. Its one spec'd entry is
+        // the conversation title → this conversation's contents, and this
+        // frontend has no contents page; it used to hang off the three-dot
+        // overflow, which this issue removed. The pane and the flag stay
+        // because the destination is correct and the page that reaches it is
+        // the only missing piece — apps/desktop/TODO.md records it.
         Pane {
             Layout.preferredWidth: 320
             Layout.fillHeight: true
@@ -80,33 +86,7 @@ Item {
         }
     }
 
-    function toggleInspector() {
-        if (shell.width >= 900) {
-            shell.inspectorVisible = !shell.inspectorVisible;
-            return;
-        }
-        narrowInspector.open();
-    }
-
     ModelSelectorSheet {
         id: modelSheet
-    }
-
-    CharacterSelectorSheet {
-        id: characterSheet
-
-        onLibraryRequested: shell.characterLibraryRequested()
-    }
-
-    Dialog {
-        id: narrowInspector
-
-        title: qsTr("Context & sources")
-        width: Math.min(520, shell.width - 48)
-        height: Math.min(640, shell.height - 96)
-        anchors.centerIn: Overlay.overlay
-        modal: true
-
-        ContextPanel {}
     }
 }

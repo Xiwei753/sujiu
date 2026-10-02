@@ -18,8 +18,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import io.sujiu.app.R
 import io.sujiu.app.presentation.ChatController
 import io.sujiu.app.presentation.ChatIntent
 import io.sujiu.app.ui.SujiuNavigation
@@ -38,7 +40,6 @@ fun ChatScreen(controller: ChatController) {
     val state by controller.state.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
-    var showContextSheet by remember { mutableStateOf(false) }
 
     val send: (String) -> Unit = { text ->
         controller.dispatch(ChatIntent.DraftChanged(text))
@@ -65,7 +66,6 @@ fun ChatScreen(controller: ChatController) {
                 ChatCanvas(
                     controller = controller,
                     onOpenHistory = { scope.launch { drawerState.open() } },
-                    onOpenContext = { showContextSheet = true },
                     onSend = send,
                     modifier = Modifier.fillMaxSize(),
                 )
@@ -78,7 +78,6 @@ fun ChatScreen(controller: ChatController) {
                 ChatCanvas(
                     controller = controller,
                     onOpenHistory = {},
-                    onOpenContext = { showContextSheet = true },
                     onSend = send,
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                 )
@@ -86,31 +85,28 @@ fun ChatScreen(controller: ChatController) {
         }
     }
 
-    if (showContextSheet) {
-        ContextSheet(controller = controller, onDismiss = { showContextSheet = false })
-    }
+    // `ContextSheet` is deliberately not opened from here. Its one spec'd entry
+    // is the conversation title → this conversation's contents, and this
+    // frontend has no contents page yet; `apps/android/TODO.md` records that.
+    // Opening it from the top bar would be the second, wrong entry point.
 }
 
 @Composable
 private fun ChatCanvas(
     controller: ChatController,
     onOpenHistory: (() -> Unit)?,
-    onOpenContext: () -> Unit,
     onSend: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val state by controller.state.collectAsStateWithLifecycle()
     var showModelSheet by remember { mutableStateOf(false) }
-    var showCharacterSheet by remember { mutableStateOf(false) }
 
     Column(modifier = modifier) {
         ChatTopBar(
-            characterName = state.currentCharacter?.name ?: "New chat",
-            modelName = state.currentModel?.name ?: "Select model",
+            conversationTitle = state.currentCharacter?.name ?: stringResource(R.string.new_chat),
+            modelName = state.currentModel?.name ?: stringResource(R.string.select_model),
             onOpenHistory = onOpenHistory,
-            onOpenCharacter = { showCharacterSheet = true },
             onOpenModel = { showModelSheet = true },
-            onOpenContext = onOpenContext,
             onOpenLibrary = { SujiuNavigation.openLibrary(controller) },
             onOpenSettings = { SujiuNavigation.openSettings(controller) },
         )
@@ -133,15 +129,5 @@ private fun ChatCanvas(
 
     if (showModelSheet) {
         ModelSelectorSheet(controller = controller, onDismiss = { showModelSheet = false })
-    }
-    if (showCharacterSheet) {
-        CharacterSelectorSheet(
-            controller = controller,
-            onDismiss = { showCharacterSheet = false },
-            onOpenLibrary = {
-                showCharacterSheet = false
-                SujiuNavigation.openLibrary(controller)
-            },
-        )
     }
 }

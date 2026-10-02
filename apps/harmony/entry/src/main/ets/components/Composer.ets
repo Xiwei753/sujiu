@@ -22,16 +22,16 @@ export struct Composer {
     Row({ space: 8 }) {
       // Fixed-size buttons drop the default label padding, otherwise the
       // label is squeezed out of the button and renders as a blank circle.
-      Button() {
-        Text('+')
+      // TEXTUAL style is the platform's name for an icon with no fill; the
+      // default EMPHASIZED style paints a disc here, and a disabled
+      // attachment button has no state that disc could be reporting.
+      Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+        SymbolGlyph($r('sys.symbol.plus'))
           .fontSize(20)
-          .fontColor(this.theme.textSecondary);
+          .fontColor([this.theme.textSecondary]);
       }
         .width(40)
         .height(40)
-        .padding(0)
-        .borderRadius(20)
-        .backgroundColor(this.theme.surfaceMuted)
         .enabled(false)
         .accessibilityText(this.a11y($r('app.string.a11y_add_attachment')));
 
@@ -47,28 +47,28 @@ export struct Composer {
         });
 
       if (this.controller.busy) {
-        Button() {
-          Text('■')
-            .fontSize(16)
-            .fontColor(this.theme.danger);
+        // Stop replaces send in the same slot, so it keeps the same shape and
+        // is named by its glyph rather than by a red field. Cancelling is not
+        // a destructive action and must not look like one.
+        Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+          SymbolGlyph($r('sys.symbol.stop_circle'))
+            .fontSize(20)
+            .fontColor([this.theme.danger]);
         }
           .width(40)
           .height(40)
-          .padding(0)
-          .borderRadius(20)
-          .backgroundColor(this.theme.dangerSurface)
           .accessibilityText(this.a11y($r('app.string.a11y_stop')))
           .onClick(() => this.controller.stop());
       } else {
-        Button() {
-          Text('↑')
+        // Send is the one primary action in the chat surface, so it is the one
+        // place the emphasis colour is painted.
+        Button({ type: ButtonType.Circle }) {
+          SymbolGlyph($r('sys.symbol.arrow_up'))
             .fontSize(20)
-            .fontColor(this.theme.textOnAccent);
+            .fontColor([this.theme.textOnAccent]);
         }
           .width(40)
           .height(40)
-          .padding(0)
-          .borderRadius(20)
           .backgroundColor(this.theme.accent)
           .accessibilityText(this.a11y($r('app.string.a11y_send')))
           .enabled(this.controller.canSend)

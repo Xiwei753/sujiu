@@ -32,9 +32,10 @@ qt_add_qml_module(sujiu_desktop
         qml/Composer.qml
         qml/HistoryPanel.qml
         qml/ModelSelectorSheet.qml
-        qml/CharacterSelectorSheet.qml
         qml/ContextPanel.qml
         qml/SettingsPage.qml
+        qml/AppearanceSettingsPage.qml
+        qml/AboutSettingsPage.qml
         qml/CharacterLibraryPage.qml
         qml/CharacterDetailPage.qml
 )

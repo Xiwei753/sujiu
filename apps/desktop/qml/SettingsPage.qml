@@ -2,20 +2,34 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 
-// Standard settings pattern. Sections appear as the screens that implement them
-// land, instead of a grid of decorative cards.
+// Settings, first level: a category list and nothing else.
+//
+// `docs/UI_ARCHITECTURE.md` §1.9 defines the first level as destinations, with
+// anything larger than a single screen on its own page behind one of them. The
+// previous version laid the appearance choice and the about text out on one
+// scrolling page, so the screen had no structure and nowhere to grow into.
+//
+// Only categories this frontend can open are listed. Provider & API and
+// Diagnostics are in the spec, and the desktop bridge exposes neither an
+// endpoint configuration nor a diagnostics log, so a row for them would be a
+// button that leads nowhere — apps/desktop/TODO.md records the missing
+// capability rather than this file inventing a page for it.
 Page {
     id: page
 
     signal backRequested()
+
+    readonly property var categories: [
+        { key: "appearance", label: qsTr("Appearance") },
+        { key: "about", label: qsTr("About") }
+    ]
 
     header: ToolBar {
         RowLayout {
             anchors.fill: parent
 
             ToolButton {
-                text: "‹"
-                font.pixelSize: 20
+                text: qsTr("Back")
                 onClicked: page.backRequested()
             }
 
@@ -31,83 +45,52 @@ Page {
         }
     }
 
-    ListView {
+    // A category push replaces the list rather than covering it, which is how a
+    // settings window behaves: the back control returns to the list.
+    StackView {
+        id: pages
+
         anchors.fill: parent
-        contentWidth: width
-        clip: true
-        spacing: 4
-
-        model: 2
-
-        delegate: Loader {
-            required property int index
-
-            width: parent ? parent.width : 0
-
-            sourceComponent: index === 0 ? appearanceComponent : aboutComponent
-        }
+        initialItem: categoryList
 
         Component {
-            id: appearanceComponent
+            id: categoryList
 
-            ColumnLayout {
-                width: parent ? parent.width : 0
-                spacing: 4
+            ListView {
+                contentWidth: width
+                clip: true
+                spacing: 0
 
-                Label {
-                    text: qsTr("Appearance")
-                    font.pixelSize: 12
-                    opacity: 0.6
-                    Layout.leftMargin: 12
-                }
+                model: page.categories
 
-                RowLayout {
-                    Layout.fillWidth: true
-                    Layout.margins: 6
-                    spacing: 8
+                delegate: ItemDelegate {
+                    required property var modelData
 
-                    Repeater {
-                        model: ["system", "light", "dark"]
-
-                        Button {
-                            required property var modelData
-
-                            text: modelData
-                            checkable: true
-                            checked: App.appearanceMode === modelData
-                            onClicked: App.appearanceMode = modelData
-                        }
-                    }
+                    width: ListView.view.width
+                    text: modelData.label
+                    onClicked: pages.push(page.componentFor(modelData.key))
                 }
             }
         }
+    }
 
-        Component {
-            id: aboutComponent
+    function componentFor(key) {
+        return key === "appearance" ? appearancePage : aboutPage;
+    }
 
-            ColumnLayout {
-                width: parent ? parent.width : 0
-                spacing: 4
+    Component {
+        id: appearancePage
 
-                Label {
-                    text: qsTr("About")
-                    font.pixelSize: 12
-                    opacity: 0.6
-                    Layout.leftMargin: 12
-                }
+        AppearanceSettingsPage {
+            onBackRequested: pages.pop()
+        }
+    }
 
-                Label {
-                    text: "Sujiu 0.1.0"
-                    Layout.leftMargin: 12
-                }
+    Component {
+        id: aboutPage
 
-                Label {
-                    text: App.platformSummary
-                    font.pixelSize: 11
-                    opacity: 0.6
-                    Layout.leftMargin: 12
-                }
-            }
+        AboutSettingsPage {
+            onBackRequested: pages.pop()
         }
     }
 }

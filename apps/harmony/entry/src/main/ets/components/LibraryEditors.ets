@@ -86,10 +86,15 @@ struct EditorActions {
   build() {
     Row({ space: 12 }) {
       if (this.canDelete) {
-        Text($r('app.string.library_delete'))
+        // A button, because it is one. `Text` with a click handler looks the
+        // part on a static screen and behaves like a label everywhere else: no
+        // press feedback, and nothing for a screen reader to announce as
+        // actionable. Borderless, because a destructive action that sits at the
+        // end of a form should not be the biggest thing in it.
+        Button($r('app.string.library_delete'), { type: ButtonType.Normal })
           .fontSize(15)
-          .fontColor(this.theme.dangerAccent)
-          .padding({ top: 12, bottom: 12, left: 4, right: 4 })
+          .fontColor(this.theme.danger)
+          .backgroundColor(Color.Transparent)
           .onClick(() => this.onDelete());
       }
       Button($r('app.string.library_save'))
@@ -156,11 +161,17 @@ struct WorldBookPicker {
               .layoutWeight(1)
               .maxLines(1)
               .textOverflow({ overflow: TextOverflow.Ellipsis });
-            Text(this.selected.includes(book.id) ? '✓' : '')
-              .fontSize(16)
-              .fontColor(this.theme.textPrimary)
-              .width(24)
-              .textAlign(TextAlign.Center);
+            // The slot is always present so the names do not shift sideways as
+            // the row is ticked, and the tick itself is the platform symbol
+            // rather than a character the font may not carry.
+            if (this.selected.includes(book.id)) {
+              SymbolGlyph($r('sys.symbol.checkmark'))
+                .fontSize(16)
+                .fontColor([this.theme.accent])
+                .width(24);
+            } else {
+              Blank().width(24);
+            }
           }
           .width('100%')
           .padding(14)
@@ -257,6 +268,7 @@ export struct CharacterEditor {
         .padding(16);
       }
       .layoutWeight(1)
+      .align(Alignment.Top)
       .width('100%');
 
       EditorActions({
@@ -363,6 +375,7 @@ export struct PersonaEditor {
         .padding(16);
       }
       .layoutWeight(1)
+      .align(Alignment.Top)
       .width('100%');
 
       EditorActions({
@@ -444,6 +457,7 @@ export struct PromptEditor {
         .padding(16);
       }
       .layoutWeight(1)
+      .align(Alignment.Top)
       .width('100%');
 
       EditorActions({
@@ -655,9 +669,10 @@ export struct WorldBookEditor {
               }
               .width('100%');
 
-              Text($r('app.string.library_remove_entry'))
+              Button($r('app.string.library_remove_entry'), { type: ButtonType.Normal })
                 .fontSize(14)
-                .fontColor(this.theme.dangerAccent)
+                .fontColor(this.theme.danger)
+                .backgroundColor(Color.Transparent)
                 .padding({ top: 4, bottom: 4 })
                 .onClick(() => {
                   this.entries = this.entries.filter((_item: WorldBookEntryDraft, at: number) => at !== index);
@@ -689,6 +704,7 @@ export struct WorldBookEditor {
         .padding(16);
       }
       .layoutWeight(1)
+      .align(Alignment.Top)
       .width('100%');
 
       EditorActions({

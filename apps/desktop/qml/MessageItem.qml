@@ -63,20 +63,13 @@ Item {
                     Layout.fillWidth: true
                 }
 
+                // Was a "⋯" opening a menu with one item in it. The glyph was
+                // standing in for an icon Qt does not ship; the button it fed had
+                // a single action, so the button is the action now.
                 ToolButton {
-                    text: qsTr("⋯")
-                    font.pixelSize: 14
-                    onClicked: messageMenu.popup()
-
-                    Menu {
-                        id: messageMenu
-
-                        y: parent.height
-                        MenuItem {
-                            text: qsTr("Copy")
-                            onTriggered: App.copyMessage(root.message.text)
-                        }
-                    }
+                    text: qsTr("Copy")
+                    font.pixelSize: 12
+                    onClicked: App.copyMessage(root.message.text)
                 }
             }
         }
@@ -114,8 +107,9 @@ Item {
                     contentItem: RowLayout {
                         spacing: 6
                         Label {
-                            text: root.detailsExpanded ? "⌄" : "›"
-                            opacity: 0.6
+                            text: root.detailsExpanded ? qsTr("Hide details") : qsTr("Show details")
+                            font.pixelSize: 12
+                            opacity: 0.8
                         }
                         Label {
                             text: qsTr("%1 tool call(s)").arg(root.toolCalls.length)

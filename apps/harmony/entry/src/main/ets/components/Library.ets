@@ -13,8 +13,10 @@
  * fields that do not apply to one of them are exactly what a "one resource" type
  * ends up with.
  */
+import { common } from '@kit.AbilityKit';
 import { CharacterSummary, PersonaSummary, PromptProfileSummary, WorldBookSummary } from '../bridge/SujiuBridge';
 import { ChatController } from '../presentation/ChatController';
+import { Copy } from '../ui/Copy';
 import { AppTheme } from '../ui/theme/Theme';
 import { SafeArea } from '../ui/SafeArea';
 
@@ -34,12 +36,21 @@ export struct PageHeader {
 
   build() {
     Row({ space: 8 }) {
-      Text('←')
-        .fontSize(20)
-        .fontColor(this.theme.textPrimary)
+      // The platform back arrow in a circle button, which is what a back
+      // affordance is on this platform. A bare "←" character is a font
+      // dependency: it renders at whatever weight the current font gives it,
+      // takes no press feedback, and lands at a different optical weight than
+      // every other glyph on the screen. TEXTUAL style is the platform's name for
+      // an icon button with no fill; the default EMPHASIZED style paints a disc
+      // behind every back arrow on every sub-page.
+      Button({ type: ButtonType.Circle, buttonStyle: ButtonStyleMode.TEXTUAL }) {
+        SymbolGlyph($r('sys.symbol.arrow_left'))
+          .fontSize(20)
+          .fontColor([this.theme.textPrimary]);
+      }
         .width(40)
         .height(40)
-        .textAlign(TextAlign.Center)
+        .accessibilityText(Copy.resolve(getContext(this) as common.Context, $r('app.string.a11y_back')))
         .onClick(() => this.onBack());
       Text(this.title)
         .fontSize(18)
@@ -120,17 +131,18 @@ struct LibraryToolbar {
   build() {
     Column({ space: 8 }) {
       Row({ space: 12 }) {
-        Text(this.newLabel)
-          .fontSize(15)
+        // Two platform buttons at two levels of intent: New creates a resource,
+        // so it is the default capsule; Import is not implemented, so it is the
+        // borderless variant that does not compete with it. Both used to be
+        // `Text` with hand-applied padding and radius, which meant they had no
+        // press feedback and were not reachable by keyboard or screen reader
+        // as controls.
+        Button(this.newLabel, { type: ButtonType.Normal })
           .fontColor(this.theme.textPrimary)
-          .padding({ left: 16, right: 16, top: 10, bottom: 10 })
-          .borderRadius(20)
-          .backgroundColor(this.theme.surface)
           .onClick(() => this.onNew());
-        Text($r('app.string.library_import'))
-          .fontSize(15)
+        Button($r('app.string.library_import'), { type: ButtonType.Normal })
           .fontColor(this.theme.textSecondary)
-          .padding({ left: 16, right: 16, top: 10, bottom: 10 })
+          .backgroundColor(Color.Transparent)
           .onClick(() => {
             this.noteShown = !this.noteShown;
           });
@@ -167,11 +179,12 @@ struct HubRow {
         .fontColor(this.theme.textSecondary)
         .width(28)
         .textAlign(TextAlign.End);
-      Text('›')
-        .fontSize(18)
-        .fontColor(this.theme.textSecondary)
-        .width(12)
-        .textAlign(TextAlign.End);
+      // The platform disclosure chevron. It also rotates on open in every
+      // platform list, so the row reads as going somewhere rather than as a
+      // button with a decorative glyph on the end.
+      SymbolGlyph($r('sys.symbol.chevron_right'))
+        .fontSize(16)
+        .fontColor([this.theme.textSecondary]);
     }
     .width('100%')
     .padding(16)

@@ -23,6 +23,13 @@ import io.sujiu.app.presentation.ChatController
  * The list of context sources is a *list*, not a dump: the runtime decides what
  * to surface here, and the model decides what to actually read. Nothing on
  * this screen runs a tool itself.
+ *
+ * This component has no entry point yet. `docs/UI_ARCHITECTURE.md` §1.6 gives
+ * context exactly one: the conversation title → this conversation's contents,
+ * and the Android frontend has no contents page. It used to be opened from the
+ * three-dot overflow, which is the entry this issue removed. The component is
+ * kept because the destination is correct; `apps/android/TODO.md` lists the
+ * page that has to exist before it is wired.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

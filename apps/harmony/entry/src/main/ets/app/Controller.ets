@@ -135,8 +135,15 @@ export class AppGraph {
     }
   }
 
-  /** Re-reads the platform appearance and re-points the theme tokens. */
+  /**
+   * Re-reads the platform appearance and applies it.
+   *
+   * The context is passed through so `setColorMode` can force the resolved
+   * appearance. Every colour in the theme is a `sys.color.*` resource, and
+   * those resolve against the application's colour mode — so a user's choice of
+   * Light or Dark has to be told to the platform, not merely recorded.
+   */
   syncTheme(): void {
-    this.theme.apply(this.isDarkMode());
+    this.theme.apply(this.isDarkMode(), this.context ?? undefined);
   }
 }

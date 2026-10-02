@@ -43,13 +43,19 @@ export struct ConversationView {
 
       if (this.controller.errorCode.length > 0) {
         ListItem() {
-          Text(Copy.errorText(this.controller.errorCode, this.controller.errorDetail))
-            .fontSize(13)
-            .fontColor(this.theme.danger)
-            .width('100%')
-            .padding(12)
-            .borderRadius(12)
-            .backgroundColor(this.theme.dangerSurface);
+          // The failure is stated in words, so the platform emphasis colour is
+          // enough. There is no error card to paint: that was a second palette
+          // pretending to be a system surface.
+          Row({ space: 8 }) {
+            SymbolGlyph($r('sys.symbol.info_circle'))
+              .fontSize(16)
+              .fontColor([this.theme.danger]);
+            Text(Copy.errorText(this.controller.errorCode, this.controller.errorDetail))
+              .fontSize(13)
+              .fontColor(this.theme.danger)
+              .layoutWeight(1);
+          }
+          .width('100%');
         }
       }
     }

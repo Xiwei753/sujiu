@@ -87,7 +87,7 @@ export class Copy {
     if (characterName.length > 0) {
       return characterName;
     }
-    return $r('app.string.sheet_item_new_chat');
+    return $r('app.string.a11y_new_chat');
   }
 
   /**
@@ -167,6 +167,39 @@ export class Copy {
         return $r('app.string.provider_listing_unreachable');
       default:
         return $r('app.string.provider_listing_unknown');
+    }
+  }
+
+  /**
+   * The `ContextKind` code of a context source, as words.
+   *
+   * The wire value is snake_case (`world_lore`), so the bridge cannot
+   * manufacture a display label by splitting camelCase — the regex it used
+   * returned the code untouched and the context sheet showed `world_lore` to a
+   * Chinese reader. Splitting the code into words is presentation, so it
+   * happens here against the resource table.
+   *
+   * An unknown code falls back to `other` rather than to the raw code. A
+   * runtime that grows a kind must not be able to leak a new English
+   * identifier into the UI, and `other` still tells the user the source is
+   * listed even if it cannot say what kind it is.
+   */
+  static contextSourceKind(kind: string): ResourceStr {
+    switch (kind) {
+      case 'world_lore':
+        return $r('app.string.context_kind_world_lore');
+      case 'story_event':
+        return $r('app.string.context_kind_story_event');
+      case 'character_memory':
+        return $r('app.string.context_kind_character_memory');
+      case 'chat_history':
+        return $r('app.string.context_kind_chat_history');
+      case 'persona':
+        return $r('app.string.context_kind_persona');
+      case 'note':
+        return $r('app.string.context_kind_note');
+      default:
+        return $r('app.string.context_kind_other');
     }
   }
 

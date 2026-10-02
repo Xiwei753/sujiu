@@ -23,8 +23,11 @@ ApplicationWindow {
     palette.placeholderText: App.darkTheme ? "#8b8f98" : "#7a7e87"
     palette.button: App.darkTheme ? "#252830" : "#ececed"
     palette.buttonText: App.darkTheme ? "#e8e9ec" : "#1b1c1f"
-    palette.highlight: "#4c6ef5"
-    palette.highlightedText: "#ffffff"
+    // Selection colour is deliberately not set here. It used to be a fixed
+    // indigo, which meant selected rows and pressed buttons wore a brand colour
+    // on every platform and in both themes; the style's own highlight already
+    // follows the desktop theme, which is what `docs/UI_ARCHITECTURE.md` §2.7
+    // asks for.
     palette.mid: App.darkTheme ? "#3a3f49" : "#c9cbd1"
 
     // Page navigation is a view concern: the same chat state is reused by every

@@ -13,9 +13,10 @@ Page {
         RowLayout {
             anchors.fill: parent
 
+            // A label, not a "‹" glyph: Qt Quick Controls ships no icon set and
+            // a character standing in for one reads differently in every font.
             ToolButton {
-                text: "‹"
-                font.pixelSize: 20
+                text: qsTr("Back")
                 onClicked: page.backRequested()
             }
 
