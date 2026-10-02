@@ -8,7 +8,8 @@
 //!
 //! - continuation is a server-side handle, named `previous_response_id`;
 //! - reasoning is an output item the endpoint produced, not a string an
-//!   assistant message happens to carry;
+//!   assistant message happens to carry, which means it can only travel with
+//!   that handle and not as text we invent a field for;
 //! - a tool call is an item, and its result is the matching `call_id` item.
 //!
 //! So when an endpoint speaks this, the runtime uses it and stops pretending a
@@ -40,6 +41,25 @@
 //! replaced history — changes that prefix, so the digest differs and the whole
 //! transcript goes out again instead of being silently skipped against a
 //! conversation the endpoint holds in its old shape.
+//!
+//! ## A handle lives inside one user turn
+//!
+//! The handle is named on the next request of the *same* turn — the second and
+//! later tool rounds — and never at the start of a later one. A `response_id`
+//! is a claim about something the endpoint is holding right now, and it expires:
+//! OpenAI keeps responses about thirty days by default and a compatible gateway
+//! may keep them for less. A session reopened a month later has a transcript
+//! that is perfectly intact, a digest that still matches it, and a handle the
+//! endpoint has already forgotten — and a request naming it fails, so the first
+//! message of a new turn dies over an optimisation.
+//!
+//! This costs request size, not correctness, and it does not cost the thing
+//! continuation was worth: the input tokens a chained request carries are billed
+//! either way. What chaining avoids is sending the same prefix twice.
+//!
+//! Reasoning follows the same boundary for the same reason. It is an opaque
+//! item inside that chain, so a turn that cannot name the handle cannot carry
+//! the reasoning either.
 
 use std::collections::BTreeMap;
 
@@ -280,11 +300,29 @@ impl OpenAiResponsesProvider {
                 speaker: _,
                 ..
             } => {
-                // `reasoning` is deliberately dropped. On this transport the
-                // reasoning is an output item the endpoint already holds, and
-                // the handle we would have to replay it with is the same handle
-                // covering the rest of this prefix. Re-sending it as text would
-                // mean inventing a field this protocol does not have.
+                // `reasoning` is deliberately dropped, and the reason is the
+                // same handle that covers the rest of this prefix.
+                //
+                // On this transport the reasoning is an opaque output item the
+                // endpoint produced. There is no field an adapter could fill
+                // with it: re-sending the text we kept would be inventing a wire
+                // shape the protocol does not have, and passing a reasoning
+                // *summary* off as the reasoning itself would be lying to the
+                // next request about what the model still has.
+                //
+                // So the only way to carry reasoning forward is the same
+                // server-side response chain that carries the handle, and a
+                // handle does not cross a user turn. Reasoning is therefore
+                // replayed inside one user turn's tool loop and nowhere else: a
+                // new turn inherits the visible transcript and starts without it.
+                //
+                // That is a real loss, and it is a deliberate one. Replaying the
+                // endpoint's own opaque items across turns would need the items
+                // stored verbatim, a lifecycle for them, and an expiry story for
+                // the chain that holds them — the same problem `previous_
+                // response_id` has, and the reason it is scoped to one turn.
+                // Losing earlier reasoning degrades an answer; using a handle
+                // that has expired kills the turn.
                 //
                 // `speaker` is dropped for the same reason. This protocol has
                 // no field for who an assistant message speaks for, and putting
@@ -827,6 +865,7 @@ struct ResponsesResponse {
 mod tests {
     use super::*;
     use crate::types::{ToolAnnotations, ToolDefinition, ToolDiscovery};
+    use sujiu_core::AssistantStep;
 
     /// A sink that remembers what the transport announced.
     ///
@@ -1301,5 +1340,57 @@ mod tests {
         // The stream loop turns this into a failed turn; it never reaches the
         // point of reporting a short answer.
         assert!(error.to_string().contains("overloaded"), "{error}");
+    }
+
+    #[test]
+    fn reasoning_travels_with_the_handle_and_not_as_text() {
+        // A step that reasoned. The sidecar is real and it is in the transcript,
+        // because the transcript is where provider state belongs.
+        let sidecar = ReasoningSidecar::new("weighing the archive", config().identity);
+        let reasoned = ModelMessage::Assistant {
+            speaker: None,
+            content: Some("The archive is east.".into()),
+            reasoning: Some(sidecar.clone()),
+            calls: Vec::new(),
+        };
+
+        // It is not re-sent as text, and not as an invented item either: on this
+        // transport there is no field an adapter could fill with it, and the
+        // summary of a reasoning item is not the reasoning.
+        let body = body(request(vec![ModelMessage::user("where is it"), reasoned]));
+        let sent = body["input"].to_string();
+        assert!(
+            !sent.contains("weighing the archive"),
+            "reasoning is not invented onto the wire: {sent}"
+        );
+        assert!(
+            !sent.contains("reasoning"),
+            "and not as an item the protocol would not accept: {sent}"
+        );
+
+        // The visible half is still there, which is the part a new turn inherits.
+        assert!(
+            sent.contains("The archive is east."),
+            "the answer is the portable half of the step: {sent}"
+        );
+
+        // And the reasoning survives where it can be reached: on the step. A
+        // handle is scoped to one turn, so this is the only copy there will be.
+        let step = AssistantStep {
+            text: Some("The archive is east.".into()),
+            reasoning: Some(sidecar),
+            ..AssistantStep::default()
+        };
+        assert_eq!(
+            step.model_messages()
+                .first()
+                .and_then(|message| match message {
+                    ModelMessage::Assistant { reasoning, .. } => reasoning.clone(),
+                    _ => None,
+                })
+                .map(|reasoning| reasoning.content),
+            Some("weighing the archive".to_string()),
+            "the reasoning is kept in the transcript rather than dropped with the turn"
+        );
     }
 }

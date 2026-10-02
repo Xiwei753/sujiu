@@ -270,7 +270,7 @@ A directory with no document is not protected: a fresh install still seeds itsel
 
 A thinking-mode endpoint may reject a request whose previous assistant message returns without the reasoning that produced it, so the reasoning is stored on the step and replayed. It is a `ReasoningSidecar { content, identity }`, not a bare string.
 
-The identity matters: visible assistant text is portable across providers, provider reasoning is not. Handing one provider's reasoning to another under our own field name would put a foreign protocol's text where the endpoint expects its own. The wire field is only restored when the sidecar's identity matches the endpoint being called, and otherwise the reasoning stays in the transcript for diagnostics while the request replays the normalized transcript alone.
+The identity matters: visible assistant text is portable across providers, provider reasoning is not. Handing one provider's reasoning to another under our own field name would put a foreign protocol's text where the endpoint expects its own. The wire field is only restored when the sidecar's identity matches the endpoint being called, and otherwise the reasoning stays in the transcript for diagnostics while the request replays the normalized transcript alone. A matching identity is necessary but not sufficient: each protocol decides how much it can actually carry, and Responses — where reasoning is an opaque item inside a server-side chain rather than a request field — replays it only inside one user turn's tool loop. A protocol with no way to carry reasoning at all, such as Chat Completions, drops it from every request; the sidecar is still stored, so the reasoning is not lost with the turn.
 
 A legacy document that stored the reasoning as a bare string is read and kept, with an unknown identity — which makes it non-replayable on its own, because a real identity always names at least a model, so an empty one can never match. Losing the text entirely would be the worse failure: the conversation would not even open.
 
@@ -823,7 +823,7 @@ The differences are concrete:
 - a tool result is a `function_call_output` item keyed by the same `call_id`, which is what makes the pairing structural rather than conventional
 - tool definitions are flat (`{type, name, description, parameters}`) instead of nested under a `function` key
 - continuation is a real server-side handle: the completed response id is stored as a chainable `ProviderContinuation` and sent back as `previous_response_id`
-- reasoning is an output item the endpoint already holds, so it is deliberately **not** re-sent. Re-sending it as text would mean inventing a field the protocol does not have
+- reasoning is an output item the endpoint produced, so it is deliberately **not** re-sent as text. There is no field an adapter could fill with it, and a reasoning *summary* is not the reasoning
 
 A native handle does not replace the transcript. It lets a request skip the part the endpoint already holds. The transcript stays the portable base, and it is fully re-sent whenever the endpoint, protocol or model changes. A handle from a different identity, or a Chat Completions completion id — which is a label, not a handle — is never accepted as one.
 
@@ -839,6 +839,14 @@ The handle is still **persisted** on the step. It is a record of what the provid
 
 Reusing a handle across user turns again would be a deliberate change, and it would have to bring an expiry story with it: recognise the rejection that means "that response is gone", clear the handle, and retry once without it. Classifying an error by its text is the kind of guessing this architecture avoids elsewhere, which is why it is not here yet.
 
+#### Reasoning stops at the same line
+
+On Responses, reasoning is an **opaque output item inside that chain**. It is not a string an assistant message happens to carry, and there is no field an adapter could fill with the text we kept: re-sending it would be inventing a wire shape the protocol does not have, and passing a reasoning summary off as the reasoning itself would be lying to the next request about what the model still has.
+
+So reasoning travels with the handle and stops where the handle stops: replayed inside one user turn's tool loop, absent from the first request of the next one. A new turn inherits the visible transcript and starts without the reasoning that produced it. That is a real loss and it is a deliberate one — the alternative is replaying the endpoint's own opaque items across turns, which needs the items stored verbatim, a lifecycle for them, and an expiry story for the chain holding them. The same problem `previous_response_id` has, and the same reason it is scoped to a turn.
+
+The sidecar is still stored on the step, so the reasoning is not thrown away: it is in the transcript for diagnostics and for any future feature that can carry it honestly. What does not happen is a summary of it being passed off as the reasoning itself.
+
 #### What a handle records, and when it is believed
 
 A handle replaces a prefix, so it has to say which prefix. `ContinuationCoverage { sent, digest, assistant_messages, wire_items }` is that answer, and the interesting part is which unit it counts in.
@@ -851,7 +859,7 @@ It counts **provider-neutral messages**, not wire items. One message becomes sev
 
 Believing the handle is a separate question from recording it. `proven_covers()` re-digests the covered prefix of the messages actually being sent and only shortens the request when the digest matches and the count still fits. `message_prefix_digest` is a non-cryptographic FNV-1a over the serialized messages, chosen because this needs a change detector and not a security primitive.
 
-That proof is also what makes cross-turn reuse safe without a second lineage mechanism. A world-book entry matching for the first time, a changed persona, a changed PromptProfile, a different near-history window — each of those changes the prefix, the digest stops matching, and the whole transcript goes out again with no handle named. The rule is not "reuse across turns" or "never reuse across turns": it is **name the handle only when the endpoint's copy is still a prefix of what we are sending**, which is the same condition that authorizes skipping.
+That proof is what keeps a turn's own rounds honest. A world-book entry matching for the first time, a changed persona, a changed PromptProfile, a different near-history window — each of those changes the prefix, the digest stops matching, and the whole conversation goes out again with no handle named, even inside one user turn. The rule is not "there is a handle, so chain": it is **name the handle only when the endpoint's copy is still a prefix of what we are sending**, which is the same condition that authorizes skipping.
 
 `previous_response_id` is therefore set exactly when `covered > 0`, not whenever a handle exists. Splicing an endpoint's older, differently-shaped prompt onto a request that already re-sent everything would produce a conversation the user never had, and bill for it.
 
