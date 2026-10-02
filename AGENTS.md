@@ -613,6 +613,62 @@ devecocli device list
 
 Do not hard-code a user's device address into scripts or source.
 
+#### The wireless device on this machine
+
+`devecocli device list` returning nothing does not mean there is no device. It
+means nothing has connected yet, and the fix is to connect rather than to fall
+back to an emulator — treating "no device" as "no device exists" sends you
+down a two-hour emulator path when the real phone is on the same wifi.
+
+The phone enables **wireless debugging** and the debug port is **46857**. That
+port does not change; the address does, because the phone takes its address from
+the hotspot's DHCP. So the port is the thing worth remembering and the address is
+the thing worth looking up.
+
+`hdc list targets` shows nothing until `hdc tconn`, and after that it shows the
+`ip:port` pair. On this machine the phone lands on the same /24 as the laptop, so
+scanning the subnet for that one port finds it:
+
+```bash
+seq 1 254 | xargs -P 64 -I{} bash -c \
+  'timeout 1 bash -c "exec 3<>/dev/tcp/192.168.43.{}/46857" 2>/dev/null \
+   && echo "192.168.43.{}:46857"'
+hdc tconn 192.168.43.19:46857
+devecocli device list
+```
+
+`devecocli device list` then names the model and gives the serial to pass to
+`--device`. A working target ends a real-device run with hvigor reporting
+`BUILD SUCCESSFUL`, `App installed successfully`, the ability launch succeeding,
+and `Smoke: PASS`.
+
+#### The emulator binary needs a compat symlink on this machine
+
+`devecocli emulator` exits 127 on this host:
+
+```text
+~/.harmony-cli/emulator/Emulator: error while loading shared libraries:
+libbz2.so.1.0: cannot open shared object file
+```
+
+The system libraries are all SONAME `libbz2.so.1`; Huawei's emulator wants
+`libbz2.so.1.0`, and no distribution copy with that SONAME exists here. A
+symlink outside the repository fixes it:
+
+```bash
+mkdir -p "$HOME/.harmony-cli/compat-libs"
+ln -sf /usr/local/lib/libbz2.so.1 "$HOME/.harmony-cli/compat-libs/libbz2.so.1.0"
+export LD_LIBRARY_PATH="$HOME/.harmony-cli/compat-libs"
+```
+
+This is a local toolchain repair, not a project change, so it belongs in the
+shell environment and not in a commit. With it, `devecocli emulator list` works.
+
+Prefer the real device anyway. An emulator accepts an unsigned package while a
+real device does not, so a device run exercises the signing step that a real
+release goes through, and it is the only target that proves the package
+installs at all.
+
 ### 15.6 Logs and crash diagnosis
 
 After running the app, inspect runtime logs instead of treating a successful install as sufficient verification.
