@@ -1,5 +1,7 @@
 # Architecture
 
+> **路线说明：** 本文继续记录当前实现细节与已经验证的约束。酒馆/AI 对话的目标上位架构见 [TAVERN_ARCHITECTURE.md](TAVERN_ARCHITECTURE.md)。当当前实现与目标路线冲突时，应把冲突作为迁移任务处理，不要继续扩大旧抽象。
+
 Sujiu follows two hard rules:
 
 1. **Rust owns conversation semantics, model I/O, tool execution and deterministic data transforms.**
