@@ -78,6 +78,7 @@
 
         handleResponseEvent(event) {
             if (!state.compressionInProgress || !state.compressionResponsePending) {
+                if (!state.compressionInProgress) AutoPrune.onCompletedResponse(event?.detail);
                 log.net("GenerateContent response event ignored", {
                     compressionInProgress: state.compressionInProgress,
                     compressionResponsePending: state.compressionResponsePending
