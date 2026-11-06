@@ -1641,13 +1641,25 @@ const RoundSplitter = Object.freeze({
             const pinnedOlderRounds = [];
             const pinnedMemoryTexts = [];
             let roundIndex = -1;
+            let currentUser = "";
+            let currentHasModel = false;
             for (const turn of split.older || []) {
-                if (turn.role === "user") roundIndex++;
-                if (turn.role === "model" && CompactionTask.isPinnedSummary(turn.text || "")) {
-                    pinnedMemoryTexts.push(String(turn.text).trim());
-                    if (roundIndex >= 0 && !pinnedOlderRounds.includes(roundIndex)) {
-                        pinnedOlderRounds.push(roundIndex);
+                if (turn.role === "user") {
+                    roundIndex++;
+                    currentUser = String(turn.text || "");
+                    currentHasModel = false;
+                } else if (turn.role === "model") {
+                    const isPinned = CompactionTask.isPinnedSummary(turn.text || "");
+                    if (isPinned) {
+                        pinnedMemoryTexts.push(String(turn.text).trim());
+                        const isStandalone = currentHasModel &&
+                            !currentUser.includes("[[SUJIU_SCOPE_V2:");
+                        if (!isStandalone && roundIndex >= 0 &&
+                            !pinnedOlderRounds.includes(roundIndex)) {
+                            pinnedOlderRounds.push(roundIndex);
+                        }
                     }
+                    currentHasModel = true;
                 }
             }
             pending = {
