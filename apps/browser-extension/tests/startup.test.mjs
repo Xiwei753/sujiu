@@ -15,6 +15,7 @@ function start({ inAppContext = false, networkFails = false } = {}) {
     Config: { TAGS: { UI: "test" } },
     env: { isAppContext: inAppContext },
     PromptPanel: { mount() { calls.push("panel"); } },
+    PerformanceTuning: { init() { calls.push("performance"); } },
     NetworkMonitor: { init() { calls.push("network"); if (networkFails) throw new Error("network failure"); } },
     installTopLevelHandlers() { calls.push("events"); },
     UI: { init() { calls.push("toolbar"); } },
@@ -31,6 +32,7 @@ test("UI mounts before network interceptors and survives an interceptor failure"
   assert.equal(result.info.networkInitialized, false);
   assert.equal(result.info.errors[0].stage, "network");
   assert.ok(result.calls.includes("toolbar"));
+  assert.ok(result.calls.includes("performance"));
 });
 
 test("panel also mounts in legacy /app routes where native toolbar is skipped", () => {
