@@ -126,3 +126,52 @@ test("cloud verification runs after the batch loop, not after every deleted mess
   assert.doesNotMatch(loop, /fetchResolvedPromptThread|awaitCloudPersistence/);
   assert.match(source, /await awaitCloudPersistence\(plan, expectedUsers, expectedProtected, preview, saveBaseline\)/);
 });
+
+test("temporary tool prompt is selected but its marked model summary is protected", () => {
+  const turn = (id, type, content) => {
+    const t = mockTurn(id, type);
+    t.textContent = content;
+    return t;
+  };
+  const marker = "[[SUJIU_SCOPE_V2:12345678-1234]]";
+  const pinned = "[[SUJIU_MEMORY_V1:12345678-1234]]";
+  const turns = [
+    turn("u1", "user", "old"), turn("m1", "model", "old model"),
+    turn("u2", "user", "recent"), turn("m2", "model", "recent model"),
+    turn("tool", "user", "Summarize " + marker),
+    turn("thought", "thought", "hidden"),
+    turn("memory", "model", pinned + " persistent summary")
+  ];
+  const x = context(turns);
+  const plan = x.compactor.stage(pinned + " persistent summary", {
+    older: [{role:"user",text:"old"}, {role:"model",text:"old model"}],
+    totalRounds: 2, olderRounds: 1, recentRounds: 1
+  }, { marker });
+  assert.equal(plan.memoryMarker, pinned);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1", "u1", "thought", "tool"]);
+  assert.ok(preview.protectedIds.includes("memory"));
+  assert.ok(preview.protectedIds.includes("u2"));
+  assert.equal(preview.deletedUserCount, 2);
+});
+
+test("an embedded thought without an independent menu stays protected", () => {
+  const marker = "[[SUJIU_SCOPE_V2:12345678-1234]]";
+  const pinned = "[[SUJIU_MEMORY_V1:12345678-1234]]";
+  const turns = [
+    mockTurn("u1", "user"), mockTurn("m1", "model"),
+    mockTurn("u2", "user"), mockTurn("m2", "model"),
+    mockTurn("tool", "user"), mockTurn("thought", "thought"), mockTurn("memory", "model")
+  ];
+  turns[4].textContent = marker;
+  turns[6].textContent = pinned;
+  turns[5].querySelector = () => null;
+  const x = context(turns);
+  const plan = x.compactor.stage(pinned, {
+    older: [], totalRounds: 2, olderRounds: 1, recentRounds: 1
+  }, { marker });
+  const preview = x.compactor.preflightDom(plan);
+  assert.equal(preview.skippedThoughts, 1);
+  assert.ok(!preview.targetIds.includes("thought"));
+  assert.ok(preview.protectedIds.includes("memory"));
+});
