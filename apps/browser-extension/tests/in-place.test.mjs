@@ -120,11 +120,14 @@ test("previously compressed summary rounds are pinned and never enter the deleti
   assert.equal(selection.deletedUserCount, 2);
 });
 
-test("cloud verification runs after the batch loop, not after every deleted message", () => {
-  const loop = source.slice(source.indexOf("for (const id of preview.targetIds)"),
-    source.indexOf("PromptPanel.status(\"本批次已在页面处理"));
-  assert.doesNotMatch(loop, /fetchResolvedPromptThread|awaitCloudPersistence/);
-  assert.match(source, /await awaitCloudPersistence\(plan, expectedUsers, expectedProtected, preview, saveBaseline\)/);
+test("one native Save action follows the whole batch with no post-delete cloud polling", () => {
+  const loopStart = source.indexOf("for (const id of preview.targetIds)");
+  const save = source.indexOf("NativeSave.triggerOnce()", loopStart);
+  assert.ok(save > loopStart);
+  const loop = source.slice(loopStart, save);
+  assert.doesNotMatch(loop, /fetchResolvedPromptThread|awaitCloudPersistence|NativeSave\.triggerOnce/);
+  assert.equal((source.match(/NativeSave\.triggerOnce\(\)/g) || []).length, 1);
+  assert.doesNotMatch(source, /async function awaitCloudPersistence/);
 });
 
 test("temporary tool prompt is selected but its marked model summary is protected", () => {
