@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.1.3
+// @version      0.2.0
 // @description  AI Studio prompt presets and manual context compaction
 // @match        https://aistudio.google.com/*
 // @noframes
@@ -11,7 +11,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.1.3", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.2.0", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -24,8 +24,7 @@ const unsafeWindow = window;
         },
         TARGETS: {
             GENERATE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
-            RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource",
-            CREATE_PROMPT: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/CreatePrompt"
+            RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource"
         },
         NETWORK: {
             RPC_ORIGIN: "https://alkalimakersuite-pa.clients6.google.com"
@@ -69,7 +68,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.1.3";
+    const SCRIPT_VERSION = "0.2.0";
 
     const state = {
         compressionInProgress: false,
@@ -84,7 +83,6 @@ const unsafeWindow = window;
         googleApiKey: "",
         googleAuthUser: "0",
         googleApiKeyUpdatedAt: 0,
-        pendingBranchTurns: null,
         historyCapturePending: false,
         branchInProgress: false,
         activeCompressionPrompt: "",
@@ -472,8 +470,12 @@ const unsafeWindow = window;
 
     const Compression = {
         run() {
-            if (state.compressionInProgress) {
-                log.ui("Compression already running");
+            if (state.compressionInProgress || state.branchInProgress) {
+                log.ui("Compression or deletion already running");
+                return;
+            }
+            if (InPlaceCompaction.pending) {
+                PromptPanel.status("请先确认或取消已经生成的摘要");
                 return;
             }
             const textarea = UI.findInput();
@@ -507,7 +509,6 @@ const unsafeWindow = window;
         prepareRunContext() {
             state.lastPromptHistory = null;
             state.lastPromptHistoryUpdatedAt = 0;
-            state.pendingBranchTurns = null;
             state.historyCapturePending = true;
             state.compressionRequestPending = false;
             state.compressionResponsePending = false;
@@ -574,9 +575,9 @@ const unsafeWindow = window;
                 Compression.finalizeRun();
                 return;
             }
-            log.net("Compression snapshot extracted, rebuilding conversation");
-            rebuildConversation(snapshot).catch(err => {
-                log.net("Failed to rebuild conversation", err.message);
+            log.net("Compression snapshot extracted; preparing in-place deletion preview");
+            prepareInPlaceCompaction(snapshot).catch(err => {
+                log.net("Failed to prepare in-place deletion", err.message);
                 alert("素酒压缩失败： " + err.message);
             });
             Compression.finalizeRun();
@@ -783,7 +784,7 @@ const unsafeWindow = window;
     }
 
     // ---------------------------
-    // Conversation rebuild & branch creation
+    // History processing
     // ---------------------------
 
 const RoundSplitter = Object.freeze({
@@ -823,39 +824,16 @@ const RoundSplitter = Object.freeze({
     }
   });
 
-    async function rebuildConversation(snapshotText) {
-        log.net("rebuildConversation invoked", {
-            hasHistory: Boolean(state.lastPromptHistory),
-            hasResolvedThread: Boolean(state.lastResolvedPromptThread),
-            snapshotLength: snapshotText?.length || 0
-        });
-
+    async function prepareInPlaceCompaction(snapshotText) {
         const turns = await getRebuildSourceTurns();
-        if (!turns.length) {
-            log.net("No prompt history available to rebuild conversation");
-            return;
-        }
-        const sanitizedTurns = stripCompressionArtifacts(turns);
-        if (!sanitizedTurns.length) {
-            log.net("History only contained compression prompt turn, abort rebuild");
-            return;
-        }
-        // Partition at user/model exchange boundaries. Tool events remain in their parent exchange.
-        const split = RoundSplitter.partition(sanitizedTurns, Number(userSettings.keepRounds) || 8);
-        const newTurns = [
-            createTurn("user", snapshotText),
-            createTurn("model", "已记录先前剧情摘要。"),
-            ...split.recent
-        ];
-        log.net("Compaction rounds", {
-            total: split.totalRounds,
-            compressed: split.olderRounds,
-            kept: split.recentRounds
-        });
-        state.pendingBranchTurns = newTurns;
-        log.net("Prepared compressed branch turns", newTurns.length, "turns");
-        Branching.branchFromHere().catch(err => {
-            log.net("Compressed branch creation failed", err);
+        if (!turns.length) throw new Error("无法读取当前会话历史");
+        const cleanTurns = stripCompressionArtifacts(turns);
+        if (!cleanTurns.length) throw new Error("压缩范围为空");
+        const split = RoundSplitter.partition(cleanTurns, Number(userSettings.keepRounds) || 8);
+        InPlaceCompaction.stage(snapshotText, split);
+        log.ui("In-place summary ready", {
+            compressedRounds: split.olderRounds,
+            preservedRounds: split.recentRounds
         });
     }
 
@@ -1268,34 +1246,6 @@ const RoundSplitter = Object.freeze({
         return heading.trim();
     }
 
-    function buildDirectBranchCreateBody(capture, turnRecords = null) {
-        const sourceRoot = Array.isArray(capture?.root) ? capture.root : state.lastResolvedPromptRoot;
-        if (!Array.isArray(sourceRoot) || sourceRoot.length < 14) {
-            return null;
-        }
-        const modelConfig = Array.isArray(sourceRoot[3]) ? deepClone(sourceRoot[3]) : null;
-        if (!modelConfig) {
-            return null;
-        }
-        const threads = Array.isArray(sourceRoot[13]) ? sourceRoot[13] : [];
-        const secondaryThread = Array.isArray(threads[1]) ? deepClone(threads[1]) : [];
-        const primaryThread = Array.isArray(turnRecords) && turnRecords.length
-            ? turnRecords.map((turn, index) => buildMutationThreadEntry(turn, index))
-            : (Array.isArray(threads[0]) ? deepClone(threads[0]) : []);
-        if (!primaryThread.length) {
-            return null;
-        }
-        const baseTitle = getResolvedPromptTitle(sourceRoot) || "Compressed Chat";
-        const normalizedTitle = baseTitle.replace(/^branch of\s+/i, "").trim() || baseTitle;
-        const branchTitle = `Compression of ${normalizedTitle}`;
-        const createRoot = new Array(Math.max(14, sourceRoot.length)).fill(null);
-        createRoot[3] = modelConfig;
-        createRoot[4] = [branchTitle];
-        createRoot[12] = Array.isArray(sourceRoot[12]) ? deepClone(sourceRoot[12]) : [];
-        createRoot[13] = [primaryThread, secondaryThread];
-        return JSON.stringify([createRoot]);
-    }
-
     function describePromptHistory(payload) {
         if (!Array.isArray(payload)) {
             return { valid: false, type: typeof payload };
@@ -1420,116 +1370,193 @@ const RoundSplitter = Object.freeze({
     // Branching controls
     // ---------------------------
 
-    const Branching = {
-        async branchFromHere() {
-            if (state.branchInProgress) {
-                log.ui("Compression branch already running");
-                return;
-            }
-            log.net("Attempting to create compressed prompt");
-            state.branchInProgress = true;
-            try {
-                const expected = state.pendingBranchTurns?.map(turn => ({ role: turn.role, text: turn.text })) || [];
-                const promptChange = await Branching.branchFromHereViaCreatePrompt();
-                let valid = false;
-                for (let attempt = 0; attempt < 4; attempt += 1) {
-                    if (attempt) await delay(450);
-                    const capture = await fetchResolvedPromptThread(promptChange.promptId);
-                    const actual = capture?.entries ? extractResolvedTurns(capture.entries) : [];
-                    if (actual.length === expected.length && actual.every((turn, index) =>
-                        turn.role === expected[index].role && turn.text === expected[index].text)) {
-                        valid = true;
-                        break;
-                    }
-                }
-                if (!valid) {
-                    throw new Error("Created branch " + promptChange.promptId +
-                        " but could not verify its saved history. Check /prompts/" + promptChange.promptId);
-                }
-                log.ui("Compressed branch verified; navigating");
-                location.assign(`${location.origin}/prompts/${promptChange.promptId}`);
-            } catch (err) {
-                log.net("Compressed branch creation failed", err);
-                alert("素酒压缩分支未完成验证： " + err.message);
-                state.pendingBranchTurns = null;
-                throw err;
-            } finally {
-                state.branchInProgress = false;
-            }
-        },
-
-        async branchFromHereViaCreatePrompt() {
-            const previousPromptId = Branching.getCurrentPromptId();
-            if (!previousPromptId) {
-                throw new Error("current prompt id not found");
-            }
-            if (!state.pendingBranchTurns?.length) {
-                throw new Error("no pending turns available for branch creation");
-            }
-            const capture = await ensureResolvedPromptThread(previousPromptId);
-            const body = buildDirectBranchCreateBody(capture, state.pendingBranchTurns);
-            if (!body) {
-                throw new Error("unable to build CreatePrompt branch payload");
-            }
-            const authHeader = await buildSapisidAuthHeader();
-            if (!authHeader) {
-                throw new Error("unable to build SAPISIDHASH auth header");
-            }
-
-            const pendingBranchTurns = state.pendingBranchTurns;
-            const apiKey = getGoogleApiKey();
-            state.pendingBranchTurns = null;
-            try {
-                const response = await fetch(`${Config.NETWORK.RPC_ORIGIN}${Config.TARGETS.CREATE_PROMPT}`, {
-                    method: "POST",
-                    credentials: "include",
-                    headers: {
-                        "content-type": "application/json+protobuf",
-                        "x-goog-api-key": apiKey,
-                        "x-goog-authuser": state.googleAuthUser || "0",
-                        authorization: authHeader
-                    },
-                    body
-                });
-                const bodyText = await response.text();
-                if (!response.ok) {
-                    throw new Error(`CreatePrompt failed: HTTP ${response.status}`);
-                }
-                const parsed = safeParseJSON(bodyText);
-                const promptId = Branching.pickCreatedPromptId(parsed, previousPromptId);
-                if (!promptId) {
-                    throw new Error("CreatePrompt succeeded but no prompt id was returned");
-                }
-                return {
-                    promptId,
-                    via: "direct-create-prompt"
-                };
-            } catch (err) {
-                state.pendingBranchTurns = pendingBranchTurns;
-                throw err;
-            }
-        },
-
-        pickCreatedPromptId(payload, previousPromptId = null) {
-            const topLevelPrompt = typeof payload?.[0] === "string" ? payload[0] : "";
-            const topLevelMatch = topLevelPrompt.match(/^prompts\/([^/?#]+)/);
-            if (topLevelMatch && (!previousPromptId || topLevelMatch[1] !== previousPromptId)) {
-                return topLevelMatch[1];
-            }
-            const promptIds = collectPromptIds(payload);
-            return promptIds.find(id => id && id !== previousPromptId) || null;
-        },
-
+    // Kept as a stable prompt locator. Compaction never creates a new prompt.
+    const Branching = Object.freeze({
         getCurrentPromptId() {
-            const path = location.pathname || "";
-            const match = path.match(/\/prompts\/([^/?#]+)/);
+            const match = (location.pathname || "").match(/\/prompts\/([^/?#]+)/);
             return match ? match[1] : null;
         }
-    };
+    });
 
-    // ---------------------------
-    // UI module (toolbar button)
-    // ---------------------------
+
+    const InPlaceCompaction = (() => {
+        let pending = null;
+        let deleting = false;
+        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+        function normalizeType(turn) {
+            const raw = (turn.getAttribute("data-turn-type") ||
+                turn.getAttribute("data-turn-role") ||
+                turn.dataset?.turnType || turn.dataset?.turnRole || "").toLowerCase();
+            if (raw === "user" || raw === "prompt") return "user";
+            if (raw === "thought") return "thought";
+            if (raw === "model" || raw === "text" || raw === "response") return "model";
+            return "unknown";
+        }
+
+        // Use every rendered native turn, including thought blocks. An
+        // incomplete / virtualized DOM is never safe for destructive changes.
+        function collectGroups(turns) {
+            const groups = [];
+            for (const turn of turns) {
+                const type = normalizeType(turn);
+                if (type === "unknown") throw new Error("发现未识别的消息类型，已停止删除");
+                if (type === "user") groups.push({ turns: [turn], hasModel: false });
+                else {
+                    const group = groups[groups.length - 1];
+                    if (!group) throw new Error("历史消息的顺序异常");
+                    group.turns.push(turn);
+                    if (type === "model") group.hasModel = true;
+                }
+            }
+            if (groups.some(group => !group.hasModel)) throw new Error("发现未完成的轮次，已停止删除");
+            return groups;
+        }
+
+        function stage(snapshot, split) {
+            const id = Branching.getCurrentPromptId();
+            if (!id || id === "new_chat") throw new Error("保存会话后才能原地压缩");
+            if (!snapshot?.trim()) throw new Error("摘要为空，无法压缩");
+            pending = {
+                promptId: id,
+                snapshot: snapshot.trim(),
+                olderRounds: split.olderRounds,
+                recentRounds: split.recentRounds,
+                totalRounds: split.totalRounds,
+                createdAt: Date.now()
+            };
+            PromptPanel.showCompactionReview(pending);
+            return pending;
+        }
+
+        async function verifyPersistedSummary(plan) {
+            const capture = await fetchResolvedPromptThread(plan.promptId);
+            if (!capture?.entries?.length) throw new Error("未能读取最新会话，停止删除");
+            assertSupportedEntries(capture.entries, extractResolvedTurns(capture.entries));
+            const turns = extractResolvedTurns(capture.entries);
+            const users = turns.filter(turn => turn.role === "user");
+            if (users.length !== plan.totalRounds + 1) {
+                throw new Error("会话轮数与生成摘要前不一致，请刷新后重新生成摘要");
+            }
+            const last = turns[turns.length - 1];
+            if (last?.role !== "model" || !last.text.includes(plan.snapshot.slice(0, 70))) {
+                throw new Error("摘要尚未保存在 Google 会话中，拒绝删除旧消息");
+            }
+            return { capture, turns };
+        }
+
+        function preflightDom(plan) {
+            const turns = [...document.querySelectorAll("ms-chat-turn")];
+            const groups = collectGroups(turns);
+            if (groups.length !== plan.totalRounds + 1) {
+                throw new Error("网页未完整加载所有历史轮次（检测到 " +
+                    groups.length + "，预期 " + (plan.totalRounds + 1) + "），拒绝删除");
+            }
+            const selected = groups.slice(0, plan.olderRounds).flatMap(group => group.turns);
+            const protectedTurns = groups.slice(plan.olderRounds).flatMap(group => group.turns);
+            const ids = selected.map(turn => turn.id);
+            if (ids.some(id => !id) || new Set(ids).size !== ids.length) {
+                throw new Error("部分旧消息没有稳定 ID，无法安全删除");
+            }
+            if (protectedTurns.some(turn => ids.includes(turn.id))) {
+                throw new Error("删除范围与保留范围重叠");
+            }
+            if (selected.some(turn => !turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"))) {
+                throw new Error("部分消息不支持原生删除菜单");
+            }
+            return { targetIds: ids, groups: groups.length, items: selected.length };
+        }
+
+        async function findNativeDeleteItem() {
+            for (let attempt = 0; attempt < 12; attempt++) {
+                const items = [...document.querySelectorAll(
+                    ".cdk-overlay-container .mat-mdc-menu-content button, .cdk-overlay-container [role=menuitem]"
+                )];
+                const target = items.find(item => {
+                    const icon = item.querySelector("mat-icon, .material-symbols-outlined");
+                    const label = (item.getAttribute("aria-label") || "") + " " +
+                        (icon?.textContent || "") + " " + (item.textContent || "");
+                    return /(?:^|\s)(delete|删除)(?:\s|$)/i.test(label.trim());
+                });
+                if (target) return target;
+                await sleep(80);
+            }
+            return null;
+        }
+
+        async function deleteOne(id) {
+            const turn = document.getElementById(id);
+            if (!turn || !turn.isConnected) return;
+            const button = turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
+                turn.querySelector("ms-chat-turn-options button") ||
+                turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol");
+            if (!button) throw new Error("消息 " + id + " 缺少原生操作菜单");
+            button.click();
+            const item = await findNativeDeleteItem();
+            if (!item) throw new Error("找不到 Google 原生删除选项，已停止");
+            item.click();
+            // A further confirmation dialog is deliberately not bypassed.
+            for (let i = 0; i < 30; i++) {
+                if (!document.getElementById(id)) return;
+                await sleep(100);
+            }
+            throw new Error("消息 " + id + " 删除后未从页面消失，已停止");
+        }
+
+        async function commit() {
+            if (deleting) return;
+            const plan = pending;
+            if (!plan) throw new Error("没有可应用的摘要");
+            if (Branching.getCurrentPromptId() !== plan.promptId) {
+                throw new Error("会话已切换，需重新压缩");
+            }
+            await verifyPersistedSummary(plan);
+            const preview = preflightDom(plan);
+            if (!confirm("即将在当前聊天中删除最旧的 " + plan.olderRounds +
+                    " 轮（包括关联思考内容），保留最近 " + plan.recentRounds +
+                    " 轮和刚生成的摘要。此操作无法撤销，确认继续？")) return;
+            deleting = true;
+            state.branchInProgress = true;
+            let processed = 0;
+            try {
+                for (const id of preview.targetIds) {
+                    if (Branching.getCurrentPromptId() !== plan.promptId) {
+                        throw new Error("删除过程中会话发生切换");
+                    }
+                    await deleteOne(id);
+                    processed++;
+                    PromptPanel.status("正在原地清理：" + processed + "/" + preview.items);
+                }
+                const after = await fetchResolvedPromptThread(plan.promptId);
+                if (!after?.entries?.length) throw new Error("无法验证 Google 端保存结果");
+                const remaining = extractResolvedTurns(after.entries);
+                const remainingUsers = remaining.filter(t => t.role === "user").length;
+                if (remainingUsers !== plan.recentRounds + 1) {
+                    throw new Error("已执行删除，但云端仍有 " + remainingUsers +
+                        " 条用户消息；请刷新确认，避免重复操作");
+                }
+                pending = null;
+                PromptPanel.showCompactionReview(null);
+                PromptPanel.status("原地压缩完成，聊天地址保持不变。建议刷新后核对历史。");
+            } catch (error) {
+                PromptPanel.status("已处理 " + processed + "/" + preview.items + " 条后停止：" +
+                    String(error?.message || error) + "。请刷新检查现有历史。");
+                throw error;
+            } finally {
+                deleting = false;
+                state.branchInProgress = false;
+            }
+        }
+
+        function cancel() {
+            if (deleting) return;
+            pending = null;
+            PromptPanel.showCompactionReview(null);
+            PromptPanel.status("已取消清理。摘要已生成在当前聊天中，原始历史仍在。");
+        }
+
+        return Object.freeze({ stage, commit, cancel, collectGroups, preflightDom, get pending() { return pending; } });
+    })();
 
     const UI = {
         init() {
@@ -1777,53 +1804,6 @@ const RoundSplitter = Object.freeze({
         return match ? match[1] : null;
     }
 
-    function buildMutationThreadEntry(turn, sequence = 0) {
-        if (turn?.role !== "user" && turn?.role !== "model") {
-            throw new Error("Unsupported history role: " + turn?.role);
-        }
-        if (isReusablePromptThreadEntry(turn?.entry)) {
-            const entry = deepClone(turn.entry);
-            entry[0] = turn?.text || "";
-            entry[8] = turn?.role === "model" ? "model" : "user";
-            if (Array.isArray(entry[21]) && typeof entry[21][0] === "string" && /^prompts\//.test(entry[21][0])) {
-                entry[21] = null;
-            }
-            entry[32] = buildEntryTimestamp(sequence);
-            return entry;
-        }
-        return buildCreatePromptEntry(turn, sequence);
-    }
-
-    function isReusablePromptThreadEntry(entry) {
-        return Array.isArray(entry) && entry.length >= 33 && typeof entry[8] === "string";
-    }
-
-    function buildCreatePromptEntry(turn, sequence = 0) {
-        const text = turn?.text || "";
-        const role = turn?.role === "model" ? "model" : "user";
-        const entry = new Array(33).fill(null);
-        entry[0] = text;
-        entry[8] = role;
-        const tokenEstimate = estimateTokenCount(text);
-        if (tokenEstimate > 0) {
-            entry[18] = tokenEstimate;
-        }
-        entry[32] = buildEntryTimestamp(sequence);
-        return entry;
-    }
-
-    function buildEntryTimestamp(sequence = 0) {
-        const timestampMs = Date.now() + Math.max(0, Number(sequence) || 0);
-        const seconds = Math.floor(timestampMs / 1000);
-        const nanos = (timestampMs % 1000) * 1_000_000;
-        return [seconds, nanos];
-    }
-
-    function estimateTokenCount(text) {
-        if (!text) return 0;
-        return Math.max(1, Math.round(text.length / 4));
-    }
-
     function deepClone(value) {
         return value == null ? value : JSON.parse(JSON.stringify(value));
     }
@@ -1966,6 +1946,16 @@ const PromptPanel = (() => {
       return data.presets[data.active];
     }
     const combined = () => PromptProfiles.compile(current());
+    function showCompactionReview(plan) {
+      const container = root?.getElementById("inplace-review");
+      if (!container) return;
+      container.hidden = !plan;
+      if (plan) {
+        root.querySelector('[data-role="snapshot-preview"]').value = plan.snapshot;
+        status("摘要已生成：" + plan.totalRounds + " 轮中，将删除旧 " +
+          plan.olderRounds + " 轮、保留最近 " + plan.recentRounds + " 轮。请先检查摘要。");
+      }
+    }
     function status(message) {
       const el = root?.querySelector('[data-role="status"]');
       if (el) el.textContent = String(message);
@@ -2119,7 +2109,7 @@ const PromptPanel = (() => {
         element.append(...children);
         return element;
       };
-      const style = make("style", { text: "\n          *{box-sizing:border-box} button,input,select,textarea{font:inherit}\n          button{cursor:pointer;border:1px solid #64748b66;border-radius:8px;padding:6px 8px;background:#ffffff12;color:inherit}\n          button:hover{background:#94a3b833}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0d9488}\n          #toggle{background:#156f67;color:white;border:0;box-shadow:0 3px 16px #0005}\n          #pane{width:min(405px,calc(100vw - 24px));max-height:min(82vh,850px);margin-bottom:9px;overflow:auto;color:#f1f5f9;background:#1b2029;border:1px solid #64748b55;border-radius:14px;padding:15px;box-shadow:0 6px 40px #0008;font:13px/1.5 system-ui,sans-serif}\n          #pane[hidden]{display:none}h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;margin:16px 0 7px}.line{display:flex;align-items:center;gap:6px;margin:6px 0}.line>*{min-width:0}\n          select,input[type=number],textarea{width:100%;background:#0f172a;color:#f8fafc;border:1px solid #64748b99;border-radius:8px;padding:7px}\n          textarea{display:block;resize:vertical;min-height:62px;margin:5px 0 10px}\n          label{font-size:12px;color:#cbd5e1}.section-header{display:flex;align-items:center;gap:7px;justify-content:space-between}\n          .section-header label{flex:1}.small{padding:3px 7px;font-size:12px}\n          #status{color:#99f6e4;min-height:1.5em;font-size:12px;margin-top:10px}\n          .hint{color:#94a3b8;font-size:11px;margin:7px 0}\n          .check-line{display:flex;gap:8px;align-items:center}.check-line input{width:auto}\n          hr{border:0;border-top:1px solid #64748b55;margin:14px 0}\n        " });
+      const style = make("style", { text: "\n          *{box-sizing:border-box} button,input,select,textarea{font:inherit}\n          button{cursor:pointer;border:1px solid #64748b66;border-radius:8px;padding:6px 8px;background:#ffffff12;color:inherit}\n          button:hover{background:#94a3b833}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0d9488}\n          #toggle{background:#156f67;color:white;border:0;box-shadow:0 3px 16px #0005}\n          #pane{width:min(405px,calc(100vw - 24px));max-height:min(82vh,850px);margin-bottom:9px;overflow:auto;color:#f1f5f9;background:#1b2029;border:1px solid #64748b55;border-radius:14px;padding:15px;box-shadow:0 6px 40px #0008;font:13px/1.5 system-ui,sans-serif}\n          #pane[hidden]{display:none}h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;margin:16px 0 7px}.line{display:flex;align-items:center;gap:6px;margin:6px 0}.line>*{min-width:0}\n          select,input[type=number],textarea{width:100%;background:#0f172a;color:#f8fafc;border:1px solid #64748b99;border-radius:8px;padding:7px}\n          textarea{display:block;resize:vertical;min-height:62px;margin:5px 0 10px}\n          label{font-size:12px;color:#cbd5e1}.section-header{display:flex;align-items:center;gap:7px;justify-content:space-between}\n          .section-header label{flex:1}.small{padding:3px 7px;font-size:12px}\n          #status{color:#99f6e4;min-height:1.5em;font-size:12px;margin-top:10px}\n          .hint{color:#94a3b8;font-size:11px;margin:7px 0}\n          .check-line{display:flex;gap:8px;align-items:center}.check-line input{width:auto}\n          hr{border:0;border-top:1px solid #64748b55;margin:14px 0}\n          #inplace-review[hidden]{display:none}\n        " });
       const line = (...children) => make("div", { className: "line" }, children);
       const action = (label, name) => make("button", { type: "button", "data-action": name, text: label });
       const role = (name, tag = "input", attributes = {}) =>
@@ -2144,8 +2134,14 @@ const PromptPanel = (() => {
         role("keep", "input", { type: "number", min: "1", max: "100", step: "1" }),
         make("label", { text: "压缩摘要提示词" }),
         role("summary-prompt", "textarea", { rows: "5" }),
-        line(action("立即压缩并创建分支", "compress")),
-        make("p", { className: "hint", text: "建议上下文接近 20 万 tokens 时手动压缩，并为下一次回复预留空间（实际以当前模型上限为准）。压缩只创建新的摘要分支，原始会话保留。" }),
+        line(action("生成摘要（当前聊天）", "compress")),
+        make("div", { id: "inplace-review", hidden: true }, [
+          make("label", { text: "摘要预览（已写入原聊天）" }),
+          role("snapshot-preview", "textarea", { rows: "8", readonly: "readonly" }),
+          line(action("确认删除较早的聊天和思考", "commit-delete"),
+               action("保留原历史", "cancel-delete"))
+        ]),
+        make("p", { className: "hint", text: "摘要生成后需再次确认才会删除早期轮次和关联思考。直接修改当前聊天，无新分支，也无法撤销。请先在测试会话使用。" }),
         make("div", { id: "status", "data-role": "status", role: "status", "aria-live": "polite" })
       ]);
       const toggle = make("button", { id: "toggle", type: "button",
@@ -2293,9 +2289,14 @@ const PromptPanel = (() => {
           status(ok ? "已复制提示词，可粘贴至系统指令框" : "复制失败：请检查剪贴板权限");
         }
         if (action === "compress") {
-          status("准备生成摘要并创建新分支，原会话仍会保留");
+          status("正在当前会话生成摘要；生成后需再次确认删除旧消息");
           Compression.run();
         }
+        if (action === "commit-delete") {
+          try { await InPlaceCompaction.commit(); }
+          catch (error) { console.warn("[Sujiu AI Studio] in-place deletion halted", String(error?.message || error)); }
+        }
+        if (action === "cancel-delete") InPlaceCompaction.cancel();
       });
       // Open once after a fresh install so users can confirm injection
       // without having to find the small bottom-right launcher.
@@ -2315,7 +2316,7 @@ const PromptPanel = (() => {
       render();
       setInterval(autoInjectOnce, 1800);
     }
-    return { mount, status };
+    return { mount, status, showCompactionReview };
   })();
 
     function bootstrap() {
