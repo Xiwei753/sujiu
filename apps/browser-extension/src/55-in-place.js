@@ -92,7 +92,11 @@
                 throw new Error("网页未完整加载所有历史轮次（检测到 " +
                     groups.length + "，预期 " + (plan.totalRounds + 1) + "），拒绝删除");
             }
-            const selected = groups.slice(0, plan.olderRounds).flatMap(group => group.turns);
+            // Delete response and attached thought blocks before each user
+            // prompt. Some native UI builds remove thought blocks together
+            // with the model response.
+            const selected = groups.slice(0, plan.olderRounds)
+                .flatMap(group => [...group.turns].reverse());
             const protectedTurns = groups.slice(plan.olderRounds).flatMap(group => group.turns);
             const ids = selected.map(turn => turn.id);
             if (ids.some(id => !id) || new Set(ids).size !== ids.length) {
@@ -101,8 +105,9 @@
             if (protectedTurns.some(turn => ids.includes(turn.id))) {
                 throw new Error("删除范围与保留范围重叠");
             }
-            if (selected.some(turn => !turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"))) {
-                throw new Error("部分消息不支持原生删除菜单");
+            if (selected.some(turn => normalizeType(turn) !== "thought" &&
+                !turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"))) {
+                throw new Error("部分消息缺少 Google 原生删除菜单，拒绝开始清理");
             }
             return { targetIds: ids, groups: groups.length, items: selected.length };
         }
@@ -136,7 +141,12 @@
             const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
                 turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
                 turn.querySelector("ms-chat-turn-options button");
-            if (!button) throw new Error("消息 " + id + " 缺少原生操作菜单");
+            if (!button) {
+                if (normalizeType(turn) === "thought") {
+                    throw new Error("思考块 " + id + " 尚未随回复被删除，也没有独立的原生删除菜单");
+                }
+                throw new Error("消息 " + id + " 缺少原生操作菜单");
+            }
             button.click();
             const item = await findNativeDeleteItem();
             if (!item) throw new Error("找不到 Google 原生删除选项，已停止");
@@ -147,7 +157,7 @@
             item.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
             item.click();
             // A further confirmation dialog is deliberately not bypassed.
-            for (let i = 0; i < 30; i++) {
+            for (let i = 0; i < 100; i++) {
                 if (!document.getElementById(id)) return;
                 await sleep(100);
             }
