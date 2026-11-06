@@ -130,11 +130,20 @@
         }
     }
 
+    function assertSupportedEntries(entries, turns) {
+        const messages = entries.filter(entry => Array.isArray(entry) && typeof entry[8] === "string");
+        if (messages.length !== turns.length ||
+            turns.some(turn => turn.role !== "user" && turn.role !== "model")) {
+            throw new Error("此会话包含尚未支持的工具、多模态或空内容消息，已中止压缩以避免丢失内容");
+        }
+    }
+
     async function getRebuildSourceTurns() {
         const currentPromptId = Branching.getCurrentPromptId();
         if (state.lastResolvedPromptThread?.length) {
             if (!currentPromptId || !state.lastResolvedPromptId || state.lastResolvedPromptId === currentPromptId) {
                 const resolvedTurns = extractResolvedTurns(state.lastResolvedPromptThread);
+                assertSupportedEntries(state.lastResolvedPromptThread, resolvedTurns);
                 if (resolvedTurns.length) {
                     log.net("Rebuilding conversation from resolved prompt thread", {
                         promptId: state.lastResolvedPromptId,
@@ -154,6 +163,7 @@
         const fetchedCapture = await ensureResolvedPromptThread(currentPromptId);
         if (fetchedCapture?.entries?.length) {
             const fetchedTurns = extractResolvedTurns(fetchedCapture.entries);
+            assertSupportedEntries(fetchedCapture.entries, fetchedTurns);
             if (fetchedTurns.length) {
                 log.net("Rebuilding conversation from on-demand resolved prompt thread", {
                     promptId: fetchedCapture.promptId,
@@ -170,7 +180,11 @@
         log.net("Rebuilding conversation using stored GenerateContent history", {
             summary: describePromptHistory(state.lastPromptHistory)
         });
-        return extractTurns(state.lastPromptHistory);
+        const fallback = extractTurns(state.lastPromptHistory);
+        if (fallback.some(turn => turn.role !== "user" && turn.role !== "model")) {
+            throw new Error("GenerateContent 历史包含未支持的消息角色");
+        }
+        return fallback;
     }
 
     async function ensureResolvedPromptThread(promptId) {
