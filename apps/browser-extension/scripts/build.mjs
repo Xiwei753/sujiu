@@ -1,7 +1,7 @@
 const fs = await import("node:fs/promises");
   const path = await import("node:path");
   const root = path.resolve(import.meta.dirname || path.dirname(new URL(import.meta.url).pathname), "..");
-  const files = ["00-state.js","10-settings.js","20-network.js","25-auto-prune.js","30-compression.js","35-rounds.js","40-history.js","50-branching.js","60-native-ui.js","70-utils.js","75-prompt-profiles.js","80-prompt-panel.js","90-bootstrap.js"];
+  const files = ["00-state.js","10-settings.js","20-network.js","30-compression.js","35-rounds.js","40-history.js","50-branching.js","60-native-ui.js","70-utils.js","75-prompt-profiles.js","80-prompt-panel.js","90-bootstrap.js"];
   const text = (await Promise.all(files.map(file => fs.readFile(path.join(root,"src",file),"utf8")))).join("\n");
   const bundle = '(function () {\n"use strict";\nconst unsafeWindow = window;\n' + text + '\n})();\n';
   await fs.mkdir(path.join(root,"dist","extension"), {recursive:true});
