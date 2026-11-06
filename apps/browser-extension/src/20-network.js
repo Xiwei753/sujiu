@@ -78,6 +78,8 @@
                     if (!scope) throw new Error("本次请求未包含有效的摘要任务标识");
                     actualRequest = new Request(request, { body: scope.bodyText });
                     state.scopedCompression = scope;
+                    CompactionTask.confirmScoped(Branching.getCurrentPromptId(),
+                        state.activeCompressionMarker, scope);
                     PromptPanel.status("模型请求已仅保留较早 " + scope.olderRounds +
                         " 轮历史；最近 " + scope.recentRounds + " 轮未发送");
                 } catch (error) {
@@ -207,6 +209,8 @@
                             bodyText = scope.bodyText;
                             body = scope.bodyText;
                             state.scopedCompression = scope;
+                            CompactionTask.confirmScoped(Branching.getCurrentPromptId(),
+                                state.activeCompressionMarker, scope);
                             PromptPanel.status("模型请求已仅保留旧 " + scope.olderRounds +
                                 " 轮；最近 " + scope.recentRounds + " 轮未发送");
                         } catch (error) {
