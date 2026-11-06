@@ -105,8 +105,6 @@ const PromptPanel = (() => {
       select.value = data.active;
       renderFields();
       root.querySelector('[data-role="keep"]').value = String(userSettings.keepRounds || 8);
-      root.querySelector('[data-role="threshold"]').value = String(userSettings.autoThreshold || 50);
-      root.querySelector('[data-role="auto-compact"]').checked = Boolean(userSettings.autoCompact);
       root.querySelector('[data-role="auto-inject"]').checked = Boolean(userSettings.autoInject);
       root.querySelector('[data-role="summary-prompt"]').value = getCompressPrompt();
     }
@@ -187,11 +185,9 @@ const PromptPanel = (() => {
           <hr>
           <h3>上下文管理</h3>
           <label>保留最近完整轮数</label><input data-role="keep" type="number" min="1" max="100" step="1">
-          <label class="check-line"><input type="checkbox" data-role="auto-compact"> 达到阈值后自动压缩旧上下文</label>
-          <label>自动清理阈值（完整轮数）</label><input data-role="threshold" type="number" min="10" max="10000" step="1">
           <label>压缩摘要提示词</label><textarea data-role="summary-prompt" rows="5"></textarea>
           <div class="line"><button data-action="compress">立即压缩并创建分支</button></div>
-          <p class="hint">清理会在新分支中用摘要替换较早轮次；原始聊天仍保留以便恢复。自动压缩默认关闭。</p>
+          <p class="hint">建议上下文接近 20 万 tokens 时手动压缩，并为下一次回复预留空间（实际以当前模型上限为准）。压缩只创建新的摘要分支，原始会话保留。</p>
           <div id="status" data-role="status" role="status" aria-live="polite"></div>
         </section>
         <button id="toggle" aria-expanded="false" aria-controls="pane">素酒工具</button>`;
@@ -262,20 +258,14 @@ const PromptPanel = (() => {
           lastAutoApplied = "";
           autoInjectOnce();
         }
-        if (role === "auto-compact") {
-          updateUserSettings({ autoCompact: el.checked });
-          status(el.checked ? "自动压缩已开启，阈值只在完成回复后检查" : "自动压缩已关闭");
-        }
-        if (role === "keep" || role === "threshold") {
-          const keep = Number(root.querySelector('[data-role="keep"]').value);
-          const threshold = Number(root.querySelector('[data-role="threshold"]').value);
-          if (!Number.isSafeInteger(keep) || keep < 1 || keep > 100 ||
-              !Number.isSafeInteger(threshold) || threshold < 10 || threshold > 10000 || threshold <= keep) {
-            status("轮数无效：阈值需要大于保留轮数，且保留至少 1 轮");
+        if (role === "keep") {
+          const keep = Number(el.value);
+          if (!Number.isSafeInteger(keep) || keep < 1 || keep > 100) {
+            status("保留轮数无效：请输入 1–100 之间的整数");
             render();
           } else {
-            updateUserSettings({ keepRounds: keep, autoThreshold: threshold });
-            status("保留最近 " + keep + " 轮，自动阈值 " + threshold + " 轮");
+            updateUserSettings({ keepRounds: keep });
+            status("压缩将保留最近 " + keep + " 轮完整对话");
           }
         }
         if (role === "summary-prompt") {
