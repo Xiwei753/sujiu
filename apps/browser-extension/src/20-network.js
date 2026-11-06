@@ -76,28 +76,26 @@
                 // Never break the host application because our inspector cannot clone a request.
                 return originalFetch(input, init);
             }
-            let actualRequest = request;
             if (shouldLogGenerate && state.compressionInProgress && state.activeCompressionMarker) {
                 try {
-                    const scope = RequestScope.prepare(await request.clone().text(),
+                    const summary = RequestScope.prepare(await request.clone().text(),
                         state.activeCompressionMarker, state.activeCompressionKeepRounds);
-                    if (!scope) throw new Error("本次请求未包含有效的摘要任务标识");
-                    actualRequest = new Request(request, { body: scope.bodyText });
-                    state.scopedCompression = scope;
-                    CompactionTask.confirmScoped(Branching.getCurrentPromptId(),
-                        state.activeCompressionMarker, scope);
-                    PromptPanel.status("模型请求已仅保留较早 " + scope.olderRounds +
-                        " 轮历史；最近 " + scope.recentRounds + " 轮未发送");
+                    if (!summary) throw new Error("本次请求未包含有效的摘要任务标识");
+                    state.scopedCompression = summary;
+                    CompactionTask.confirmFullHistory(Branching.getCurrentPromptId(),
+                        state.activeCompressionMarker, summary);
+                    PromptPanel.status("摘要请求包含全部 " + summary.transmittedRounds +
+                        " 轮；最近 " + summary.recentRounds + " 轮原文仅在清理时保留");
                 } catch (error) {
                     PromptPanel.status("摘要请求已阻止：" + String(error?.message || error));
                     Compression.finalizeRun();
                     throw error;
                 }
             }
-            if (shouldLogGenerate) await logRequestPayload(actualRequest);
-            const response = await originalFetch(
-                shouldLogGenerate && actualRequest !== request ? actualRequest : input,
-                shouldLogGenerate && actualRequest !== request ? undefined : init);
+            // No request reconstruction: preserve Google's exact native
+            // payload, including every recent conversation turn.
+            if (shouldLogGenerate) await logRequestPayload(request);
+            const response = await originalFetch(input, init);
 
             if (shouldLogGenerate || shouldCaptureResolve) {
                 void logResponsePayload(request.url, response.clone());
@@ -210,16 +208,14 @@
                     if (isTargetRequest(absoluteUrl, "GENERATE") &&
                         state.compressionInProgress && state.activeCompressionMarker) {
                         try {
-                            const scope = RequestScope.prepare(bodyText,
+                            const summary = RequestScope.prepare(bodyText,
                                 state.activeCompressionMarker, state.activeCompressionKeepRounds);
-                            if (!scope) throw new Error("本次请求缺少有效的摘要任务标识");
-                            bodyText = scope.bodyText;
-                            body = scope.bodyText;
-                            state.scopedCompression = scope;
-                            CompactionTask.confirmScoped(Branching.getCurrentPromptId(),
-                                state.activeCompressionMarker, scope);
-                            PromptPanel.status("模型请求已仅保留旧 " + scope.olderRounds +
-                                " 轮；最近 " + scope.recentRounds + " 轮未发送");
+                            if (!summary) throw new Error("本次请求缺少有效的摘要任务标识");
+                            state.scopedCompression = summary;
+                            CompactionTask.confirmFullHistory(Branching.getCurrentPromptId(),
+                                state.activeCompressionMarker, summary);
+                            PromptPanel.status("摘要请求包含全部 " + summary.transmittedRounds +
+                                " 轮；最近 " + summary.recentRounds + " 轮原文仅在清理时保留");
                         } catch (error) {
                             PromptPanel.status("摘要请求已阻止：" + String(error?.message || error));
                             Compression.finalizeRun();
