@@ -380,7 +380,11 @@ const PromptPanel = (() => {
         if (action === "stop-tracking") Compression.stopTracking();
         if (action === "commit-delete") {
           try { await InPlaceCompaction.commit(); }
-          catch (error) { console.warn("[Sujiu AI Studio] in-place deletion halted", String(error?.message || error)); }
+          catch (error) {
+            const reason = String(error?.message || error);
+            status("删除未完成：" + reason);
+            console.warn("[Sujiu AI Studio] in-place deletion halted", reason);
+          }
         }
         if (action === "cancel-delete") InPlaceCompaction.cancel();
       });
