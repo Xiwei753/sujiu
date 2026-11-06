@@ -107,7 +107,44 @@
                 !turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"))) {
                 throw new Error("部分消息缺少 Google 原生删除菜单，拒绝开始清理");
             }
-            return { targetIds: ids, groups: groups.length, items: selected.length };
+            const deleteGroups = groups.slice(0, plan.olderRounds).map(group =>
+                group.turns.map(turn => turn.id).reverse());
+            return { targetIds: ids, deleteGroups, groups: groups.length, items: selected.length };
+        }
+
+        // A DOM deletion is only a visual change. The old conversation must
+        // disappear from ResolveDriveResource before we touch the next round.
+        // Never assume the native menu action triggered Google autosave.
+        async function awaitCloudPersistence(plan, deletedRounds, expectedProtected) {
+            const expectedUsers = plan.totalRounds + 1 - deletedRounds;
+            let lastUsers = null;
+            for (let i = 0; i < 8; i++) {
+                await sleep(i === 0 ? 700 : 1800);
+                const capture = await fetchResolvedPromptThread(plan.promptId);
+                if (!capture?.entries?.length) continue;
+                const turns = extractResolvedTurns(capture.entries);
+                assertSupportedEntries(capture.entries, turns);
+                const users = turns.filter(turn => turn.role === "user");
+                lastUsers = users.length;
+                if (lastUsers < expectedUsers) {
+                    throw new Error("云端消息比计划删除得更多，立即停止（可能删除了保留内容）");
+                }
+                if (lastUsers !== expectedUsers) continue;
+                const summary = findSavedSummary(turns, plan.promptId);
+                if (summary.marker !== plan.marker || summary.snapshot.trim() !== plan.snapshot.trim()) {
+                    throw new Error("云端摘要发生变化，立即停止删除");
+                }
+                const original = turns.slice(0, summary.lastUserIndex);
+                const tail = RoundSplitter.partition(original, plan.recentRounds).recent;
+                const protectedNow = JSON.stringify(tail.map(turn => [turn.role, turn.text]));
+                if (protectedNow !== expectedProtected) {
+                    throw new Error("云端保留的最近轮次与删除前不一致，立即停止");
+                }
+                return true;
+            }
+            throw new Error("Google 服务器未确认本轮删除（当前 " +
+                (lastUsers ?? "未知") + " 条用户消息，预期 " + expectedUsers +
+                " 条）。已停止批量删除；界面可能只是暂时隐藏了消息，刷新后会恢复。");
         }
 
         async function findNativeDeleteItem() {
@@ -169,22 +206,34 @@
             if (Branching.getCurrentPromptId() !== plan.promptId) {
                 throw new Error("会话已切换，需重新压缩");
             }
-            await verifyPersistedSummary(plan);
+            const baseline = await verifyPersistedSummary(plan);
+            const baselineSummary = findSavedSummary(baseline.turns, plan.promptId);
+            const original = baseline.turns.slice(0, baselineSummary.lastUserIndex);
+            const expectedProtected = JSON.stringify(
+                RoundSplitter.partition(original, plan.recentRounds).recent.map(
+                    turn => [turn.role, turn.text]));
             const preview = preflightDom(plan);
-            if (!confirm("即将在当前聊天中删除最旧的 " + plan.olderRounds +
+            if (!confirm("将逐轮删除最旧的 " + plan.olderRounds +
                     " 轮（包括关联思考内容），保留最近 " + plan.recentRounds +
-                    " 轮和刚生成的摘要。此操作无法撤销，确认继续？")) return;
+                    " 轮和摘要。每轮必须获得 Google 云端确认，未保存会立刻停止。此操作无法撤销，确认继续？")) return;
             deleting = true;
             state.branchInProgress = true;
             let processed = 0;
             try {
-                for (const id of preview.targetIds) {
-                    if (Branching.getCurrentPromptId() !== plan.promptId) {
-                        throw new Error("删除过程中会话发生切换");
+                for (let roundIndex = 0; roundIndex < preview.deleteGroups.length; roundIndex++) {
+                    const groupIds = preview.deleteGroups[roundIndex];
+                    for (const id of groupIds) {
+                        if (Branching.getCurrentPromptId() !== plan.promptId) {
+                            throw new Error("删除过程中会话发生切换");
+                        }
+                        await deleteOne(id);
+                        processed++;
                     }
-                    await deleteOne(id);
-                    processed++;
-                    PromptPanel.status("正在原地清理：" + processed + "/" + preview.items);
+                    PromptPanel.status("已在页面删除第 " + (roundIndex + 1) +
+                        " 轮，等待 Google 服务器确认保存……");
+                    await awaitCloudPersistence(plan, roundIndex + 1, expectedProtected);
+                    PromptPanel.status("Google 云端确认删除 " + (roundIndex + 1) +
+                        "/" + plan.olderRounds + " 轮，继续下一轮");
                 }
                 const after = await fetchResolvedPromptThread(plan.promptId);
                 if (!after?.entries?.length) throw new Error("无法验证 Google 端保存结果");
