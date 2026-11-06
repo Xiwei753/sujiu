@@ -228,7 +228,6 @@ const PromptPanel = (() => {
         row.append(head, editor);
         container.appendChild(row);
       }
-      host.addEventListener("click", () => {}, { once: true });
       shadow.getElementById("toggle").addEventListener("click", () => {
         panel.hidden = !panel.hidden;
         shadow.getElementById("toggle").setAttribute("aria-expanded", String(!panel.hidden));
