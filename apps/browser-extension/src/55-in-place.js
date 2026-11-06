@@ -32,7 +32,7 @@
             return groups;
         }
 
-        function stage(snapshot, split) {
+        function stage(snapshot, split, task = null) {
             const id = Branching.getCurrentPromptId();
             if (!id || id === "new_chat") throw new Error("保存会话后才能原地压缩");
             if (!snapshot?.trim()) throw new Error("摘要为空，无法压缩");
@@ -42,6 +42,8 @@
                 olderRounds: split.olderRounds,
                 recentRounds: split.recentRounds,
                 totalRounds: split.totalRounds,
+                marker: task?.marker || null,
+                legacy: Boolean(task?.legacy),
                 createdAt: Date.now()
             };
             PromptPanel.showCompactionReview(pending);
@@ -57,9 +59,16 @@
             if (users.length !== plan.totalRounds + 1) {
                 throw new Error("会话轮数与生成摘要前不一致，请刷新后重新生成摘要");
             }
-            const last = turns[turns.length - 1];
-            if (last?.role !== "model" || !last.text.includes(plan.snapshot.slice(0, 70))) {
-                throw new Error("摘要尚未保存在 Google 会话中，拒绝删除旧消息");
+            const latest = findSavedSummary(turns, plan.promptId);
+            if (latest.marker !== plan.marker ||
+                latest.keepRounds !== plan.recentRounds ||
+                latest.snapshot.trim() !== plan.snapshot.trim() ) {
+                throw new Error("Google 端摘要或保留轮数与预览不一致，拒绝删除");
+            }
+            const previous = turns.slice(0, latest.lastUserIndex);
+            const split = RoundSplitter.partition(previous, plan.recentRounds);
+            if (split.totalRounds !== plan.totalRounds || split.olderRounds !== plan.olderRounds) {
+                throw new Error("原聊天已经变化，请重新读取摘要再清理");
             }
             return { capture, turns };
         }
