@@ -115,7 +115,7 @@
         // A DOM deletion is only a visual change. The old conversation must
         // disappear from ResolveDriveResource before we touch the next round.
         // Never assume the native menu action triggered Google autosave.
-        async function awaitCloudPersistence(plan, deletedRounds, expectedProtected) {
+        async function awaitCloudPersistence(plan, deletedRounds, expectedProtected, saveBaseline) {
             const expectedUsers = plan.totalRounds + 1 - deletedRounds;
             let lastUsers = null;
             for (let i = 0; i < 8; i++) {
@@ -149,9 +149,14 @@
                 }
                 return true;
             }
+            const attemptedSave = SaveMonitor.attempts > saveBaseline;
+            const nativeSave = attemptedSave
+                ? "观察到 UpdatePrompt，最近状态 " + (SaveMonitor.latest?.status || "未知")
+                : "没有观察到本轮删除触发 UpdatePrompt";
             throw new Error("Google 服务器未确认本轮删除（当前 " +
                 (lastUsers ?? "未知") + " 条用户消息，预期 " + expectedUsers +
-                " 条）。已停止批量删除；界面可能只是暂时隐藏了消息，刷新后会恢复。");
+                " 条；" + nativeSave +
+                "）。已停止批量删除；页面变化可能没有上传，刷新后会恢复。");
         }
 
         async function findNativeDeleteItem() {
@@ -226,6 +231,7 @@
             deleting = true;
             state.branchInProgress = true;
             let processed = 0;
+            const saveBaseline = SaveMonitor.attempts;
             try {
                 for (let roundIndex = 0; roundIndex < preview.deleteGroups.length; roundIndex++) {
                     const groupIds = preview.deleteGroups[roundIndex];
@@ -238,7 +244,7 @@
                     }
                     PromptPanel.status("已在页面删除第 " + (roundIndex + 1) +
                         " 轮，等待 Google 服务器确认保存……");
-                    await awaitCloudPersistence(plan, roundIndex + 1, expectedProtected);
+                    await awaitCloudPersistence(plan, roundIndex + 1, expectedProtected, saveBaseline);
                     PromptPanel.status("Google 云端确认删除 " + (roundIndex + 1) +
                         "/" + plan.olderRounds + " 轮，继续下一轮");
                 }
