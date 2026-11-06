@@ -1,36 +1,13 @@
-    async function rebuildConversation(snapshotText) {
-        log.net("rebuildConversation invoked", {
-            hasHistory: Boolean(state.lastPromptHistory),
-            hasResolvedThread: Boolean(state.lastResolvedPromptThread),
-            snapshotLength: snapshotText?.length || 0
-        });
-
+    async function prepareInPlaceCompaction(snapshotText) {
         const turns = await getRebuildSourceTurns();
-        if (!turns.length) {
-            log.net("No prompt history available to rebuild conversation");
-            return;
-        }
-        const sanitizedTurns = stripCompressionArtifacts(turns);
-        if (!sanitizedTurns.length) {
-            log.net("History only contained compression prompt turn, abort rebuild");
-            return;
-        }
-        // Partition at user/model exchange boundaries. Tool events remain in their parent exchange.
-        const split = RoundSplitter.partition(sanitizedTurns, Number(userSettings.keepRounds) || 8);
-        const newTurns = [
-            createTurn("user", snapshotText),
-            createTurn("model", "已记录先前剧情摘要。"),
-            ...split.recent
-        ];
-        log.net("Compaction rounds", {
-            total: split.totalRounds,
-            compressed: split.olderRounds,
-            kept: split.recentRounds
-        });
-        state.pendingBranchTurns = newTurns;
-        log.net("Prepared compressed branch turns", newTurns.length, "turns");
-        Branching.branchFromHere().catch(err => {
-            log.net("Compressed branch creation failed", err);
+        if (!turns.length) throw new Error("无法读取当前会话历史");
+        const cleanTurns = stripCompressionArtifacts(turns);
+        if (!cleanTurns.length) throw new Error("压缩范围为空");
+        const split = RoundSplitter.partition(cleanTurns, Number(userSettings.keepRounds) || 8);
+        InPlaceCompaction.stage(snapshotText, split);
+        log.ui("In-place summary ready", {
+            compressedRounds: split.olderRounds,
+            preservedRounds: split.recentRounds
         });
     }
 
