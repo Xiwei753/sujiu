@@ -1,7 +1,11 @@
     const Compression = {
         run() {
-            if (state.compressionInProgress) {
-                log.ui("Compression already running");
+            if (state.compressionInProgress || state.branchInProgress) {
+                log.ui("Compression or deletion already running");
+                return;
+            }
+            if (InPlaceCompaction.pending) {
+                PromptPanel.status("请先确认或取消已经生成的摘要");
                 return;
             }
             const textarea = UI.findInput();
@@ -35,7 +39,6 @@
         prepareRunContext() {
             state.lastPromptHistory = null;
             state.lastPromptHistoryUpdatedAt = 0;
-            state.pendingBranchTurns = null;
             state.historyCapturePending = true;
             state.compressionRequestPending = false;
             state.compressionResponsePending = false;
@@ -311,5 +314,5 @@
     }
 
     // ---------------------------
-    // Conversation rebuild & branch creation
+    // History processing
     // ---------------------------
