@@ -3,19 +3,22 @@
     // response does not prove that the current chat data was persisted.
     const NativeSave = (() => {
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-        const labelOf = element => [
+        const labelsOf = element => [
             element.getAttribute?.("aria-label"),
             element.getAttribute?.("title"),
+            element.getAttribute?.("data-tooltip"),
             element.textContent,
             element.querySelector?.("mat-icon, .material-symbols-outlined")?.textContent
-        ].filter(Boolean).join(" ").trim().toLowerCase();
+        ].filter(Boolean).map(value => String(value).trim().toLowerCase());
         const SAVE = /^(save|save prompt|保存|保存提示词|保存提示|儲存|儲存提示詞|save changes)$/i;
         const BLOCK = /save as|save a copy|duplicate|另存|保存副本|复制|export|导出|save to library/i;
 
         function isSaveControl(element) {
-            if (!element || element.disabled || element.getAttribute?.("aria-disabled") === "true") return false;
-            const label = labelOf(element);
-            return SAVE.test(label) && !BLOCK.test(label);
+            if (!element || element.disabled ||
+                element.getAttribute?.("aria-disabled") === "true") return false;
+            const labels = labelsOf(element);
+            if (labels.some(value => BLOCK.test(value))) return false;
+            return labels.some(value => SAVE.test(value));
         }
         function findDirect() {
             const containers = [
@@ -40,7 +43,7 @@
             const toolbar = document.querySelector("ms-toolbar, ms-playground-toolbar, header");
             if (!toolbar) return null;
             return [...toolbar.querySelectorAll("button, [role=button]")].find(button => {
-                const label = labelOf(button);
+                const label = labelsOf(button).join(" ");
                 return /\bmore (options|actions)\b|更多选项|更多操作|more_vert/.test(label) &&
                     !button.disabled;
             }) || null;
