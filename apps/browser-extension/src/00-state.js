@@ -6,8 +6,7 @@
         },
         TARGETS: {
             GENERATE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
-            RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource",
-            CREATE_PROMPT: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/CreatePrompt"
+            RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource"
         },
         NETWORK: {
             RPC_ORIGIN: "https://alkalimakersuite-pa.clients6.google.com"
@@ -66,7 +65,6 @@
         googleApiKey: "",
         googleAuthUser: "0",
         googleApiKeyUpdatedAt: 0,
-        pendingBranchTurns: null,
         historyCapturePending: false,
         branchInProgress: false,
         activeCompressionPrompt: "",
