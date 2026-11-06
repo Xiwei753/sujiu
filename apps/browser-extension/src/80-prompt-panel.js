@@ -119,6 +119,7 @@ const PromptPanel = (() => {
       renderFields();
       root.querySelector('[data-role="keep"]').value = String(userSettings.keepRounds || 8);
       root.querySelector('[data-role="auto-inject"]').checked = Boolean(userSettings.autoInject);
+      root.querySelector('[data-role="reduce-visual-effects"]').checked = PerformanceTuning.enabled;
       root.querySelector('[data-role="summary-prompt"]').value = getCompressPrompt();
     }
     function exportPresets() {
@@ -211,6 +212,12 @@ const PromptPanel = (() => {
         ]),
         make("p", { className: "hint", text: "按勾选和顺序合并所有提示词；自动同步仅在 AI Studio 的原生编辑框可访问时执行。" }),
         make("hr"),
+        make("h3", { text: "性能" }),
+        make("label", { className: "check-line" }, [
+          role("reduce-visual-effects", "input", { type: "checkbox" }),
+          document.createTextNode(" 减少页面特效（模糊与平滑滚动）")
+        ]),
+        make("p", { className: "hint", text: "可减少 GPU 重绘引起的卡顿；不会删减消息，也无法解决超长对话的全部 DOM 和 token 计算开销。" }),
         make("h3", { text: "上下文管理" }),
         make("label", { text: "保留最近完整轮数" }),
         role("keep", "input", { type: "number", min: "1", max: "100", step: "1" }),
@@ -306,6 +313,10 @@ const PromptPanel = (() => {
           return;
         }
         const role = el?.dataset?.role;
+        if (role === "reduce-visual-effects") {
+          const enabled = PerformanceTuning.setEnabled(el.checked);
+          status(enabled ? "已减少页面模糊与平滑滚动，可随时关闭" : "已恢复网页原有视觉效果");
+        }
         if (role === "auto-inject") {
           updateUserSettings({ autoInject: el.checked });
           lastAutoApplied = "";
