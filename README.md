@@ -30,6 +30,10 @@ docs/
   UI_ARCHITECTURE.md
 ```
 
+## Browser extension (experimental)
+
+The AI Studio companion lives in [apps/browser-extension](apps/browser-extension/README.md). It uses a local prompt preset panel and a separate AI Studio adapter for manual chat compaction/branching. It builds both an MV3 extension and a Tampermonkey userscript, without changing the Rust runtime or native frontends. Its dependency on undocumented AI Studio endpoints requires manual browser testing.
+
 ## Rust AI runtime
 
 `sujiu-ai` already contains:
