@@ -104,7 +104,8 @@
             }
             log.net("Compression snapshot extracted, rebuilding conversation");
             rebuildConversation(snapshot).catch(err => {
-                log.net("Failed to rebuild conversation", err);
+                log.net("Failed to rebuild conversation", err.message);
+                alert("素酒压缩失败： " + err.message);
             });
             Compression.finalizeRun();
         },
