@@ -166,7 +166,7 @@
             icon?.textContent,
             button.textContent
         ].filter(Boolean).join(" ").toLowerCase();
-        return /\\b(stop|cancel|interrupt|abort|close)\\b|停止|中断生成|取消生成/.test(label);
+        return /(^|[^a-z])(stop|cancel|interrupt|abort)([^a-z]|$)|停止|中断生成|取消生成/.test(label);
     }
 
     async function sendCompressionRequest() {
