@@ -9,18 +9,19 @@ const fs = await import("node:fs/promises");
   const manifest = {
     manifest_version:3,
     name:"素酒 · AI Studio 工具",
-    version:"0.1.0",
+    version:"0.1.1",
     description:"AI Studio 提示词预设和手动上下文压缩分支",
-    content_scripts:[{matches:["https://aistudio.google.com/prompts/*"],js:["main.js"],run_at:"document_start",world:"MAIN"}]
+    content_scripts:[{matches:["https://aistudio.google.com/prompts/*","https://aistudio.google.com/app/prompts/*"],js:["main.js"],run_at:"document_start",world:"MAIN"}]
   };
   await fs.writeFile(path.join(root,"dist","extension","manifest.json"),JSON.stringify(manifest,null,2)+"\n");
   const header = [
     "// ==UserScript==",
     "// @name         Sujiu AI Studio Tools",
     "// @namespace    https://github.com/Xiwei753/sujiu",
-    "// @version      0.1.0",
+    "// @version      0.1.1",
     "// @description  AI Studio prompt presets and manual context compaction",
     "// @match        https://aistudio.google.com/prompts/*",
+    "// @match        https://aistudio.google.com/app/prompts/*",
     "// @run-at       document-start",
     "// @grant        none",
     "// ==/UserScript==",
