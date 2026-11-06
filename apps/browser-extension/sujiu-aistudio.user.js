@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.3.3
+// @version      0.3.4
 // @description  AI Studio prompt presets and manual context compaction
 // @match        https://aistudio.google.com/*
 // @noframes
@@ -11,7 +11,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.3.3", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.3.4", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -72,7 +72,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.3.3";
+    const SCRIPT_VERSION = "0.3.4";
 
     const state = {
         compressionInProgress: false,
@@ -1853,17 +1853,20 @@ const RoundSplitter = Object.freeze({
                 "。保留最近 " + plan.recentRounds + " 轮与已标记摘要。" +
                 (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                     " 个无法独立删除的思考块会保留。" : "") +
-                "完成批量删除后将触发一次 AI Studio 原生保存。该操作不可撤销，继续？";
+                "删除操作使用 AI Studio 原生消息菜单，Google 会自行自动保存。全部删除后统一等待保存响应。该操作不可撤销，继续？";
             if (!confirm(prompt)) return;
             deleting = true;
             state.branchInProgress = true;
             let processed = 0;
+            const saveBaseline = SaveMonitor.attempts;
+            let lastDeletionStartedAt = 0;
             try {
                 const protectedSet = new Set(preview.protectedIds);
                 for (const id of preview.targetIds) {
                     if (Branching.getCurrentPromptId() !== plan.promptId) {
                         throw new Error("清理过程中会话已经切换");
                     }
+                    lastDeletionStartedAt = Date.now();
                     await deleteOne(id);
                     processed++;
                     // An Angular cascading delete may remove the summary
@@ -1876,22 +1879,28 @@ const RoundSplitter = Object.freeze({
                         }
                     }
                     PromptPanel.status("批量清理中 " + processed + "/" + preview.items +
-                        "，完成后触发一次原生保存");
+                        "，原生页面将自行处理自动保存");
                 }
-                // Single deliberate save action, after all DOM removals.
-                // A native 200 response is not proof that the right content
-                // was persisted; do not claim a verified cloud save.
-                PromptPanel.status("批量删除已完成，正在触发一次 AI Studio 原生保存……");
-                const saved = await NativeSave.triggerOnce();
-                if (!saved.triggered) {
-                    PromptPanel.status("页面删除已完成，但未找到原生保存入口：" +
-                        saved.reason + "。请立即在 AI Studio 手动保存，保存前不要刷新！");
+                // The old per-turn path never invoked Save explicitly.
+                // AI Studio's native delete action triggers UpdatePrompt
+                // automatically. Observe one quiet period after the batch.
+                PromptPanel.status("批量删除完成，等待 Google 原生自动保存请求结束……");
+                const autosave = await SaveMonitor.waitForNativeSave(saveBaseline, lastDeletionStartedAt);
+                if (!autosave.observed) {
+                    PromptPanel.status("页面删除已完成，但未观察到 UpdatePrompt 自动保存。" +
+                        "请确认 Google 页面已同步，保存前不要刷新。");
+                    return;
+                }
+                if (!autosave.ok) {
+                    PromptPanel.status("Google 原生自动保存返回 " + autosave.status +
+                        "，请检查网络和页面状态，暂勿刷新。");
                     return;
                 }
                 pending = null;
                 PromptPanel.showCompactionReview(null);
-                PromptPanel.status("批量删除已完成，已调用一次 AI Studio 原生保存（" +
-                    saved.via + "）。请等页面显示保存完成后刷新核对。" +
+                PromptPanel.status("批量删除已完成；观察到 " + autosave.attempts +
+                    " 次原生 UpdatePrompt 响应，最后状态 " + autosave.status +
+                    "。这表示保存请求有成功响应，刷新后可核对实际云端历史。" +
                     (preview.skippedThoughts ? "部分无法独立删除的思考块已保留。" : ""));
             } catch (error) {
                 PromptPanel.status("批量清理处理了 " + processed + "/" + preview.items +
@@ -2221,92 +2230,43 @@ const RoundSplitter = Object.freeze({
                 status: last.status, ok: last.ok
             });
         }
+        // This does not create any write request. It observes the same
+        // native UpdatePrompt completions that already followed message
+        // deletion in v0.3.1 and earlier.
+        async function waitForNativeSave(sinceAttempts, afterTime = 0, quietMs = 900, maxWaitMs = 10000) {
+            const start = Date.now();
+            let observed = false;
+            let lastSeen = start;
+            let lastAttempt = sinceAttempts;
+            while (Date.now() - start < maxWaitMs) {
+                if (attempts > lastAttempt) {
+                    observed = true;
+                    lastAttempt = attempts;
+                    lastSeen = Date.now();
+                }
+                // The final deletion must have caused (or preceded) an
+                // observed save completion; earlier saves in the batch alone
+                // cannot establish that the last mutation was submitted.
+                if (observed && Date.parse(last?.time || "") < afterTime) {
+                    observed = false;
+                }
+                if (observed && Date.now() - lastSeen >= quietMs) {
+                    return { observed: true, ok: Boolean(last?.ok),
+                        status: last?.status || 0, attempts: attempts - sinceAttempts };
+                }
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            observed = observed && Date.parse(last?.time || "") >= afterTime;
+            return { observed, ok: observed && Boolean(last?.ok),
+                status: observed ? last?.status || 0 : 0,
+                attempts: Math.max(0, attempts - sinceAttempts) };
+        }
         return Object.freeze({
             record,
+            waitForNativeSave,
             get latest() { return last; },
             get attempts() { return attempts; }
         });
-    })();
-
-    // Use AI Studio's own explicit Save control once after all native
-    // deletions. Do not synthesize a private UpdatePrompt request: a 200
-    // response does not prove that the current chat data was persisted.
-    const NativeSave = (() => {
-        const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
-        const labelsOf = element => [
-            element.getAttribute?.("aria-label"),
-            element.getAttribute?.("title"),
-            element.getAttribute?.("data-tooltip"),
-            element.textContent,
-            element.querySelector?.("mat-icon, .material-symbols-outlined")?.textContent
-        ].filter(Boolean).map(value => String(value).trim().toLowerCase());
-        const SAVE = /^(save|save prompt|保存|保存提示词|保存提示|儲存|儲存提示詞|save changes)$/i;
-        const BLOCK = /save as|save a copy|duplicate|另存|保存副本|复制|export|导出|save to library/i;
-
-        function isSaveControl(element) {
-            if (!element || element.disabled ||
-                element.getAttribute?.("aria-disabled") === "true") return false;
-            const labels = labelsOf(element);
-            if (labels.some(value => BLOCK.test(value))) return false;
-            return labels.some(value => SAVE.test(value));
-        }
-        function findDirect() {
-            const containers = [
-                document.querySelector("ms-toolbar"),
-                document.querySelector("ms-playground-toolbar"),
-                document.querySelector("header")
-            ].filter(Boolean);
-            for (const container of containers) {
-                const buttons = container.querySelectorAll("button, [role=button]");
-                const match = [...buttons].find(isSaveControl);
-                if (match) return match;
-            }
-            return null;
-        }
-        function findMenu() {
-            const buttons = [...document.querySelectorAll(
-                ".cdk-overlay-container [role=menuitem], .cdk-overlay-container .mat-mdc-menu-content button"
-            )];
-            return buttons.find(isSaveControl) || null;
-        }
-        function findMore() {
-            const toolbar = document.querySelector("ms-toolbar, ms-playground-toolbar, header");
-            if (!toolbar) return null;
-            return [...toolbar.querySelectorAll("button, [role=button]")].find(button => {
-                const label = labelsOf(button).join(" ");
-                return /\bmore (options|actions)\b|更多选项|更多操作|more_vert/.test(label) &&
-                    !button.disabled;
-            }) || null;
-        }
-        async function triggerOnce() {
-            // Distinguish a native save action from an unrelated "Save As",
-            // browser Save Page, export, or another plugin's controls.
-            const direct = findDirect();
-            if (direct) {
-                direct.click();
-                return { triggered: true, via: "toolbar" };
-            }
-            let item = findMenu();
-            if (item) {
-                item.click();
-                return { triggered: true, via: "menu" };
-            }
-            const more = findMore();
-            if (!more) return { triggered: false, reason: "找不到当前 AI Studio 的原生保存按钮或更多菜单" };
-            more.click();
-            for (let i = 0; i < 10; i++) {
-                await sleep(100);
-                item = findMenu();
-                if (item) {
-                    item.click();
-                    return { triggered: true, via: "menu" };
-                }
-            }
-            // Close only the menu we opened. No second save attempt.
-            document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-            return { triggered: false, reason: "更多菜单中没有可确认的原生「保存」操作" };
-        }
-        return Object.freeze({ triggerOnce, isSaveControl });
     })();
 
     function extractMutationPromptId(root) {
