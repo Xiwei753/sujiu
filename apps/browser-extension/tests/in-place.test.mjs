@@ -56,7 +56,7 @@ test("never deletes when older messages are not fully rendered", () => {
   const x = context([mockTurn("u1","user"),mockTurn("m1","model")]);
   assert.throws(() => x.compactor.preflightDom({
     totalRounds: 2, olderRounds: 1, recentRounds: 1
-  }), /未完整加载/);
+  }), /历史轮次已改变/);
 });
 test("unknown role or incomplete exchange is rejected", () => {
   const x = context([]);
