@@ -1,0 +1,2353 @@
+// ==UserScript==
+// @name         Sujiu AI Studio Tools
+// @namespace    https://github.com/Xiwei753/sujiu
+// @version      0.1.2
+// @description  AI Studio prompt presets and manual context compaction
+// @match        https://aistudio.google.com/*
+// @noframes
+// @sandbox      raw
+// @run-at       document-start
+// @grant        none
+// ==/UserScript==
+(function () {
+"use strict";
+const bootstrapStatus = { version: "0.1.2", phase: "loaded", loadedAt: new Date().toISOString() };
+window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
+console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
+try {
+const unsafeWindow = window;
+// Adapted from lxchx/aistudio-compressor v0.3.2 (MIT); see THIRD_PARTY_NOTICES.md.
+    const Config = {
+        TAGS: {
+            UI: "[Compressor UI]",
+            NET: "[Compressor Monitor]"
+        },
+        TARGETS: {
+            GENERATE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
+            RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource",
+            CREATE_PROMPT: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/CreatePrompt"
+        },
+        NETWORK: {
+            RPC_ORIGIN: "https://alkalimakersuite-pa.clients6.google.com"
+        },
+        EVENTS: {
+            REQUEST: "aistudio-compressor:generatecontent-request",
+            RESPONSE: "aistudio-compressor:generatecontent-response"
+        },
+        UI: {
+            BUTTON_ID: "compressor-button-hybrid",
+            TOOLBAR_SELECTORS: [
+                "ms-toolbar .toolbar-right",
+                "ms-playground-toolbar .toolbar-right",
+                "ms-playground-toolbar .toolbar-container .toolbar-right",
+                ".toolbar-right"
+            ],
+            TARGET_PATH: "/prompts/",
+            INPUT_SELECTORS: [
+                "ms-autosize-textarea textarea",
+                'textarea[aria-label="Start typing a prompt"]',
+                "textarea"
+            ],
+            SEND_BUTTON_SELECTORS: [
+                "ms-run-button button",
+                "ms-run-button button.run-button",
+                'button[aria-label="Run"]',
+                'button[aria-label^="Run"]',
+                'button[description*="Send prompt"]',
+                'button[aria-label*="keyboard_return"]',
+                'button[type="submit"]'
+            ]
+        },
+        PROMPTS: {
+            FULL: "Summarize the earlier role-play conversation as a compact, accurate memory snapshot.\nOnly summarize the history BEFORE the most recent completed exchanges identified in the final instruction. Preserve established characters, relationships, identity, world rules, important events, state changes, promises, possessions, unresolved conflicts, and the current situation before those exchanges. Avoid adding fictional details or overriding established facts.\nReturn only:\n<state_snapshot>\n[Concise, structured summary in the language of the conversation]\n</state_snapshot>",
+            SNIPPET: "Summarize the earlier role-play conversation"
+        }
+    };
+
+    const env = {
+        isMac: /Mac|iPhone|iPad/.test(navigator.platform),
+        isAppContext: location.pathname.startsWith("/app/"),
+        topWindow: unsafeWindow?.top || window
+    };
+    const SCRIPT_VERSION = "0.1.2";
+
+    const state = {
+        compressionInProgress: false,
+        compressionRequestPending: false,
+        compressionResponsePending: false,
+        lastPromptHistory: null,
+        lastPromptHistoryUpdatedAt: 0,
+        lastResolvedPromptThread: null,
+        lastResolvedPromptRoot: null,
+        lastResolvedPromptId: null,
+        lastResolvedPromptUpdatedAt: 0,
+        googleApiKey: "",
+        googleAuthUser: "0",
+        googleApiKeyUpdatedAt: 0,
+        pendingBranchTurns: null,
+        historyCapturePending: false,
+        branchInProgress: false,
+        activeCompressionPrompt: "",
+        activeCompressionSnippet: Config.PROMPTS.SNIPPET
+    };
+
+    const log = {
+        ui: (...args) => console.log(Config.TAGS.UI, ...args),
+        net: (...args) => console.log(Config.TAGS.NET, ...args)
+    };
+
+    const STORAGE_KEY = "__aistudio_compressor_settings_v1";
+    const DEFAULT_SETTINGS = {
+        compressPrompt: Config.PROMPTS.FULL,
+        snapshotRegex: "",
+        keepRounds: 8,
+        autoInject: false
+    };
+    let userSettings = loadUserSettings();
+    refreshActivePromptFromSettings();
+
+    function loadUserSettings() {
+        try {
+            const raw = localStorage.getItem(STORAGE_KEY);
+            if (!raw) {
+                return { ...DEFAULT_SETTINGS };
+            }
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object") {
+                return { ...DEFAULT_SETTINGS, ...parsed };
+            }
+            return { ...DEFAULT_SETTINGS };
+        } catch (err) {
+            console.warn(Config.TAGS.NET, "Failed to load compressor settings", err);
+            return { ...DEFAULT_SETTINGS };
+        }
+    }
+
+    function persistUserSettings() {
+        try {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(userSettings));
+        } catch (err) {
+            console.warn(Config.TAGS.NET, "Failed to store compressor settings", err);
+        }
+    }
+
+    function updateUserSettings(partial) {
+        userSettings = { ...userSettings, ...partial };
+        persistUserSettings();
+    }
+
+    function getCompressPrompt() {
+        return userSettings?.compressPrompt || Config.PROMPTS.FULL;
+    }
+
+    function getSnapshotRegex() {
+        return (userSettings?.snapshotRegex || "").trim();
+    }
+
+    function deriveSnippet(prompt) {
+        const text = (prompt || "").trim();
+        if (!text) {
+            return Config.PROMPTS.SNIPPET;
+        }
+        return text.slice(0, 120);
+    }
+
+    function refreshActivePromptFromSettings() {
+        state.activeCompressionPrompt = getCompressPrompt();
+        state.activeCompressionSnippet = deriveSnippet(state.activeCompressionPrompt);
+    }
+
+    function installTopLevelHandlers() {
+        if (!env.topWindow.__aistudio_compressor_handlers_installed) {
+            env.topWindow.addEventListener(Config.EVENTS.REQUEST, Compression.handleRequestEvent);
+            env.topWindow.addEventListener(Config.EVENTS.RESPONSE, Compression.handleResponseEvent);
+            env.topWindow.__aistudio_compressor_handlers_installed = true;
+        }
+
+        if (!env.topWindow.__aistudio_compressor_request_logger) {
+            env.topWindow.addEventListener(Config.EVENTS.REQUEST, event => {
+                const detail = event?.detail || {};
+                log.net("GenerateContent request observed", { url: detail.url });
+            });
+            env.topWindow.__aistudio_compressor_request_logger = true;
+        }
+    }
+
+    function emitNetworkEvent(name, detail) {
+        try {
+            env.topWindow.dispatchEvent(new CustomEvent(name, { detail }));
+        } catch (err) {
+            log.net("Failed to dispatch network event", name, err);
+        }
+    }
+
+    // ---------------------------
+    // Network monitor module
+    // ---------------------------
+
+    const NetworkMonitor = {
+        init() {
+            const label = env.isAppContext ? "app-window" : "top-window";
+            hookContext(window, label);
+
+            window.addEventListener("DOMContentLoaded", () => {
+                hookContext(window, `${label} DOMContentLoaded`);
+                hookChildFrames("DOMContentLoaded");
+            });
+
+            window.addEventListener("load", () => {
+                hookContext(window, `${label} load`);
+                hookChildFrames("load");
+            });
+
+            setInterval(() => hookChildFrames("poll"), 2000);
+        }
+    };
+
+    function hookChildFrames(reason) {
+        if (!document?.querySelectorAll) return;
+        for (const frame of document.querySelectorAll("iframe")) {
+            const ctx = frame.contentWindow;
+            if (!ctx || !canAccessWindow(ctx)) continue;
+            try {
+                hookContext(ctx, `iframe ${frame.src || frame.name || "unnamed"} via ${reason}`);
+            } catch (err) {
+                log.net("cannot hook iframe:", err);
+            }
+        }
+    }
+
+    function hookContext(ctx, label) {
+        if (!canAccessWindow(ctx)) {
+            log.net(`skip hooking for ${label}: cross-origin window`);
+            return;
+        }
+        installFetchHook(ctx, label);
+        installXHRHook(ctx, label);
+    }
+
+    function canAccessWindow(ctx) {
+        try {
+            return ctx && ctx.location && ctx.location.origin === location.origin;
+        } catch {
+            return false;
+        }
+    }
+
+    function installFetchHook(ctx, label) {
+        if (!ctx || typeof ctx.fetch !== "function") {
+            log.net(`skip hooking for ${label}: fetch not available`);
+            return;
+        }
+        if (ctx.__aistudio_compressor_fetch_hooked) return;
+
+        const originalFetch = ctx.fetch.bind(ctx);
+
+        ctx.fetch = async function interceptFetch(input, init = {}) {
+            const url = typeof input === "string" ? input : input?.url;
+            const shouldLogGenerate = isTargetRequest(url, "GENERATE");
+            const shouldCaptureResolve = isTargetRequest(url, "RESOLVE");
+            if (!shouldLogGenerate && !shouldCaptureResolve) {
+                return originalFetch(input, init);
+            }
+            let request;
+            try {
+                request = new Request(input, init);
+            } catch {
+                // Never break the host application because our inspector cannot clone a request.
+                return originalFetch(input, init);
+            }
+            if (shouldLogGenerate) await logRequestPayload(request);
+            const response = await originalFetch(input, init);
+
+            if (shouldLogGenerate || shouldCaptureResolve) {
+                void logResponsePayload(request.url, response.clone());
+            }
+
+            return response;
+        };
+
+        ctx.__aistudio_compressor_fetch_hooked = true;
+        log.net(`fetch hooked in ${label}`);
+
+        if (ctx !== unsafeWindow && typeof unsafeWindow.fetch === "function" && !unsafeWindow.__aistudio_compressor_fetch_hooked) {
+            unsafeWindow.fetch = ctx.fetch;
+            unsafeWindow.__aistudio_compressor_fetch_hooked = true;
+            log.net("fetch mirrored to unsafeWindow");
+        }
+    }
+
+    async function logRequestPayload(request) {
+        try {
+            const clonedRequest = request.clone();
+            const bodyText = await clonedRequest.text();
+            const headers = Object.fromEntries(clonedRequest.headers.entries());
+            rememberGoogleApiKey(headers, clonedRequest.url);
+
+            // Sensitive headers are never logged.
+            try {
+
+            } catch {
+
+            }
+
+            emitNetworkEvent(Config.EVENTS.REQUEST, {
+                url: clonedRequest.url,
+                headers,
+                bodyText
+            });
+        } catch (err) {
+            console.warn(Config.TAGS.NET, "Failed to read request body:", err);
+        }
+    }
+
+    async function logResponsePayload(url, response) {
+        try {
+            const bodyText = await response.text();
+            const parsed = safeParseJSON(bodyText);
+            maybeCaptureResolvedPromptThread(url, bodyText, parsed);
+
+
+            if (isTargetRequest(url, "RESOLVE")) {
+
+            } else if (parsed) {
+
+            } else {
+
+            }
+
+            emitNetworkEvent(Config.EVENTS.RESPONSE, {
+                url,
+                status: response.status,
+                statusText: response.statusText,
+                bodyText
+            });
+        } catch (err) {
+            console.warn(Config.TAGS.NET, "Failed to read response body:", err);
+        }
+    }
+
+    function installXHRHook(ctx, label) {
+        if (!ctx || typeof ctx.XMLHttpRequest !== "function") {
+            log.net(`skip hooking XHR for ${label}: XMLHttpRequest not available`);
+            return;
+        }
+        if (ctx.__aistudio_compressor_xhr_hooked) return;
+
+        const OriginalXHR = ctx.XMLHttpRequest;
+
+        function WrappedXHR() {
+            const realXHR = new OriginalXHR();
+            let monitored = false;
+            let requestUrl = null;
+            const requestHeaders = {};
+
+            const originalOpen = realXHR.open;
+            realXHR.open = function (...args) {
+                const [, url] = args;
+                requestUrl = url || null;
+                monitored = Boolean(url) && (isTargetRequest(url, "GENERATE") || isTargetRequest(url, "RESOLVE"));
+                if (monitored) {
+                    log.net("Monitored XHR detected in", label, url);
+                }
+                return originalOpen.apply(this, args);
+            };
+
+            const originalSetRequestHeader = realXHR.setRequestHeader;
+            realXHR.setRequestHeader = function (name, value) {
+                if (typeof name === "string") {
+                    requestHeaders[name] = value;
+                    rememberGoogleApiKey(requestHeaders, resolveUrl(requestUrl));
+                }
+                return originalSetRequestHeader.apply(this, arguments);
+            };
+
+            const originalSend = realXHR.send;
+            realXHR.send = function (body) {
+                if (monitored) {
+                    const absoluteUrl = resolveUrl(requestUrl);
+                    const bodyText = bodyToText(body);
+                    const headers = Object.keys(requestHeaders).length ? { ...requestHeaders } : null;
+                    rememberGoogleApiKey(headers, absoluteUrl);
+
+
+                    if (bodyText) {
+                        try {
+
+                        } catch {
+
+                        }
+                    } else {
+
+                    }
+
+                    emitNetworkEvent(Config.EVENTS.REQUEST, {
+                        url: absoluteUrl,
+                        headers,
+                    });
+                }
+                return originalSend.apply(this, arguments);
+            };
+
+            realXHR.addEventListener("readystatechange", function () {
+                if (realXHR.readyState !== 4 || !monitored) {
+                    return;
+                }
+                const responseUrl = realXHR.responseURL || resolveUrl(requestUrl);
+                const parsed = safeParseJSON(realXHR.responseText);
+                maybeCaptureResolvedPromptThread(responseUrl, realXHR.responseText, parsed);
+
+
+                if (isTargetRequest(responseUrl, "RESOLVE")) {
+
+                } else if (parsed) {
+
+                } else {
+
+                }
+
+                emitNetworkEvent(Config.EVENTS.RESPONSE, {
+                    url: responseUrl,
+                    status: realXHR.status,
+                    statusText: realXHR.statusText,
+                    bodyText: realXHR.responseText
+                });
+            });
+
+            return realXHR;
+        }
+
+        ctx.XMLHttpRequest = WrappedXHR;
+        ctx.__aistudio_compressor_xhr_hooked = true;
+        log.net(`XMLHttpRequest hooked in ${label}`);
+
+        if (ctx !== unsafeWindow && typeof unsafeWindow.XMLHttpRequest === "function" && !unsafeWindow.__aistudio_compressor_xhr_hooked) {
+            unsafeWindow.XMLHttpRequest = WrappedXHR;
+            unsafeWindow.__aistudio_compressor_xhr_hooked = true;
+            log.net("XMLHttpRequest mirrored to unsafeWindow");
+        }
+    }
+
+    function resolveUrl(url) {
+        if (!url) return "";
+        try {
+            return new URL(url, location.origin).toString();
+        } catch {
+            return url;
+        }
+    }
+
+    function bodyToText(body) {
+        if (!body) return null;
+        if (typeof body === "string") return body;
+        if (body instanceof ArrayBuffer) {
+            try {
+                return new TextDecoder().decode(body);
+            } catch {
+                return null;
+            }
+        }
+        if (ArrayBuffer.isView(body)) {
+            try {
+                return new TextDecoder().decode(body.buffer);
+            } catch {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    function isTargetRequest(url, key = "GENERATE") {
+        try {
+            const parsed = new URL(url, location.origin);
+            return parsed.pathname.endsWith(Config.TARGETS[key]);
+        } catch {
+            return false;
+        }
+    }
+
+    // ---------------------------
+    // Compression lifecycle
+    // ---------------------------
+
+    const Compression = {
+        run() {
+            if (state.compressionInProgress) {
+                log.ui("Compression already running");
+                return;
+            }
+            const textarea = UI.findInput();
+            if (!textarea) {
+                log.ui("Input box not found, cannot run compression");
+                return;
+            }
+            const prompt = getCompressPrompt() + "\n\nOnly summarize the completed dialogue BEFORE the last " + (Number(userSettings.keepRounds) || 8) + " full user/model exchanges. Do not summarize those last exchanges; they will be preserved verbatim.";
+            Compression.prepareRunContext();
+            state.activeCompressionPrompt = prompt;
+            state.activeCompressionSnippet = deriveSnippet(prompt);
+            state.compressionInProgress = true;
+            state.compressionRequestPending = true;
+            state.compressionResponsePending = false;
+            UI.setButtonLoading(true);
+            setTextareaValue(textarea, prompt);
+            textarea.focus();
+            textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
+            textarea.dispatchEvent(new Event("change", { bubbles: true }));
+            enableSendButton();
+            sendCompressionRequest(textarea).then(sent => {
+                if (sent) {
+                    log.ui("Compression request sent");
+                    return;
+                }
+                log.ui("Failed to trigger compression request; aborting this run");
+                Compression.finalizeRun();
+            });
+        },
+
+        prepareRunContext() {
+            state.lastPromptHistory = null;
+            state.lastPromptHistoryUpdatedAt = 0;
+            state.pendingBranchTurns = null;
+            state.historyCapturePending = true;
+            state.compressionRequestPending = false;
+            state.compressionResponsePending = false;
+        },
+
+        handleRequestEvent(event) {
+            const detail = event?.detail;
+            if (!detail?.bodyText) return;
+            const isCompressionBody = Compression.isCompressionPrompt(detail.bodyText);
+
+            if (!state.historyCapturePending && !state.compressionInProgress) {
+                log.net("GenerateContent request observed outside compression run");
+                return;
+            }
+
+            if (isCompressionBody && state.historyCapturePending) {
+                state.historyCapturePending = false;
+                const payload = safeParseJSON(detail.bodyText);
+                if (payload) {
+                    state.lastPromptHistory = payload;
+                    state.lastPromptHistoryUpdatedAt = Date.now();
+                    log.net("Stored prompt history snapshot for compression", {
+                        ...describePromptHistory(payload)
+                    });
+                } else {
+                    log.net("Compression request detected but prompt history parse failed");
+                }
+            } else if (state.historyCapturePending && !isCompressionBody) {
+                log.net("Compression history capture pending, skipping non-compression request");
+            }
+
+            if (isCompressionBody && state.compressionInProgress) {
+                state.compressionRequestPending = false;
+                state.compressionResponsePending = true;
+                log.net("Compression GenerateContent request captured");
+            } else {
+                log.net("Regular GenerateContent request observed");
+            }
+        },
+
+        handleResponseEvent(event) {
+            if (!state.compressionInProgress || !state.compressionResponsePending) {
+                log.net("GenerateContent response event ignored", {
+                    compressionInProgress: state.compressionInProgress,
+                    compressionResponsePending: state.compressionResponsePending
+                });
+                return;
+            }
+            const detail = event?.detail;
+            if (!detail?.bodyText) {
+                log.net("GenerateContent response missing bodyText");
+                Compression.finalizeRun();
+                return;
+            }
+            const data = safeParseJSON(detail.bodyText);
+            if (!data) {
+                log.net("Failed to parse compression response");
+                Compression.finalizeRun();
+                return;
+            }
+            const snapshot = extractStateSnapshot(data);
+            if (!snapshot) {
+                log.net("No snapshot found in compression response");
+                Compression.finalizeRun();
+                return;
+            }
+            log.net("Compression snapshot extracted, rebuilding conversation");
+            rebuildConversation(snapshot).catch(err => {
+                log.net("Failed to rebuild conversation", err.message);
+                alert("素酒压缩失败： " + err.message);
+            });
+            Compression.finalizeRun();
+        },
+
+        finalizeRun() {
+            state.compressionRequestPending = false;
+            state.compressionResponsePending = false;
+            state.compressionInProgress = false;
+            state.historyCapturePending = false;
+            UI.setButtonLoading(false);
+        },
+
+        isCompressionPrompt(bodyText) {
+            if (typeof bodyText !== "string") {
+                return false;
+            }
+            const snippet = state.activeCompressionSnippet || deriveSnippet(getCompressPrompt());
+            if (!snippet) {
+                return bodyText.includes(Config.PROMPTS.SNIPPET);
+            }
+            const variants = buildSnippetVariants(snippet);
+            for (const candidate of variants) {
+                if (candidate && bodyText.includes(candidate)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+    };
+
+    function enableSendButton() {
+        const sendButton = UI.findSendButton();
+        if (sendButton) {
+            sendButton.removeAttribute("disabled");
+            sendButton.removeAttribute("aria-disabled");
+            sendButton.disabled = false;
+            sendButton.classList.remove("disabled");
+        }
+    }
+
+    function delay(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function nextFrame() {
+        return new Promise(resolve => requestAnimationFrame(() => resolve()));
+    }
+
+    async function waitForCompressionRequestCapture(timeoutMs = 1800) {
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+            if (!state.compressionInProgress) {
+                return false;
+            }
+            if (state.compressionResponsePending || !state.compressionRequestPending) {
+                return true;
+            }
+            await delay(50);
+        }
+        return state.compressionResponsePending || !state.compressionRequestPending;
+    }
+
+    function dispatchPointerClickSequence(el) {
+        if (!el || typeof el.dispatchEvent !== "function") return false;
+        const doc = el.ownerDocument || document;
+        const view = doc.defaultView || window;
+        const rect = typeof el.getBoundingClientRect === "function"
+            ? el.getBoundingClientRect()
+            : { left: 0, top: 0, width: 0, height: 0 };
+        const centerX = rect.left + (rect.width || 0) / 2;
+        const centerY = rect.top + (rect.height || 0) / 2;
+        const eventSteps = [
+            { type: "pointerdown", pointer: true, buttons: 1, detail: 0 },
+            { type: "mousedown", buttons: 1, detail: 1 },
+            { type: "pointerup", pointer: true, buttons: 0, detail: 0 },
+            { type: "mouseup", buttons: 0, detail: 1 },
+            { type: "click", buttons: 0, detail: 1 }
+        ];
+
+        try {
+            if (typeof el.focus === "function") {
+                el.focus({ preventScroll: true });
+            }
+        } catch {
+            if (typeof el.focus === "function") {
+                el.focus();
+            }
+        }
+
+        for (const step of eventSteps) {
+            const init = {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                view,
+                clientX: centerX,
+                clientY: centerY,
+                button: 0,
+                buttons: step.buttons,
+                detail: step.detail
+            };
+            let event;
+            if (step.pointer && typeof view.PointerEvent === "function") {
+                event = new view.PointerEvent(step.type, {
+                    ...init,
+                    pointerId: 1,
+                    pointerType: "mouse",
+                    isPrimary: true
+                });
+            } else {
+                event = new view.MouseEvent(step.type, init);
+            }
+            el.dispatchEvent(event);
+        }
+        return true;
+    }
+
+    function triggerKeyboardSend(textarea) {
+        const doc = textarea.ownerDocument || document;
+        const view = doc.defaultView || window;
+        const keyOptions = {
+            key: "Enter",
+            code: "Enter",
+            keyCode: 13,
+            bubbles: true,
+            cancelable: true,
+            view
+        };
+        if (env.isMac) {
+            keyOptions.metaKey = true;
+        } else {
+            keyOptions.ctrlKey = true;
+        }
+        textarea.dispatchEvent(new view.KeyboardEvent("keydown", keyOptions));
+        textarea.dispatchEvent(new view.KeyboardEvent("keyup", keyOptions));
+        log.ui("Prompt send attempted via keyboard shortcut fallback");
+    }
+
+    async function sendPromptWithRetries(textarea, options = {}) {
+        const clickPlan = [
+            { label: "immediate", delayMs: 0, useFrame: false },
+            { label: "next-frame", delayMs: 0, useFrame: true },
+            { label: "delay-80ms", delayMs: 80, useFrame: false },
+            { label: "delay-220ms", delayMs: 220, useFrame: false }
+        ];
+        const verifyFn = typeof options.verifyFn === "function" ? options.verifyFn : null;
+        const labelPrefix = options.labelPrefix || "Prompt send";
+        const abortCheck = typeof options.abortCheck === "function" ? options.abortCheck : null;
+
+        for (const step of clickPlan) {
+            if (step.useFrame) {
+                await nextFrame();
+            } else if (step.delayMs > 0) {
+                await delay(step.delayMs);
+            }
+            if (abortCheck && abortCheck()) {
+                return false;
+            }
+
+            enableSendButton();
+            const sendButton = UI.findSendButton();
+            if (!sendButton) {
+                log.ui("Send button missing before click attempt", `${labelPrefix} ${step.label}`);
+                continue;
+            }
+
+            dispatchPointerClickSequence(sendButton);
+            log.ui(`${labelPrefix} click attempted`, step.label);
+            if (!verifyFn || await verifyFn()) {
+                log.ui(`${labelPrefix} confirmed`, step.label);
+                return true;
+            }
+        }
+
+        triggerKeyboardSend(textarea);
+        if (!verifyFn || await verifyFn()) {
+            log.ui(`${labelPrefix} confirmed via keyboard fallback`);
+            return true;
+        }
+        return false;
+    }
+
+    async function sendCompressionRequest(textarea) {
+        return sendPromptWithRetries(textarea, {
+            labelPrefix: "Compression request",
+            verifyFn: () => waitForCompressionRequestCapture(),
+            abortCheck: () => !state.compressionInProgress
+        });
+    }
+
+    function setTextareaValue(textarea, value) {
+        if ("value" in textarea) {
+            const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+            const setter = descriptor?.set;
+            if (setter) {
+                setter.call(textarea, value);
+                return;
+            }
+            textarea.value = value;
+        } else {
+            textarea.textContent = value;
+        }
+    }
+
+    // ---------------------------
+    // Conversation rebuild & branch creation
+    // ---------------------------
+
+const RoundSplitter = Object.freeze({
+    partition(turns, keepRounds = 8) {
+      if (!Array.isArray(turns) || !Number.isSafeInteger(keepRounds) || keepRounds < 1) {
+        throw new Error("Invalid conversation history or keepRounds");
+      }
+      const rounds = [];
+      let current = null;
+      function closeRound() {
+        if (!current) return;
+        if (!current.some(turn => turn.role === "model")) {
+          throw new Error("Conversation contains an incomplete response");
+        }
+        rounds.push(current);
+      }
+      for (const turn of turns) {
+        if (!turn || typeof turn.role !== "string") {
+          throw new Error("Conversation contains an invalid turn");
+        }
+        if (turn.role === "user") {
+          closeRound();
+          current = [turn];
+        } else if (!current) {
+          throw new Error("Conversation starts with a non-user turn");
+        } else {
+          current.push(turn);
+        }
+      }
+      closeRound();
+      if (rounds.length <= keepRounds) {
+        throw new Error("Not enough completed rounds to compress");
+      }
+      const older = rounds.slice(0, -keepRounds).flat();
+      const recent = rounds.slice(-keepRounds).flat();
+      return { older, recent, olderRounds: rounds.length - keepRounds, recentRounds: keepRounds, totalRounds: rounds.length };
+    }
+  });
+
+    async function rebuildConversation(snapshotText) {
+        log.net("rebuildConversation invoked", {
+            hasHistory: Boolean(state.lastPromptHistory),
+            hasResolvedThread: Boolean(state.lastResolvedPromptThread),
+            snapshotLength: snapshotText?.length || 0
+        });
+
+        const turns = await getRebuildSourceTurns();
+        if (!turns.length) {
+            log.net("No prompt history available to rebuild conversation");
+            return;
+        }
+        const sanitizedTurns = stripCompressionArtifacts(turns);
+        if (!sanitizedTurns.length) {
+            log.net("History only contained compression prompt turn, abort rebuild");
+            return;
+        }
+        // Partition at user/model exchange boundaries. Tool events remain in their parent exchange.
+        const split = RoundSplitter.partition(sanitizedTurns, Number(userSettings.keepRounds) || 8);
+        const newTurns = [
+            createTurn("user", snapshotText),
+            createTurn("model", "已记录先前剧情摘要。"),
+            ...split.recent
+        ];
+        log.net("Compaction rounds", {
+            total: split.totalRounds,
+            compressed: split.olderRounds,
+            kept: split.recentRounds
+        });
+        state.pendingBranchTurns = newTurns;
+        log.net("Prepared compressed branch turns", newTurns.length, "turns");
+        Branching.branchFromHere().catch(err => {
+            log.net("Compressed branch creation failed", err);
+        });
+    }
+
+    function extractStateSnapshot(events) {
+        const fullText = collectModelOutputText(events);
+        if (!fullText) {
+            log.net("collectModelOutputText returned empty string");
+            return null;
+        }
+        const pattern = getSnapshotRegex();
+        if (pattern) {
+            const matched = matchByRegex(fullText, pattern);
+            if (matched) {
+                log.net("state_snapshot extracted via custom regex");
+                return matched;
+            }
+            log.net("Custom snapshot regex did not match content");
+        }
+        log.net("No custom regex provided, returning raw model output as snapshot");
+        return fullText.trim();
+    }
+
+    function collectModelOutputText(events) {
+        const eventList = normalizeEvents(events);
+        if (!eventList.length) {
+            return "";
+        }
+        let buffer = "";
+        for (const event of eventList) {
+            const candidates = Array.isArray(event?.[0]) ? event[0] : null;
+            if (!candidates) continue;
+            for (const candidate of candidates) {
+                if (!Array.isArray(candidate)) continue;
+                const contentBlock = Array.isArray(candidate[0]) ? candidate[0] : null;
+                if (!contentBlock) continue;
+                const parts = Array.isArray(contentBlock[0]) ? contentBlock[0] : null;
+                if (!parts) continue;
+                for (const part of parts) {
+                    if (!Array.isArray(part)) continue;
+                    const text = part[1];
+                    const isThought = Boolean(part[12]);
+                    if (typeof text === "string" && !isThought) {
+                        buffer += text;
+                    }
+                }
+            }
+        }
+        log.net("collectModelOutputText aggregated", {
+            eventCount: eventList.length,
+            textLength: buffer.length
+        });
+        return buffer;
+    }
+
+    function normalizeEvents(payload) {
+        if (!Array.isArray(payload)) {
+            return [];
+        }
+        if (payload.length === 1 && Array.isArray(payload[0])) {
+            const inner = payload[0];
+            if (inner.every(item => Array.isArray(item))) {
+                return inner;
+            }
+        }
+        return payload;
+    }
+
+    function extractTurns(payload) {
+        try {
+            if (!Array.isArray(payload)) {
+                log.net("Prompt history payload is not an array");
+                return [];
+            }
+            const rawTurns = payload[1];
+            if (!Array.isArray(rawTurns)) {
+                log.net("Prompt history array missing turn entries");
+                return [];
+            }
+            const turns = [];
+            for (const entry of rawTurns) {
+                if (!Array.isArray(entry) || entry.length < 2) continue;
+                const role = entry[1];
+                const text = extractTurnText(entry[0], role);
+                if (typeof role === "string" && text) {
+                    turns.push({
+                        role,
+                        text,
+                        entry: deepClone(entry)
+                    });
+                }
+            }
+            log.net("Extracted", turns.length, "turns from prompt history");
+            return turns;
+        } catch (err) {
+            log.net("Failed to extract turns", err);
+            return [];
+        }
+    }
+
+    function assertSupportedEntries(entries, turns) {
+        const messages = entries.filter(entry => Array.isArray(entry) && typeof entry[8] === "string");
+        if (messages.length !== turns.length ||
+            turns.some(turn => turn.role !== "user" && turn.role !== "model")) {
+            throw new Error("此会话包含尚未支持的工具、多模态或空内容消息，已中止压缩以避免丢失内容");
+        }
+    }
+
+    async function getRebuildSourceTurns() {
+        const currentPromptId = Branching.getCurrentPromptId();
+        if (state.lastResolvedPromptThread?.length) {
+            if (!currentPromptId || !state.lastResolvedPromptId || state.lastResolvedPromptId === currentPromptId) {
+                const resolvedTurns = extractResolvedTurns(state.lastResolvedPromptThread);
+                assertSupportedEntries(state.lastResolvedPromptThread, resolvedTurns);
+                if (resolvedTurns.length) {
+                    log.net("Rebuilding conversation from resolved prompt thread", {
+                        promptId: state.lastResolvedPromptId,
+                        turnCount: resolvedTurns.length,
+                        updatedAt: state.lastResolvedPromptUpdatedAt
+                    });
+                    return resolvedTurns;
+                }
+            } else {
+                log.net("Resolved prompt thread does not match current prompt, skipping", {
+                    currentPromptId,
+                    resolvedPromptId: state.lastResolvedPromptId
+                });
+            }
+        }
+
+        const fetchedCapture = await ensureResolvedPromptThread(currentPromptId);
+        if (fetchedCapture?.entries?.length) {
+            const fetchedTurns = extractResolvedTurns(fetchedCapture.entries);
+            assertSupportedEntries(fetchedCapture.entries, fetchedTurns);
+            if (fetchedTurns.length) {
+                log.net("Rebuilding conversation from on-demand resolved prompt thread", {
+                    promptId: fetchedCapture.promptId,
+                    turnCount: fetchedTurns.length
+                });
+                return fetchedTurns;
+            }
+        }
+
+        if (!state.lastPromptHistory) {
+            return [];
+        }
+
+        log.net("Rebuilding conversation using stored GenerateContent history", {
+            summary: describePromptHistory(state.lastPromptHistory)
+        });
+        const fallback = extractTurns(state.lastPromptHistory);
+        if (fallback.some(turn => turn.role !== "user" && turn.role !== "model")) {
+            throw new Error("GenerateContent 历史包含未支持的消息角色");
+        }
+        return fallback;
+    }
+
+    async function ensureResolvedPromptThread(promptId) {
+        if (!promptId) {
+            return null;
+        }
+        if (state.lastResolvedPromptThread?.length && (!state.lastResolvedPromptId || state.lastResolvedPromptId === promptId)) {
+            return {
+                promptId: state.lastResolvedPromptId || promptId,
+                title: getResolvedPromptTitle(state.lastResolvedPromptRoot),
+                root: state.lastResolvedPromptRoot ? deepClone(state.lastResolvedPromptRoot) : null,
+                entries: state.lastResolvedPromptThread.map(entry => deepClone(entry))
+            };
+        }
+        return fetchResolvedPromptThread(promptId);
+    }
+
+    async function fetchResolvedPromptThread(promptId) {
+        const authHeader = await buildSapisidAuthHeader();
+        if (!authHeader) {
+            log.net("Unable to build SAPISIDHASH auth header for ResolveDriveResource fetch");
+            return null;
+        }
+        const endpoint = `${Config.NETWORK.RPC_ORIGIN}${Config.TARGETS.RESOLVE}`;
+        const apiKey = getGoogleApiKey();
+        try {
+            const response = await fetch(endpoint, {
+                method: "POST",
+                credentials: "include",
+                headers: {
+                    "content-type": "application/json+protobuf",
+                    "x-goog-api-key": apiKey,
+                    "x-goog-authuser": state.googleAuthUser || "0",
+                    authorization: authHeader
+                },
+                body: JSON.stringify([promptId])
+            });
+            const bodyText = await response.text();
+            if (!response.ok) {
+                log.net("ResolveDriveResource fetch failed", {
+                    promptId,
+                    status: response.status,
+                    bodyText
+                });
+                return null;
+            }
+            const capture = extractResolvedPromptThread(safeParseJSON(bodyText));
+            if (!capture?.entries?.length) {
+                log.net("ResolveDriveResource fetch returned no reusable thread", { promptId });
+                return null;
+            }
+            rememberResolvedPromptCapture(capture, "Fetched resolved prompt thread on demand");
+            return capture;
+        } catch (err) {
+            log.net("ResolveDriveResource fetch threw", err);
+            return null;
+        }
+    }
+
+    function getCookieValue(name) {
+        const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const match = document.cookie.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`));
+        return match ? decodeURIComponent(match[1]) : "";
+    }
+
+    function getHeaderValue(headers, name) {
+        if (!headers || typeof headers !== "object" || !name) {
+            return "";
+        }
+        const normalizedName = String(name).toLowerCase();
+        for (const [key, value] of Object.entries(headers)) {
+            if (String(key).toLowerCase() === normalizedName && typeof value === "string") {
+                return value;
+            }
+        }
+        return "";
+    }
+
+    function rememberGoogleApiKey(headers, sourceUrl = "") {
+        const candidate = getHeaderValue(headers, "x-goog-api-key").trim();
+        if (!candidate) {
+            return "";
+        }
+        if (candidate !== state.googleApiKey) {
+            log.net("Captured Google API key from native request headers", {
+                sourceUrl,
+                length: candidate.length
+            });
+        }
+        state.googleApiKey = candidate;
+        const authUser = getHeaderValue(headers, "x-goog-authuser");
+        if (/^\d+$/.test(authUser)) state.googleAuthUser = authUser;
+        state.googleApiKeyUpdatedAt = Date.now();
+        return candidate;
+    }
+
+    function getGoogleApiKey() {
+        const apiKey = (state.googleApiKey || "").trim();
+        if (!apiKey) {
+            throw new Error("Google API key has not been captured yet; trigger one native AI Studio request first");
+        }
+        return apiKey;
+    }
+
+    async function buildSapisidAuthHeader() {
+        const sapisid = getCookieValue("SAPISID") || getCookieValue("__Secure-3PAPISID") || getCookieValue("APISID");
+        if (!sapisid || !globalThis.crypto?.subtle) {
+            return null;
+        }
+        const timestamp = Math.floor(Date.now() / 1000);
+        const origin = location.origin;
+        const encoder = new TextEncoder();
+        const source = `${timestamp} ${sapisid} ${origin}`;
+        const digest = await globalThis.crypto.subtle.digest("SHA-1", encoder.encode(source));
+        const hash = Array.from(new Uint8Array(digest))
+            .map(byte => byte.toString(16).padStart(2, "0"))
+            .join("");
+        return `SAPISIDHASH ${timestamp}_${hash} SAPISID1PHASH ${timestamp}_${hash} SAPISID3PHASH ${timestamp}_${hash}`;
+    }
+
+    function extractResolvedTurns(entries) {
+        if (!Array.isArray(entries)) {
+            return [];
+        }
+        const turns = [];
+        for (const entry of entries) {
+            if (!Array.isArray(entry) || entry.length < 9) continue;
+            const role = entry[8];
+            const text = extractResolvedEntryText(entry);
+            if (typeof role === "string" && text) {
+                turns.push({
+                    role,
+                    text,
+                    entry: deepClone(entry)
+                });
+            }
+        }
+        log.net("Extracted", turns.length, "turns from resolved prompt thread");
+        return turns;
+    }
+
+    function extractResolvedEntryText(entry) {
+        if (!Array.isArray(entry)) return "";
+        if (typeof entry[0] === "string" && entry[0]) {
+            return entry[0];
+        }
+        const parts = Array.isArray(entry[29]) ? entry[29] : null;
+        if (!parts) {
+            return "";
+        }
+        let buffer = "";
+        for (const part of parts) {
+            if (!Array.isArray(part)) continue;
+            const chunk = part[1];
+            if (typeof chunk === "string") {
+                buffer += chunk;
+            }
+        }
+        return buffer;
+    }
+
+    function rememberResolvedPromptCapture(capture, label = "Captured resolved prompt thread") {
+        if (!capture?.entries?.length) {
+            return;
+        }
+        state.lastResolvedPromptThread = capture.entries.map(entry => deepClone(entry));
+        state.lastResolvedPromptRoot = Array.isArray(capture.root) ? deepClone(capture.root) : null;
+        state.lastResolvedPromptId = capture.promptId;
+        state.lastResolvedPromptUpdatedAt = Date.now();
+        log.net(label, describeResolvedPromptCapture(capture));
+    }
+
+    function maybeCaptureResolvedPromptThread(url, bodyText, parsed = null) {
+        if (!isTargetRequest(url, "RESOLVE") || typeof bodyText !== "string") {
+            return;
+        }
+        const payload = parsed || safeParseJSON(bodyText);
+        const capture = extractResolvedPromptThread(payload);
+        if (!capture?.entries?.length) {
+            return;
+        }
+        rememberResolvedPromptCapture(capture);
+    }
+
+    function collectPromptIds(value, matches = [], seen = new Set()) {
+        if (value == null) {
+            return matches;
+        }
+        if (typeof value === "string") {
+            const match = value.match(/(?:^|\b)prompts\/([^/?#\s"']+)/);
+            if (match && !matches.includes(match[1])) {
+                matches.push(match[1]);
+            }
+            return matches;
+        }
+        if (typeof value !== "object") {
+            return matches;
+        }
+        if (seen.has(value)) {
+            return matches;
+        }
+        seen.add(value);
+        if (Array.isArray(value)) {
+            for (const item of value) {
+                collectPromptIds(item, matches, seen);
+            }
+            return matches;
+        }
+        for (const nested of Object.values(value)) {
+            collectPromptIds(nested, matches, seen);
+        }
+        return matches;
+    }
+
+    function extractResolvedPromptThread(payload) {
+        if (!Array.isArray(payload) || !Array.isArray(payload[0])) {
+            return null;
+        }
+        const root = payload[0];
+        if (!Array.isArray(root) || root.length < 14) {
+            return null;
+        }
+        const threads = Array.isArray(root[13]) ? root[13] : null;
+        const primaryThread = Array.isArray(threads?.[0]) ? threads[0] : null;
+        if (!primaryThread?.length) {
+            return null;
+        }
+        return {
+            promptId: extractMutationPromptId(root),
+            title: getResolvedPromptTitle(root),
+            root: deepClone(root),
+            entries: primaryThread.filter(Array.isArray).map(entry => deepClone(entry))
+        };
+    }
+
+    function describeResolvedPromptCapture(capture) {
+        if (!capture) {
+            return { valid: false };
+        }
+        return {
+            valid: true,
+            promptId: capture.promptId,
+            title: capture.title || "",
+            turnCount: capture.entries?.length || 0,
+            firstRole: capture.entries?.[0]?.[8]
+        };
+    }
+
+
+    function getResolvedPromptTitle(root) {
+        const candidate = Array.isArray(root?.[4]) ? root[4][0] : null;
+        if (typeof candidate === "string" && candidate.trim()) {
+            return candidate.trim();
+        }
+        const heading = document.querySelector("main h1")?.textContent || document.querySelector("h1")?.textContent || "";
+        return heading.trim();
+    }
+
+    function buildDirectBranchCreateBody(capture, turnRecords = null) {
+        const sourceRoot = Array.isArray(capture?.root) ? capture.root : state.lastResolvedPromptRoot;
+        if (!Array.isArray(sourceRoot) || sourceRoot.length < 14) {
+            return null;
+        }
+        const modelConfig = Array.isArray(sourceRoot[3]) ? deepClone(sourceRoot[3]) : null;
+        if (!modelConfig) {
+            return null;
+        }
+        const threads = Array.isArray(sourceRoot[13]) ? sourceRoot[13] : [];
+        const secondaryThread = Array.isArray(threads[1]) ? deepClone(threads[1]) : [];
+        const primaryThread = Array.isArray(turnRecords) && turnRecords.length
+            ? turnRecords.map((turn, index) => buildMutationThreadEntry(turn, index))
+            : (Array.isArray(threads[0]) ? deepClone(threads[0]) : []);
+        if (!primaryThread.length) {
+            return null;
+        }
+        const baseTitle = getResolvedPromptTitle(sourceRoot) || "Compressed Chat";
+        const normalizedTitle = baseTitle.replace(/^branch of\s+/i, "").trim() || baseTitle;
+        const branchTitle = `Compression of ${normalizedTitle}`;
+        const createRoot = new Array(Math.max(14, sourceRoot.length)).fill(null);
+        createRoot[3] = modelConfig;
+        createRoot[4] = [branchTitle];
+        createRoot[12] = Array.isArray(sourceRoot[12]) ? deepClone(sourceRoot[12]) : [];
+        createRoot[13] = [primaryThread, secondaryThread];
+        return JSON.stringify([createRoot]);
+    }
+
+    function describePromptHistory(payload) {
+        if (!Array.isArray(payload)) {
+            return { valid: false, type: typeof payload };
+        }
+        const rawTurns = Array.isArray(payload[1]) ? payload[1] : null;
+        if (!rawTurns) {
+            return { valid: false, reason: "missing turns array" };
+        }
+        const firstTurn = rawTurns[0];
+        return {
+            valid: true,
+            turnCount: rawTurns.length,
+            firstRole: firstTurn?.[1],
+            firstChunkType: Array.isArray(firstTurn?.[0]) ? "chunks" : typeof firstTurn?.[0]
+        };
+    }
+
+    function stripCompressionArtifacts(turns) {
+        if (!turns.length) return turns;
+        const sanitized = turns.slice();
+        let removed = 0;
+        let removedSnapshotTurn = false;
+
+        while (sanitized.length) {
+            const lastTurn = sanitized[sanitized.length - 1];
+            if (isCompressionPromptTurn(lastTurn)) {
+                sanitized.pop();
+                removed += 1;
+                removedSnapshotTurn = false;
+                continue;
+            }
+            if (isCompressionSnapshotTurn(lastTurn)) {
+                sanitized.pop();
+                removed += 1;
+                removedSnapshotTurn = true;
+                continue;
+            }
+            if (removedSnapshotTurn && isThoughtOnlyTurn(lastTurn)) {
+                sanitized.pop();
+                removed += 1;
+                continue;
+            }
+            break;
+        }
+
+        if (removed > 0) {
+            log.net("Removed compression artifact turns from tail", {
+                removed,
+                remaining: sanitized.length
+            });
+        }
+        return sanitized;
+    }
+
+    function isCompressionPromptTurn(turn) {
+        const snippet = state.activeCompressionSnippet || deriveSnippet(getCompressPrompt());
+        return Boolean(
+            turn?.role === "user" &&
+            typeof turn.text === "string" &&
+            snippet &&
+            turn.text.includes(snippet)
+        );
+    }
+
+    function isCompressionSnapshotTurn(turn) {
+        if (turn?.role !== "model" || typeof turn.text !== "string" || !turn.text) {
+            return false;
+        }
+        if (/<state_snapshot>[\s\S]*<\/state_snapshot>/i.test(turn.text)) {
+            return true;
+        }
+        const pattern = getSnapshotRegex();
+        if (pattern && matchByRegex(turn.text, pattern)) {
+            return true;
+        }
+        return /<scratchpad>/i.test(turn.text) && /state[_ -]?snapshot/i.test(turn.text);
+    }
+
+    function isThoughtOnlyTurn(turn) {
+        return Boolean(
+            turn?.role === "model" &&
+            Array.isArray(turn.entry) &&
+            turn.entry.length >= 33 &&
+            turn.entry[19] === 1
+        );
+    }
+
+    function extractTurnText(rawContent, role) {
+        if (!rawContent) return "";
+        if (typeof rawContent === "string") return rawContent;
+        if (!Array.isArray(rawContent)) return "";
+
+        let buffer = "";
+        const shouldSkipFirstBlock = role === "model";
+        let skipThoughtChunk = shouldSkipFirstBlock;
+        let skippedChunk = "";
+        for (const block of rawContent) {
+            if (!Array.isArray(block)) continue;
+            const isThought = Boolean(block[12]);
+            if (isThought) continue;
+            const chunk = block[1];
+            if (typeof chunk === "string") {
+                if (skipThoughtChunk) {
+                    skipThoughtChunk = false;
+                    skippedChunk = chunk;
+                    continue;
+                }
+                buffer += chunk;
+            }
+        }
+        if (!buffer && skippedChunk) {
+            return skippedChunk;
+        }
+        return buffer;
+    }
+
+    function createTurn(role, text) {
+        return { role, text };
+    }
+
+    // ---------------------------
+    // Branching controls
+    // ---------------------------
+
+    const Branching = {
+        async branchFromHere() {
+            if (state.branchInProgress) {
+                log.ui("Compression branch already running");
+                return;
+            }
+            log.net("Attempting to create compressed prompt");
+            state.branchInProgress = true;
+            try {
+                const expected = state.pendingBranchTurns?.map(turn => ({ role: turn.role, text: turn.text })) || [];
+                const promptChange = await Branching.branchFromHereViaCreatePrompt();
+                let valid = false;
+                for (let attempt = 0; attempt < 4; attempt += 1) {
+                    if (attempt) await delay(450);
+                    const capture = await fetchResolvedPromptThread(promptChange.promptId);
+                    const actual = capture?.entries ? extractResolvedTurns(capture.entries) : [];
+                    if (actual.length === expected.length && actual.every((turn, index) =>
+                        turn.role === expected[index].role && turn.text === expected[index].text)) {
+                        valid = true;
+                        break;
+                    }
+                }
+                if (!valid) {
+                    throw new Error("Created branch " + promptChange.promptId +
+                        " but could not verify its saved history. Check /prompts/" + promptChange.promptId);
+                }
+                log.ui("Compressed branch verified; navigating");
+                location.assign(`${location.origin}/prompts/${promptChange.promptId}`);
+            } catch (err) {
+                log.net("Compressed branch creation failed", err);
+                alert("素酒压缩分支未完成验证： " + err.message);
+                state.pendingBranchTurns = null;
+                throw err;
+            } finally {
+                state.branchInProgress = false;
+            }
+        },
+
+        async branchFromHereViaCreatePrompt() {
+            const previousPromptId = Branching.getCurrentPromptId();
+            if (!previousPromptId) {
+                throw new Error("current prompt id not found");
+            }
+            if (!state.pendingBranchTurns?.length) {
+                throw new Error("no pending turns available for branch creation");
+            }
+            const capture = await ensureResolvedPromptThread(previousPromptId);
+            const body = buildDirectBranchCreateBody(capture, state.pendingBranchTurns);
+            if (!body) {
+                throw new Error("unable to build CreatePrompt branch payload");
+            }
+            const authHeader = await buildSapisidAuthHeader();
+            if (!authHeader) {
+                throw new Error("unable to build SAPISIDHASH auth header");
+            }
+
+            const pendingBranchTurns = state.pendingBranchTurns;
+            const apiKey = getGoogleApiKey();
+            state.pendingBranchTurns = null;
+            try {
+                const response = await fetch(`${Config.NETWORK.RPC_ORIGIN}${Config.TARGETS.CREATE_PROMPT}`, {
+                    method: "POST",
+                    credentials: "include",
+                    headers: {
+                        "content-type": "application/json+protobuf",
+                        "x-goog-api-key": apiKey,
+                        "x-goog-authuser": state.googleAuthUser || "0",
+                        authorization: authHeader
+                    },
+                    body
+                });
+                const bodyText = await response.text();
+                if (!response.ok) {
+                    throw new Error(`CreatePrompt failed: HTTP ${response.status}`);
+                }
+                const parsed = safeParseJSON(bodyText);
+                const promptId = Branching.pickCreatedPromptId(parsed, previousPromptId);
+                if (!promptId) {
+                    throw new Error("CreatePrompt succeeded but no prompt id was returned");
+                }
+                return {
+                    promptId,
+                    via: "direct-create-prompt"
+                };
+            } catch (err) {
+                state.pendingBranchTurns = pendingBranchTurns;
+                throw err;
+            }
+        },
+
+        pickCreatedPromptId(payload, previousPromptId = null) {
+            const topLevelPrompt = typeof payload?.[0] === "string" ? payload[0] : "";
+            const topLevelMatch = topLevelPrompt.match(/^prompts\/([^/?#]+)/);
+            if (topLevelMatch && (!previousPromptId || topLevelMatch[1] !== previousPromptId)) {
+                return topLevelMatch[1];
+            }
+            const promptIds = collectPromptIds(payload);
+            return promptIds.find(id => id && id !== previousPromptId) || null;
+        },
+
+        getCurrentPromptId() {
+            const path = location.pathname || "";
+            const match = path.match(/\/prompts\/([^/?#]+)/);
+            return match ? match[1] : null;
+        }
+    };
+
+    // ---------------------------
+    // UI module (toolbar button)
+    // ---------------------------
+
+    const UI = {
+        init() {
+            UI.injectButton();
+
+            window.addEventListener("DOMContentLoaded", () => {
+                log.ui("DOMContentLoaded");
+                UI.injectButton();
+            });
+
+            window.addEventListener("load", () => {
+                log.ui("window load event");
+                UI.injectButton();
+            });
+
+            const observer = new MutationObserver(() => {
+                UI.injectButton();
+            });
+
+            function startObserver() {
+                let attached = false;
+                for (const doc of UI.getCandidateDocuments()) {
+                    if (doc.body) {
+                        observer.observe(doc.body, { childList: true, subtree: true });
+                        attached = true;
+                    }
+                }
+                if (attached) {
+                    log.ui("MutationObserver for button injection started");
+                } else {
+                    log.ui("Document body not ready for observer");
+                }
+            }
+
+            if (document.readyState === "loading") {
+                document.addEventListener("DOMContentLoaded", startObserver, { once: true });
+            } else {
+                startObserver();
+            }
+
+            setInterval(() => UI.injectButton(), 2000);
+        },
+
+        injectButton() {
+            if (!window.location.href.includes(Config.UI.TARGET_PATH)) return;
+            for (const doc of UI.getCandidateDocuments()) {
+                if (doc.getElementById(Config.UI.BUTTON_ID)) return;
+                const toolbar = UI.findToolbar(doc);
+                if (!toolbar) continue;
+                const button = UI.createButton(doc);
+                const moreButton = toolbar.querySelector(
+                    'button[iconname="more_vert"], button[aria-label="View more actions"], button[aria-label="More actions"], button[aria-label="More options"]'
+                );
+                let referenceNode = null;
+                if (moreButton) {
+                    if (moreButton.parentElement === toolbar) {
+                        referenceNode = moreButton;
+                    } else if (moreButton.parentElement && moreButton.parentElement.parentElement === toolbar) {
+                        referenceNode = moreButton.parentElement;
+                    }
+                }
+                if (referenceNode) {
+                    toolbar.insertBefore(button, referenceNode);
+                    log.ui("Compressor button inserted before menu button");
+                } else {
+                    toolbar.appendChild(button);
+                    log.ui("Compressor button appended to toolbar");
+                }
+                return;
+            }
+            log.ui("Toolbar not found, wait for next mutation");
+        },
+        findToolbar(doc) {
+            const selectors = Array.isArray(Config.UI.TOOLBAR_SELECTORS)
+                ? Config.UI.TOOLBAR_SELECTORS
+                : [Config.UI.TOOLBAR_SELECTORS || Config.UI.TOOLBAR_SELECTOR].filter(Boolean);
+            for (const selector of selectors) {
+                const nodes = Array.from(doc.querySelectorAll(selector));
+                for (const node of nodes) {
+                    if (UI.isToolbarCandidate(node)) return node;
+                }
+            }
+            return null;
+        },
+        isToolbarCandidate(node) {
+            if (!node || typeof node.querySelector !== "function") return false;
+            const hasMenuButton = node.querySelector(
+                'button[iconname="more_vert"], button[aria-label="View more actions"], button[aria-label="More actions"], button[aria-label="More options"]'
+            );
+            if (hasMenuButton) return true;
+            const hasRunSettings = node.querySelector('button[aria-label="Toggle run settings panel"]');
+            if (hasRunSettings) return true;
+            const hasNewChat = node.querySelector('button[aria-label="New chat"]');
+            if (hasNewChat) return true;
+            return false;
+        },
+
+        createButton(doc = document) {
+            UI.ensureStyles(doc);
+            const button = doc.createElement("button");
+            button.id = Config.UI.BUTTON_ID;
+            button.title = "Compress Chat History";
+            button.setAttribute("ms-button", "");
+            button.setAttribute("variant", "icon-borderless");
+            button.setAttribute("mattooltip", "Compress Chat History");
+            button.setAttribute("mattooltipposition", "below");
+            button.setAttribute("iconname", "summarize");
+            button.className = "mat-mdc-tooltip-trigger ms-button-borderless ms-button-icon";
+            button.setAttribute("aria-label", "Compress Chat History");
+            button.setAttribute("aria-disabled", "false");
+            button.type = "button";
+            button.addEventListener("click", Compression.run);
+
+            const iconSpan = doc.createElement("span");
+            iconSpan.className = "material-symbols-outlined notranslate ms-button-icon-symbol compressor-icon";
+            iconSpan.setAttribute("aria-hidden", "true");
+            iconSpan.textContent = "docs";
+            button.appendChild(iconSpan);
+
+            const spinnerSpan = doc.createElement("span");
+            spinnerSpan.className = "compressor-spinner";
+            spinnerSpan.setAttribute("aria-hidden", "true");
+            button.appendChild(spinnerSpan);
+
+            return button;
+        },
+
+        ensureStyles(doc) {
+            const styleId = `${Config.UI.BUTTON_ID}-style`;
+            if (doc.getElementById(styleId)) return;
+            const style = doc.createElement("style");
+            style.id = styleId;
+            style.textContent = `@keyframes aistudio-compressor-spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+#${Config.UI.BUTTON_ID} {
+    position: relative;
+    width: 36px !important;
+    min-width: 36px !important;
+    height: 36px !important;
+    padding: 6px !important;
+    border-radius: 18px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+}
+#${Config.UI.BUTTON_ID} .compressor-spinner {
+    box-sizing: border-box;
+    width: 20px;
+    height: 20px;
+    border: 2px solid rgba(0, 0, 0, 0.2);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: aistudio-compressor-spin 0.8s linear infinite;
+    display: none;
+}
+#${Config.UI.BUTTON_ID}.compressor-loading .compressor-spinner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+#${Config.UI.BUTTON_ID}.compressor-loading .compressor-icon {
+    display: none;
+}`;
+            const target = doc.head || doc.documentElement || doc.body;
+            if (target) {
+                target.appendChild(style);
+            }
+        },
+
+        findInput() {
+            const docs = UI.getCandidateDocuments();
+            for (const doc of docs) {
+                for (const selector of Config.UI.INPUT_SELECTORS) {
+                    const el = doc.querySelector(selector);
+                    if (el) {
+                        log.ui("Input box found via selector", selector);
+                        return el;
+                    }
+                }
+            }
+            return null;
+        },
+
+        findSendButton() {
+            const docs = UI.getCandidateDocuments();
+            for (const doc of docs) {
+                for (const selector of Config.UI.SEND_BUTTON_SELECTORS) {
+                    const btn = doc.querySelector(selector);
+                    if (btn) {
+                        log.ui("Send button found via selector", selector);
+                        return btn;
+                    }
+                }
+            }
+            return null;
+        },
+
+        getCandidateDocuments() {
+            const docs = [document];
+            const frameDoc = document.querySelector('iframe[src*="bscframe"]')?.contentDocument;
+            if (frameDoc && frameDoc !== document) {
+                docs.push(frameDoc);
+            }
+            return docs;
+        },
+
+        setButtonLoading(isLoading) {
+            const button = UI.findButton();
+            if (!button) return;
+            if (isLoading) {
+                button.classList.add("compressor-loading");
+                button.setAttribute("disabled", "true");
+                button.setAttribute("aria-disabled", "true");
+            } else {
+                button.classList.remove("compressor-loading");
+                button.removeAttribute("disabled");
+                button.removeAttribute("aria-disabled");
+            }
+        },
+
+        findButton() {
+            for (const doc of UI.getCandidateDocuments()) {
+                const btn = doc.getElementById(Config.UI.BUTTON_ID);
+                if (btn) return btn;
+            }
+            return null;
+        }
+    };
+
+    // ---------------------------
+    // Prompt thread builders
+    // ---------------------------
+
+    function extractMutationPromptId(root) {
+        const resourceName = typeof root?.[0] === "string" ? root[0] : "";
+        const match = resourceName.match(/prompts\/([^/?#]+)/);
+        return match ? match[1] : null;
+    }
+
+    function buildMutationThreadEntry(turn, sequence = 0) {
+        if (turn?.role !== "user" && turn?.role !== "model") {
+            throw new Error("Unsupported history role: " + turn?.role);
+        }
+        if (isReusablePromptThreadEntry(turn?.entry)) {
+            const entry = deepClone(turn.entry);
+            entry[0] = turn?.text || "";
+            entry[8] = turn?.role === "model" ? "model" : "user";
+            if (Array.isArray(entry[21]) && typeof entry[21][0] === "string" && /^prompts\//.test(entry[21][0])) {
+                entry[21] = null;
+            }
+            entry[32] = buildEntryTimestamp(sequence);
+            return entry;
+        }
+        return buildCreatePromptEntry(turn, sequence);
+    }
+
+    function isReusablePromptThreadEntry(entry) {
+        return Array.isArray(entry) && entry.length >= 33 && typeof entry[8] === "string";
+    }
+
+    function buildCreatePromptEntry(turn, sequence = 0) {
+        const text = turn?.text || "";
+        const role = turn?.role === "model" ? "model" : "user";
+        const entry = new Array(33).fill(null);
+        entry[0] = text;
+        entry[8] = role;
+        const tokenEstimate = estimateTokenCount(text);
+        if (tokenEstimate > 0) {
+            entry[18] = tokenEstimate;
+        }
+        entry[32] = buildEntryTimestamp(sequence);
+        return entry;
+    }
+
+    function buildEntryTimestamp(sequence = 0) {
+        const timestampMs = Date.now() + Math.max(0, Number(sequence) || 0);
+        const seconds = Math.floor(timestampMs / 1000);
+        const nanos = (timestampMs % 1000) * 1_000_000;
+        return [seconds, nanos];
+    }
+
+    function estimateTokenCount(text) {
+        if (!text) return 0;
+        return Math.max(1, Math.round(text.length / 4));
+    }
+
+    function deepClone(value) {
+        return value == null ? value : JSON.parse(JSON.stringify(value));
+    }
+
+    function safeParseJSON(text) {
+        if (typeof text !== "string") return null;
+        try {
+            return JSON.parse(text);
+        } catch {
+            return null;
+        }
+    }
+
+    function buildSnippetVariants(snippet) {
+        if (typeof snippet !== "string" || !snippet) {
+            return [];
+        }
+        const variants = [snippet];
+        const escaped = escapeForJSON(snippet);
+        if (escaped && escaped !== snippet) {
+            variants.push(escaped);
+        }
+        return variants;
+    }
+
+    function escapeForJSON(text) {
+        try {
+            const encoded = JSON.stringify(text);
+            return typeof encoded === "string" ? encoded.slice(1, -1) : text;
+        } catch {
+            return text;
+        }
+    }
+
+    function matchByRegex(text, pattern) {
+        if (!pattern) return null;
+        try {
+            const regex = new RegExp(pattern, "s");
+            const result = text.match(regex);
+            return result ? result[0] : null;
+        } catch (err) {
+            log.net("Invalid snapshot regex", err);
+            return null;
+        }
+    }
+
+const PromptProfiles = (() => {
+    const sections = Object.freeze([
+      { id: "system", title: "系统提示词" },
+      { id: "character", title: "角色设定" },
+      { id: "world", title: "世界设定" },
+      { id: "persona", title: "用户人物卡" },
+      { id: "author", title: "作者附注" }
+    ]);
+    const ids = sections.map(section => section.id);
+    const idsSet = new Set(ids);
+    const RESERVED = new Set(["__proto__", "prototype", "constructor"]);
+    const MAX_PRESETS = 50;
+    const MAX_FIELD_LENGTH = 100000;
+    function blank() {
+      return {
+        fields: Object.fromEntries(ids.map(id => [id, ""])),
+        enabled: Object.fromEntries(ids.map(id => [id, true])),
+        order: ids.slice()
+      };
+    }
+    function normalizedPreset(input) {
+      const preset = blank();
+      if (!input || typeof input !== "object" || Array.isArray(input)) return preset;
+      // Read legacy presets where text fields were stored directly on the preset.
+      const fields = input.fields && typeof input.fields === "object" ? input.fields : input;
+      for (const id of ids) {
+        if (typeof fields[id] === "string") preset.fields[id] = fields[id].slice(0, MAX_FIELD_LENGTH);
+        if (typeof input.enabled?.[id] === "boolean") preset.enabled[id] = input.enabled[id];
+      }
+      if (Array.isArray(input.order)) {
+        const order = [...new Set(input.order.filter(id => idsSet.has(id)))];
+        preset.order = [...order, ...ids.filter(id => !order.includes(id))];
+      }
+      return preset;
+    }
+    function normalize(source) {
+      const presets = Object.create(null);
+      if (source && typeof source === "object" && !Array.isArray(source) &&
+          source.presets && typeof source.presets === "object" && !Array.isArray(source.presets)) {
+        for (const [rawName, rawPreset] of Object.entries(source.presets)) {
+          const name = rawName.trim().slice(0, 80);
+          if (!name || RESERVED.has(name) || Object.hasOwn(presets, name)) continue;
+          presets[name] = normalizedPreset(rawPreset);
+          if (Object.keys(presets).length >= MAX_PRESETS) break;
+        }
+      }
+      if (!Object.keys(presets).length) presets["默认"] = blank();
+      const active = typeof source?.active === "string" && Object.hasOwn(presets, source.active)
+        ? source.active : Object.keys(presets)[0];
+      return { version: 2, active, presets };
+    }
+    function compile(preset) {
+      const p = normalizedPreset(preset);
+      return p.order.filter(id => p.enabled[id] && p.fields[id].trim())
+        .map(id => "[" + sections.find(s => s.id === id).title + "]\n" + p.fields[id].trim())
+        .join("\n\n");
+    }
+    function shift(preset, id, delta) {
+      const p = normalizedPreset(preset);
+      const at = p.order.indexOf(id);
+      const next = at + delta;
+      if (at >= 0 && next >= 0 && next < p.order.length) {
+        [p.order[at], p.order[next]] = [p.order[next], p.order[at]];
+      }
+      return p;
+    }
+    return Object.freeze({ sections, blank, normalize, normalizedPreset, compile, shift, maxPresets: MAX_PRESETS });
+  })();
+
+const PromptPanel = (() => {
+    const STORAGE_V2 = "sujiu:aistudio:prompt-presets:v2";
+    const STORAGE_V1 = "sujiu:aistudio:prompt-presets:v1";
+    function load() {
+      try {
+        const raw = localStorage.getItem(STORAGE_V2) || localStorage.getItem(STORAGE_V1);
+        return PromptProfiles.normalize(raw ? JSON.parse(raw) : null);
+      } catch {
+        return PromptProfiles.normalize(null);
+      }
+    }
+    let data = load();
+    let root = null;
+    let panel = null;
+    let lastAutoApplied = "";
+    function save() {
+      try {
+        localStorage.setItem(STORAGE_V2, JSON.stringify(data));
+      } catch (error) {
+        status("预设保存失败：" + String(error.message || error));
+      }
+    }
+    function current() {
+      if (!Object.hasOwn(data.presets, data.active)) data = PromptProfiles.normalize(data);
+      return data.presets[data.active];
+    }
+    const combined = () => PromptProfiles.compile(current());
+    function status(message) {
+      const el = root?.querySelector('[data-role="status"]');
+      if (el) el.textContent = String(message);
+    }
+    function nativeField() {
+      const selectors = [
+        'ms-system-instructions textarea',
+        'ms-system-instruction-editor textarea',
+        'textarea[aria-label*="System instructions"]',
+        'textarea[aria-label*="System Instructions"]',
+        'textarea[aria-label*="系统指令"]',
+        '[aria-label="System instructions"] [contenteditable="true"]',
+        'ms-system-instructions [contenteditable="true"]'
+      ];
+      for (const doc of UI.getCandidateDocuments()) {
+        for (const selector of selectors) {
+          const el = doc.querySelector(selector);
+          if (el && !el.disabled && !el.readOnly) return el;
+        }
+      }
+      return null;
+    }
+    function applyNative(text) {
+      const el = nativeField();
+      if (!el || !text) return false;
+      if (el.tagName === "TEXTAREA") {
+        if (el.value === text) return true;
+        const proto = el.ownerDocument.defaultView?.HTMLTextAreaElement?.prototype || HTMLTextAreaElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+        if (!setter) return false;
+        setter.call(el, text);
+      } else if (el.isContentEditable) {
+        if (el.textContent === text) return true;
+        el.textContent = text;
+      } else return false;
+      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    function autoInjectOnce() {
+      if (!userSettings.autoInject || state.compressionInProgress || state.branchInProgress) return;
+      const text = combined();
+      if (!text) return;
+      const token = location.pathname + ":" + data.active + ":" + text;
+      if (lastAutoApplied === token) return;
+      if (applyNative(text)) {
+        lastAutoApplied = token;
+        status("已尝试同步系统指令；请确认 AI Studio 已保存");
+      }
+    }
+    async function clipboard(text) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch { return false; }
+    }
+    function renderFields() {
+      if (!root) return;
+      const profile = current();
+      const container = root.getElementById("fields");
+      for (const id of profile.order) {
+        const row = root.querySelector('[data-section="' + id + '"]');
+        row.querySelector('[data-enable="' + id + '"]').checked = profile.enabled[id] !== false;
+        row.querySelector('[data-field="' + id + '"]').value = profile.fields[id] || "";
+        container.appendChild(row);
+      }
+    }
+    function render() {
+      if (!root) return;
+      const select = root.querySelector('[data-role="preset"]');
+      select.replaceChildren();
+      for (const name of Object.keys(data.presets)) {
+        const option = document.createElement("option");
+        option.value = name;
+        option.textContent = name;
+        select.appendChild(option);
+      }
+      select.value = data.active;
+      renderFields();
+      root.querySelector('[data-role="keep"]').value = String(userSettings.keepRounds || 8);
+      root.querySelector('[data-role="auto-inject"]').checked = Boolean(userSettings.autoInject);
+      root.querySelector('[data-role="summary-prompt"]').value = getCompressPrompt();
+    }
+    function exportPresets() {
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      try {
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "sujiu-aistudio-presets.json";
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        status("预设已导出");
+      } finally {
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      }
+    }
+    async function importPresets(file) {
+      if (!file || file.size > 1024 * 1024) {
+        status("导入失败：文件超过 1 MB 或未选择文件");
+        return;
+      }
+      try {
+        const raw = JSON.parse(await file.text());
+        if (!raw || !raw.presets || typeof raw.presets !== "object" || Array.isArray(raw.presets) ||
+            Object.keys(raw.presets).length === 0) throw new Error("预设结构不正确");
+        if (!confirm("导入将替换现有预设。建议先导出备份，是否继续？")) return;
+        data = PromptProfiles.normalize(raw);
+        save();
+        lastAutoApplied = "";
+        render();
+        status("已导入 " + Object.keys(data.presets).length + " 个预设");
+      } catch (error) {
+        status("预设导入失败：" + String(error?.message || error));
+      }
+    }
+    function mount() {
+      if (document.getElementById("sujiu-aistudio-host")) return;
+      // At document-start the body may not exist yet; wait for it rather
+      // than trying to attach a fixed overlay to an incomplete DOM.
+      if (!document.body) {
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", mount, { once: true });
+        }
+        if (!mount.retryScheduled) {
+          mount.retryScheduled = true;
+          const retry = setInterval(() => {
+            if (!document.body) return;
+            clearInterval(retry);
+            mount.retryScheduled = false;
+            mount();
+          }, 250);
+        }
+        return;
+      }
+      const host = document.createElement("div");
+      host.id = "sujiu-aistudio-host";
+      host.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:2147483000";
+      const shadow = host.attachShadow({ mode: "open" });
+      shadow.innerHTML = `
+        <style>
+          *{box-sizing:border-box} button,input,select,textarea{font:inherit}
+          button{cursor:pointer;border:1px solid #64748b66;border-radius:8px;padding:6px 8px;background:#ffffff12;color:inherit}
+          button:hover{background:#94a3b833}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0d9488}
+          #toggle{background:#156f67;color:white;border:0;box-shadow:0 3px 16px #0005}
+          #pane{width:min(405px,calc(100vw - 24px));max-height:min(82vh,850px);margin-bottom:9px;overflow:auto;color:#f1f5f9;background:#1b2029;border:1px solid #64748b55;border-radius:14px;padding:15px;box-shadow:0 6px 40px #0008;font:13px/1.5 system-ui,sans-serif}
+          #pane[hidden]{display:none}h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;margin:16px 0 7px}.line{display:flex;align-items:center;gap:6px;margin:6px 0}.line>*{min-width:0}
+          select,input[type=number],textarea{width:100%;background:#0f172a;color:#f8fafc;border:1px solid #64748b99;border-radius:8px;padding:7px}
+          textarea{display:block;resize:vertical;min-height:62px;margin:5px 0 10px}
+          label{font-size:12px;color:#cbd5e1}.section-header{display:flex;align-items:center;gap:7px;justify-content:space-between}
+          .section-header label{flex:1}.small{padding:3px 7px;font-size:12px}
+          #status{color:#99f6e4;min-height:1.5em;font-size:12px;margin-top:10px}
+          .hint{color:#94a3b8;font-size:11px;margin:7px 0}
+          .check-line{display:flex;gap:8px;align-items:center}.check-line input{width:auto}
+          hr{border:0;border-top:1px solid #64748b55;margin:14px 0}
+        </style>
+        <section id="pane" hidden aria-label="素酒 AI Studio 工具">
+          <h2>素酒 · AI Studio</h2>
+          <label>提示词预设</label>
+          <div class="line">
+            <select data-role="preset" aria-label="当前预设"></select>
+            <button data-action="new">新建</button><button data-action="delete">删除</button>
+          </div>
+          <div class="line"><button data-action="import">导入</button><button data-action="export">导出</button></div>
+          <input data-role="file" type="file" accept=".json,application/json" hidden>
+          <div id="fields"></div>
+          <div class="line"><button data-action="apply">注入系统指令</button><button data-action="copy">复制组合内容</button></div>
+          <label class="check-line"><input type="checkbox" data-role="auto-inject"> 自动同步提示词到系统指令框</label>
+          <p class="hint">按勾选和顺序合并所有提示词；自动同步仅在 AI Studio 的原生编辑框可访问时执行。</p>
+          <hr>
+          <h3>上下文管理</h3>
+          <label>保留最近完整轮数</label><input data-role="keep" type="number" min="1" max="100" step="1">
+          <label>压缩摘要提示词</label><textarea data-role="summary-prompt" rows="5"></textarea>
+          <div class="line"><button data-action="compress">立即压缩并创建分支</button></div>
+          <p class="hint">建议上下文接近 20 万 tokens 时手动压缩，并为下一次回复预留空间（实际以当前模型上限为准）。压缩只创建新的摘要分支，原始会话保留。</p>
+          <div id="status" data-role="status" role="status" aria-live="polite"></div>
+        </section>
+        <button id="toggle" aria-expanded="false" aria-controls="pane">素酒工具</button>`;
+      root = shadow;
+      panel = shadow.getElementById("pane");
+      const container = shadow.getElementById("fields");
+      for (const section of PromptProfiles.sections) {
+        const row = document.createElement("div");
+        row.dataset.section = section.id;
+        const head = document.createElement("div");
+        head.className = "section-header";
+        const label = document.createElement("label");
+        const enable = document.createElement("input");
+        enable.type = "checkbox";
+        enable.dataset.enable = section.id;
+        label.append(enable, document.createTextNode(" " + section.title));
+        const up = document.createElement("button");
+        up.textContent = "↑";
+        up.className = "small";
+        up.title = "上移" + section.title;
+        up.dataset.move = section.id;
+        up.dataset.delta = "-1";
+        const down = document.createElement("button");
+        down.textContent = "↓";
+        down.className = "small";
+        down.title = "下移" + section.title;
+        down.dataset.move = section.id;
+        down.dataset.delta = "1";
+        head.append(label, up, down);
+        const editor = document.createElement("textarea");
+        editor.dataset.field = section.id;
+        editor.rows = 3;
+        editor.setAttribute("aria-label", section.title);
+        row.append(head, editor);
+        container.appendChild(row);
+      }
+      shadow.getElementById("toggle").addEventListener("click", () => {
+        panel.hidden = !panel.hidden;
+        shadow.getElementById("toggle").setAttribute("aria-expanded", String(!panel.hidden));
+        if (!panel.hidden) render();
+      });
+      shadow.querySelector('[data-role="preset"]').addEventListener("change", event => {
+        data.active = event.target.value;
+        save(); lastAutoApplied = ""; render();
+      });
+      shadow.querySelector('[data-role="file"]').addEventListener("change", event => {
+        void importPresets(event.target.files?.[0]);
+        event.target.value = "";
+      });
+      shadow.addEventListener("input", event => {
+        const id = event.target?.dataset?.field;
+        if (id) {
+          current().fields[id] = event.target.value.slice(0, 100000);
+          save(); lastAutoApplied = "";
+        }
+      });
+      shadow.addEventListener("change", event => {
+        const el = event.target;
+        const id = el?.dataset?.enable;
+        if (id) {
+          current().enabled[id] = el.checked;
+          save(); lastAutoApplied = "";
+          return;
+        }
+        const role = el?.dataset?.role;
+        if (role === "auto-inject") {
+          updateUserSettings({ autoInject: el.checked });
+          lastAutoApplied = "";
+          autoInjectOnce();
+        }
+        if (role === "keep") {
+          const keep = Number(el.value);
+          if (!Number.isSafeInteger(keep) || keep < 1 || keep > 100) {
+            status("保留轮数无效：请输入 1–100 之间的整数");
+            render();
+          } else {
+            updateUserSettings({ keepRounds: keep });
+            status("压缩将保留最近 " + keep + " 轮完整对话");
+          }
+        }
+        if (role === "summary-prompt") {
+          const value = el.value.trim();
+          if (value) {
+            updateUserSettings({ compressPrompt: value });
+            refreshActivePromptFromSettings();
+            status("压缩摘要指令已保存");
+          }
+        }
+      });
+      shadow.addEventListener("click", async event => {
+        const moveId = event.target?.dataset?.move;
+        if (moveId) {
+          data.presets[data.active] = PromptProfiles.shift(current(), moveId, Number(event.target.dataset.delta));
+          save(); lastAutoApplied = ""; renderFields();
+          return;
+        }
+        const action = event.target?.dataset?.action;
+        if (!action) return;
+        if (action === "new") {
+          const name = prompt("新预设名称");
+          if (!name?.trim()) return;
+          const cleaned = name.trim().slice(0, 80);
+          if (["__proto__", "prototype", "constructor"].includes(cleaned) ||
+              Object.hasOwn(data.presets, cleaned) || Object.keys(data.presets).length >= PromptProfiles.maxPresets) {
+            status("预设名称不可用、已存在，或已达到 50 个上限");
+            return;
+          }
+          data.presets[cleaned] = PromptProfiles.normalizedPreset(current());
+          data.active = cleaned;
+          save(); lastAutoApplied = ""; render(); status("已创建预设");
+        }
+        if (action === "delete") {
+          if (Object.keys(data.presets).length <= 1) { status("至少保留一个预设"); return; }
+          if (!confirm("删除预设「" + data.active + "」？")) return;
+          delete data.presets[data.active];
+          data.active = Object.keys(data.presets)[0];
+          save(); lastAutoApplied = ""; render(); status("已删除预设");
+        }
+        if (action === "export") exportPresets();
+        if (action === "import") root.querySelector('[data-role="file"]').click();
+        if (action === "copy" || action === "apply") {
+          const text = combined();
+          if (!text) { status("至少需要一个已启用且有内容的提示词框"); return; }
+          if (action === "apply" && applyNative(text)) {
+            lastAutoApplied = location.pathname + ":" + data.active + ":" + text;
+            status("已尝试填入系统指令，请确认 AI Studio 是否保存");
+            return;
+          }
+          const ok = await clipboard(text);
+          status(ok ? "已复制提示词，可粘贴至系统指令框" : "复制失败：请检查剪贴板权限");
+        }
+        if (action === "compress") {
+          status("准备生成摘要并创建新分支，原会话仍会保留");
+          Compression.run();
+        }
+      });
+      // Open once after a fresh install so users can confirm injection
+      // without having to find the small bottom-right launcher.
+      try {
+        const seenKey = "sujiu:aistudio:panel-opened:v1";
+        if (!localStorage.getItem(seenKey)) {
+          panel.hidden = false;
+          shadow.getElementById("toggle").setAttribute("aria-expanded", "true");
+          localStorage.setItem(seenKey, "1");
+        }
+      } catch {
+        panel.hidden = false;
+        shadow.getElementById("toggle").setAttribute("aria-expanded", "true");
+      }
+      document.body.appendChild(host);
+      console.info("[Sujiu AI Studio] prompt panel mounted");
+      render();
+      setInterval(autoInjectOnce, 1800);
+    }
+    return { mount, status };
+  })();
+
+    function bootstrap() {
+        const runtimeInfo = {
+            version: SCRIPT_VERSION,
+            href: location.href,
+            loadedAt: new Date().toISOString(),
+            panelInitialized: false,
+            networkInitialized: false,
+            errors: []
+        };
+        // Stable diagnostic marker to distinguish a missing userscript permission
+        // from a runtime initialization failure in the developer console.
+        window.__SUJIU_AISTUDIO_RUNTIME__ = runtimeInfo;
+        console.info("[Sujiu AI Studio] userscript started", runtimeInfo.version, runtimeInfo.href);
+
+        function attempt(stage, action) {
+            try {
+                action();
+                return true;
+            } catch (error) {
+                const message = String(error?.message || error);
+                runtimeInfo.errors.push({ stage, message });
+                console.error("[Sujiu AI Studio] " + stage + " initialization failed:", error);
+                return false;
+            }
+        }
+
+        // The panel is independent of AI Studio's private RPCs and fragile
+        // toolbar selectors; initialize it before any hooks.
+        runtimeInfo.panelInitialized = attempt("panel", () => PromptPanel.mount());
+        attempt("events", installTopLevelHandlers);
+        runtimeInfo.networkInitialized = attempt("network", () => NetworkMonitor.init());
+        if (!env.isAppContext) attempt("toolbar", () => UI.init());
+    }
+
+    bootstrap();
+
+bootstrapStatus.phase = "ready";
+} catch (error) {
+  bootstrapStatus.phase = "error";
+  bootstrapStatus.error = String(error?.message || error);
+  console.error("[Sujiu AI Studio] startup failure", error);
+  const renderFailure = () => {
+    if (!document.body || document.getElementById("sujiu-startup-error")) return;
+    const notice = document.createElement("button");
+    notice.id = "sujiu-startup-error";
+    notice.type = "button";
+    notice.textContent = "素酒启动失败 · 点击查看原因";
+    notice.title = bootstrapStatus.error;
+    notice.style.cssText = "position:fixed;right:16px;bottom:16px;z-index:2147483647;padding:12px;border:0;border-radius:10px;background:#a52a2a;color:white;cursor:pointer";
+    notice.addEventListener("click", () => alert("素酒启动失败：" + bootstrapStatus.error));
+    document.body.appendChild(notice);
+  };
+  if (document.body) renderFailure();
+  else document.addEventListener("DOMContentLoaded", renderFailure, { once: true });
+}
+})();
