@@ -144,8 +144,21 @@ const PromptPanel = (() => {
     }
     function mount() {
       if (document.getElementById("sujiu-aistudio-host")) return;
+      // At document-start the body may not exist yet; wait for it rather
+      // than trying to attach a fixed overlay to an incomplete DOM.
       if (!document.body) {
-        document.addEventListener("DOMContentLoaded", mount, { once: true });
+        if (document.readyState === "loading") {
+          document.addEventListener("DOMContentLoaded", mount, { once: true });
+        }
+        if (!mount.retryScheduled) {
+          mount.retryScheduled = true;
+          const retry = setInterval(() => {
+            if (!document.body) return;
+            clearInterval(retry);
+            mount.retryScheduled = false;
+            mount();
+          }, 250);
+        }
         return;
       }
       const host = document.createElement("div");
@@ -325,6 +338,7 @@ const PromptPanel = (() => {
         }
       });
       document.body.appendChild(host);
+      console.info("[Sujiu AI Studio] prompt panel mounted");
       render();
       setInterval(autoInjectOnce, 1800);
     }
