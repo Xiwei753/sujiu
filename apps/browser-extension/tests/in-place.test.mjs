@@ -24,6 +24,7 @@ function context(turns) {
     SaveMonitor: { attempts: 0, latest: null },
     PromptPanel: { showCompactionReview(p) { preview = p; }, status() {} },
     state: { branchInProgress: false },
+    userSettings: { keepRounds: 1 },
     fetchResolvedPromptThread: async () => ({ entries: [] }),
     extractResolvedTurns: () => [],
     assertSupportedEntries() {},
@@ -205,4 +206,59 @@ test("standalone pinned memories survive future compression without protecting u
   assert.deepEqual(Array.from(selection.targetIds), ["m1", "u1", "m2", "u2"]);
   assert.ok(selection.protectedIds.includes("memory-old"));
   assert.ok(!selection.targetIds.includes("memory-old"));
+});
+
+
+test("manual cleanup can target old complete rounds without any generated summary or task marker", () => {
+  const turns = [
+    mockTurn("u1","user"), mockTurn("t1","thought"), mockTurn("m1","model"),
+    mockTurn("u2","user"), mockTurn("m2","model"),
+    mockTurn("u3","user"), mockTurn("m3","model"),
+  ];
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  assert.equal(plan.manual, true);
+  assert.equal(plan.marker, null);
+  assert.equal(plan.memoryMarker, null);
+  assert.equal(plan.totalRounds, 3);
+  assert.equal(plan.olderRounds, 2);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","t1","u1","m2","u2"]);
+  assert.ok(preview.protectedIds.includes("u3"));
+  assert.ok(preview.protectedIds.includes("m3"));
+});
+
+test("manual cleanup always pins older marked compression memories", () => {
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("task","user"), mockTurn("archive","model"),
+    mockTurn("u3","user"), mockTurn("m3","model"),
+  ];
+  turns[3].textContent = "[[SUJIU_MEMORY_V1:12345678-abcd]] Historical archive";
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  assert.deepEqual(Array.from(plan.pinnedOlderRounds), [1]);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1"]);
+  assert.ok(preview.protectedIds.includes("archive"));
+  assert.equal(preview.pinnedCount, 1);
+});
+
+test("manual plan becomes invalid if chat DOM changes before deletion starts", () => {
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("u2","user"), mockTurn("m2","model"),
+  ];
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  turns[0].id = "unexpected-id";
+  assert.throws(() => x.compactor.preflightDom(plan), /节点在准备期间发生变化/);
+});
+
+test("manual cleanup path skips generated-summary verification, but still requires confirmation", () => {
+  const code = source.slice(source.indexOf("async function commit("), source.indexOf("function cancel()"));
+  assert.match(code, /if \(!plan\.manual\) await verifyPersistedSummary\(plan\)/);
+  assert.match(code, /if \(!confirm\(prompt\)\) return/);
+  assert.match(code, /const preview = preflightDom\(plan\)/);
+  assert.match(source, /async function manualCleanup\(\)/);
 });
