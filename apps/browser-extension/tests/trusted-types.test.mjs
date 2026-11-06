@@ -78,6 +78,7 @@ function setup() {
     localStorage: { getItem: () => null, setItem: () => {} },
     state: { compressionInProgress: false, branchInProgress: false },
     userSettings: { keepRounds: 8, autoInject: false },
+    PerformanceTuning: { enabled: true, setEnabled(value) { this.enabled = Boolean(value); return this.enabled; } },
     getCompressPrompt: () => "Summary",
     setInterval: () => 1,
     console: { info: () => {} }
