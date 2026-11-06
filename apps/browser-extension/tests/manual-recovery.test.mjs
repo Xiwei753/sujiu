@@ -4,168 +4,86 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 const history = await readFile(new URL("../src/40-history.js", import.meta.url), "utf8");
-const recoveryCode = history.slice(0, history.indexOf("    function extractStateSnapshot("));
 const taskSource = await readFile(new URL("../src/25-compaction-task.js", import.meta.url), "utf8");
-const compression = await readFile(new URL("../src/30-compression.js", import.meta.url), "utf8");
-const network = await readFile(new URL("../src/20-network.js", import.meta.url), "utf8");
 const roundSource = await readFile(new URL("../src/35-rounds.js", import.meta.url), "utf8");
 const stateSource = await readFile(new URL("../src/00-state.js", import.meta.url), "utf8");
-const settingsSource = await readFile(new URL("../src/10-settings.js", import.meta.url), "utf8");
+const recoveryCode = history.slice(0, history.indexOf("    function extractStateSnapshot("));
+const marker = "[[SUJIU_SCOPE_V2:abcd1234-0000]]";
+const pairs = count => Array.from({ length: count }, (_, i) =>
+  [{ role: "user", text: "u" + i }, { role: "model", text: "m" + i }]).flat();
 
-const makeTurn = (role, text, thought = false) =>
-  ({ role, text, entry: thought ? Object.assign(Array(33).fill(null), { 19: 1 }) : null });
-const pairs = n => Array.from({ length: n }, (_, i) =>
-  [makeTurn("user", "Question " + i), makeTurn("model", "Answer " + i)]).flat();
-
-function fixture(entries, { keepRounds = 1, stored = null } = {}) {
+function setup(turns, storageState = {}) {
   const staged = [];
   const context = {
-    Branching: { getCurrentPromptId: () => "test-prompt" },
-    fetchResolvedPromptThread: async () => ({ entries }),
-    extractResolvedTurns: value => value,
+    localStorage: {
+      getItem: () => JSON.stringify(storageState),
+      setItem() {}
+    },
+    Branching: { getCurrentPromptId: () => "chat-1" },
+    fetchResolvedPromptThread: async () => ({ entries: turns }),
+    extractResolvedTurns: entries => entries,
     assertSupportedEntries() {},
     UI: { findSendButton: () => null },
     isStopControl: () => false,
-    isThoughtOnlyTurn: turn => turn?.entry?.[19] === 1,
+    isThoughtOnlyTurn: turn => Boolean(turn?.thought),
     InPlaceCompaction: { stage: (...args) => staged.push(args) },
-    userSettings: { keepRounds },
     log: { ui() {} },
-    localStorage: {
-      getItem() { return stored ? JSON.stringify(stored) : null; },
-      setItem() {}
-    }
   };
   context.CompactionTask = vm.runInNewContext(taskSource + "\nCompactionTask", context);
   context.RoundSplitter = vm.runInNewContext(roundSource + "\nRoundSplitter", context);
-  const methods = vm.runInNewContext(
-    recoveryCode + "\n({findSavedSummary,recoverLatestCompletedSummary})", context);
-  return { ...methods, staged, CompactionTask: context.CompactionTask };
+  const recover = vm.runInNewContext(recoveryCode + "\nrecoverLatestCompletedSummary", context);
+  return { recover, staged, task: context.CompactionTask };
 }
 
-test("legacy v0.2.2 summary is recognized, even with thought records after visible reply", async () => {
-  const turns = [
-    ...pairs(2),
-    makeTurn("user", "Summarize\nOnly summarize the completed dialogue BEFORE the last 1 full user/model exchanges."),
-    makeTurn("model", "The older event was resolved."),
-    makeTurn("model", "Private thinking, not part of the summary", true)
-  ];
-  const x = fixture(turns);
-  await x.recoverLatestCompletedSummary();
+test("reads only a verified old-only model summary and preserves protected rounds", async () => {
+  const turns = [...pairs(3), { role: "user", text: "Summarize\n" + marker },
+    { role: "model", text: "Past scenes are complete." },
+    { role: "model", text: "hidden reasoning", thought: true }];
+  const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 2, totalRounds: 3,
+    olderRounds: 1, scopeVerified: true });
+  await x.recover();
   assert.equal(x.staged.length, 1);
-  assert.equal(x.staged[0][0], "The older event was resolved.");
+  assert.equal(x.staged[0][0], "Past scenes are complete.");
   assert.equal(x.staged[0][1].olderRounds, 1);
-  assert.equal(x.staged[0][2].legacy, true);
+  assert.equal(x.staged[0][1].recentRounds, 2);
 });
 
-test("custom user prompt with generated marker selects the embedded keepRounds, even if settings change", async () => {
-  const id = "12345678-1234-1234-1234-abcdef123456";
-  const marker = "[[SUJIU_SUMMARY_V1:" + id + ":KEEP=20]]";
-  const turns = [
-    ...pairs(23),
-    makeTurn("user", "Custom Chinese instruction with no fixed English sentence.\n" + marker),
-    makeTurn("model", "按时间线总结：事件已经结束。")
-  ];
-  const x = fixture(turns, {
-    keepRounds: 8,
-    stored: { promptId: "test-prompt", marker, keepRounds: 20 }
-  });
-  await x.recoverLatestCompletedSummary();
-  assert.equal(x.staged[0][1].olderRounds, 3);
-  assert.equal(x.staged[0][1].recentRounds, 20);
-  assert.equal(x.staged[0][2].marker, marker);
-});
-
-test("an unrelated new user prompt after the summary rejects destructive recovery", async () => {
-  const turns = [
-    ...pairs(2),
-    makeTurn("user", "Only summarize the completed dialogue BEFORE the last 1 full user/model exchanges."),
-    makeTurn("model", "Summary"),
-    makeTurn("user", "Normal newer question"),
-    makeTurn("model", "Normal newer response")
-  ];
-  const x = fixture(turns);
-  await assert.rejects(x.recoverLatestCompletedSummary(), /最新用户消息没有素酒摘要任务标识/);
+test("refuses cleanup when the generated request was not verified to exclude protected turns", async () => {
+  const turns = [...pairs(3), { role: "user", text: marker }, { role: "model", text: "summary" }];
+  const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 2, totalRounds: 3 });
+  await assert.rejects(x.recover(), /无法确认本次模型请求已经裁掉近期对话/);
   assert.equal(x.staged.length, 0);
 });
 
-test("mismatched task marker is rejected", async () => {
-  const marker = "[[SUJIU_SUMMARY_V1:12345678-abcd:KEEP=1]]";
-  const turns = [...pairs(2), makeTurn("user", marker), makeTurn("model", "Finished")];
-  const x = fixture(turns, {
-    stored: { promptId: "test-prompt", marker: "[[SUJIU_SUMMARY_V1:87654321-abcd:KEEP=1]]" }
-  });
-  await assert.rejects(x.recoverLatestCompletedSummary(), /本机最近一次生成任务不同/);
+test("detects changed cloud history instead of deleting old records", async () => {
+  const turns = [...pairs(2), { role: "user", text: marker }, { role: "model", text: "summary" }];
+  const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 1, totalRounds: 3,
+    scopeVerified: true });
+  await assert.rejects(x.recover(), /Google 保存的原聊天轮数与压缩前不一致/);
   assert.equal(x.staged.length, 0);
 });
 
-test("incomplete saved summary is rejected", async () => {
-  const turns = [
-    ...pairs(2),
-    makeTurn("user", "Only summarize the completed dialogue BEFORE the last 1 full user/model exchanges.")
-  ];
-  const x = fixture(turns);
-  await assert.rejects(x.recoverLatestCompletedSummary(), /摘要后尚无完整的模型回复/);
-  assert.equal(x.staged.length, 0);
+test("rejects a normal question after the summary", async () => {
+  const turns = [...pairs(3), { role: "user", text: marker }, { role: "model", text: "summary" },
+    { role: "user", text: "next story event" }, { role: "model", text: "new event" }];
+  const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 2, totalRounds: 3,
+    scopeVerified: true });
+  await assert.rejects(x.recover(), /最新用户消息没有素酒摘要任务标识/);
 });
 
-test("summary marker is parseable and base prompt remains editable", () => {
-  const x = fixture([]);
-  const task = x.CompactionTask.create("test-prompt", 20);
-  const prompt = x.CompactionTask.compose("自定义文学摘要指令", task);
-  const parsed = x.CompactionTask.parsePrompt(prompt);
-  assert.equal(parsed.keepRounds, 20);
-  assert.equal(parsed.marker, task.marker);
-  assert.ok(prompt.startsWith("自定义文学摘要指令"));
-  assert.equal(x.CompactionTask.parsePrompt("Unrelated message"), null);
+test("summary command contains neither protected count nor last-round instructions", () => {
+  const x = setup([]);
+  const task = x.task.create("chat-1", 20);
+  const prompt = x.task.compose("仅总结收到的历史", task);
+  assert.equal(x.task.parsePrompt(prompt)?.marker, task.marker);
+  assert.ok(!prompt.includes("20"));
+  assert.doesNotMatch(prompt, /recent|最近.*轮|保留.*轮/i);
 });
 
-test("default memory prompt distinguishes archived events from the actual current scene", () => {
-  const match = stateSource.match(/\n            FULL: ("(?:\\.|[^"\\])*"),\n            SNIPPET:/);
-  assert.ok(match, "default prompt literal exists");
-  const defaultPrompt = JSON.parse(match[1]);
-  assert.match(defaultPrompt, /压缩截点/);
-  assert.match(defaultPrompt, /已发生的关键事件/);
-  assert.doesNotMatch(defaultPrompt, /current situation before/);
-});
-
-test("XHR request observer provides bodyText for compression matching", () => {
-  assert.match(network, /emitNetworkEvent\(Config\.EVENTS\.REQUEST,\s*\{\s*url: absoluteUrl,\s*headers,\s*bodyText\s*\}/);
-});
-
-test("compression has no fixed capture timeout and permits manual recovery", () => {
-  assert.doesNotMatch(compression, /waitForCompressionRequestCapture|timeoutMs = 12000/);
-  assert.match(compression, /async recover\(\)/);
-  assert.match(compression, /stopTracking\(\)/);
-});
-
-
-test("only the old built-in summary prompt migrates; user-authored prompts remain untouched", () => {
-  const oldMatch = stateSource.match(/\n            LEGACY_FULL: ("(?:\\.|[^"\\])*"),\n            FULL:/);
-  const newMatch = stateSource.match(/\n            FULL: ("(?:\\.|[^"\\])*"),\n            SNIPPET:/);
-  assert.ok(oldMatch && newMatch);
-  const oldPrompt = JSON.parse(oldMatch[1]);
-  const newPrompt = JSON.parse(newMatch[1]);
-  function load(text) {
-    let lastSaved = null;
-    const storage = {
-      getItem() { return JSON.stringify({ compressPrompt: text, keepRounds: 20 }); },
-      setItem(_, value) { lastSaved = JSON.parse(value); }
-    };
-    const ctx = {
-      localStorage: storage,
-      STORAGE_KEY: "test-key",
-      DEFAULT_SETTINGS: { compressPrompt: newPrompt, keepRounds: 8 },
-      Config: { PROMPTS: { FULL: newPrompt, LEGACY_FULL: oldPrompt }, TAGS: { NET: "test" } },
-      console
-    };
-    const loadUserSettings = vm.runInNewContext(settingsSource + "\nloadUserSettings", ctx);
-    return { loaded: loadUserSettings(), lastSaved };
-  }
-  const legacy = load(oldPrompt);
-  assert.equal(legacy.loaded.compressPrompt, newPrompt);
-  assert.equal(legacy.loaded.keepRounds, 20);
-  assert.equal(legacy.lastSaved.compressPrompt, newPrompt);
-  const custom = load("自定义摘要提示词");
-  assert.equal(custom.loaded.compressPrompt, "自定义摘要提示词");
-  assert.equal(custom.lastSaved, null);
+test("default prompt summarizes only the supplied story chronology", () => {
+  const m = stateSource.match(/\n            FULL: ("(?:\\.|[^"\\])*"),\n            SNIPPET:/);
+  assert.ok(m);
+  const prompt = JSON.parse(m[1]);
+  assert.match(prompt, /实际提供的历史记录/);
+  assert.doesNotMatch(prompt, /最近保留轮次|指定的较早轮次|最新剧情由保留/);
 });
