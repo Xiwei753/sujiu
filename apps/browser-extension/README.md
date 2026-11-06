@@ -42,8 +42,10 @@ v0.1.2 起 `@match` 覆盖 `https://aistudio.google.com/*` 全站路径、`@sand
 - src/35-rounds.js：纯函数，按完整轮次裁剪历史。
 - src/40-history.js：读取、解析 Google 保存的当前会话并校验摘要。
 - src/50-branching.js：仅保留当前会话 ID 定位，不再创建新会话。
-- src/55-in-place.js：当前会话手动原地压缩的摘要检查、轮次预检、原生逐条删除与云端校验。
+- src/55-in-place.js：当前会话手动压缩的摘要检查、轮次预检、原生逐条删除与每轮云端校验。
 - src/60-native-ui.js：原有工具栏按钮与页面适配。
+- src/65-performance.js：可逆的模糊与平滑滚动性能优化。
+- src/67-save-monitor.js：监听原生 UpdatePrompt 返回状态，不发送写请求。
 - src/70-utils.js：会话记录序列化辅助。
 - src/75-prompt-profiles.js：提示词预设、启用开关、顺序及输入校验的纯逻辑。
 - src/80-prompt-panel.js：素酒提示词侧栏，独立 Shadow DOM。
@@ -80,6 +82,14 @@ v0.2.1 的 XHR 拦截路径中遗漏了生成请求事件的 `bodyText`，使监
 删除依赖 AI Studio 原生 `ms-chat-turn` 组件的真实 DOM，参考 [QuickNav for Google AI Studio](https://greasyfork.org/en/scripts/548346-quicknav-for-google-ai-studio/code) 的分类和 Angular CDK 菜单选择器。逐条删除旧轮次，关联思考节点包含在范围内；最近 N 轮和摘要必须保留。执行前再次核对云端原始轮数及 DOM 历史数量。任何单项失败将停止后续删除并显示具体错误，人工刷新确认实际保存结果。
 
 **尚未在你的登录态 Edge 中完成实际验收。** Google 可能将改写后的生成请求作为当前会话保存输入，若破坏了原始历史，回读校验会停止删除，但不能挽回原生应用自己的改动。请只用一次性测试会话验证此版本，不要拿长期连载聊天第一次尝试。
+
+## 页面卡顿与云端保存诊断（v0.3.1）
+
+**长会话卡顿：** 插件内新增可关闭的「减少页面特效（模糊与平滑滚动）」开关，默认启用，参考 [xgloom/fix-aistudio-lag](https://github.com/xgloom/fix-aistudio-lag)。通过页面 CSS 关闭 `backdrop-filter` 和平滑滚动，减少 GPU 重绘；可随时关闭恢复。它不会从 DOM 移除历史消息，也不会阻止 AI Studio 自身的 CountTokens 请求，因此对特别长的聊天只能缓解部分卡顿。插件不再为了提速去删/藏消息。
+
+**Google 云端保存：** 2026 年 Google AI Studio 依赖自动保存，原生聊天菜单的删除可能只更新了浏览器里的数据，刷新后恢复。v0.3.1 被动观察 `UpdatePrompt` 返回状态；状态和计数会出现在 `window.__SUJIU_AISTUDIO_RUNTIME__.save` 中，且不记录任何请求正文/密钥。删除过程中每完成一轮都会从 Google `ResolveDriveResource` 重新读取历史，核对用户消息总数、摘要和最近保留轮次的内容，只有全部吻合才继续下一轮。若没观察到更新或 Google 端内容仍未变化，会明确报告失败并停止，**不再将 DOM 删除等同成功**。
+
+**此版仍没有已验证的强制上传能力。** 不能为了“修复保存”盲目重放 `UpdatePrompt`，因为它使用未公开的私有协议，格式不明会有损坏会话的风险。要进一步实现真正原地云端保存，需要先获取 AI Studio 自身正常保存一条修改时的合法调用格式并在测试会话验证。当前保留这一块为未完成的功能。
 
 ## 已知限制与安全边界
 
