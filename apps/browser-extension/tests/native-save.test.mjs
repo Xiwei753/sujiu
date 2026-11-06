@@ -70,5 +70,5 @@ test("never clicks Save As, export, or arbitrary icon", async () => {
 });
 
 test("no private save RPC or repeated server verification is synthesized", () => {
-  assert.doesNotMatch(source, /\/$rpc\/|fetch\(|XMLHttpRequest|setInterval|ctrl\+s/i);
+  assert.doesNotMatch(source, /\/\$rpc\/|fetch\(|XMLHttpRequest|setInterval|ctrl\+s/i);
 });
