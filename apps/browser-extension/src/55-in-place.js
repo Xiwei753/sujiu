@@ -112,40 +112,89 @@
         function preflightDom(plan) {
             const turns = [...document.querySelectorAll("ms-chat-turn")];
             const groups = collectGroups(turns);
-            if (groups.length !== plan.totalRounds + 1) {
-                throw new Error("网页未完整加载所有历史轮次（检测到 " +
-                    groups.length + "，预期 " + (plan.totalRounds + 1) + "），拒绝删除");
+            const regular = groups.filter(group => group.kind !== "memory");
+            if (regular.length !== plan.totalRounds + 1) {
+                throw new Error("网页未完整加载历史轮次（检测到 " +
+                    regular.length + "，预期 " + (plan.totalRounds + 1) + "），拒绝删除");
             }
-            // Delete response and attached thought blocks before each user
-            // prompt. Some native UI builds remove thought blocks together
-            // with the model response.
-            const selected = groups.slice(0, plan.olderRounds)
-                .flatMap(group => [...group.turns].reverse());
-            const protectedTurns = groups.slice(plan.olderRounds).flatMap(group => group.turns);
-            const ids = selected.map(turn => turn.id);
-            if (ids.some(id => !id) || new Set(ids).size !== ids.length) {
-                throw new Error("部分旧消息没有稳定 ID，无法安全删除");
+            const pinned = new Set(plan.pinnedOlderRounds || []);
+            const getRole = turn => normalizeType(turn);
+            for (const index of pinned) {
+                if (index < 0 || index >= plan.olderRounds ||
+                    !regular[index]?.turns?.some(turn =>
+                        getRole(turn) === "model" &&
+                        CompactionTask.isPinnedSummary(turn.textContent || ""))) {
+                    throw new Error("历史压缩记忆与网页消息位置不一致，拒绝删除");
+                }
             }
-            if (protectedTurns.some(turn => ids.includes(turn.id))) {
-                throw new Error("删除范围与保留范围重叠");
+
+            // Regular old exchanges can be removed; completed summary rounds
+            // are pinned in their entirety, so their visible memory survives.
+            const targetTurns = [];
+            for (let i = 0; i < plan.olderRounds; i++) {
+                if (!pinned.has(i)) {
+                    targetTurns.push(...[...regular[i].turns].reverse());
+                }
             }
-            if (selected.some(turn => normalizeType(turn) !== "thought" &&
-                !turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"))) {
-                throw new Error("部分消息缺少 Google 原生删除菜单，拒绝开始清理");
+
+            // The newest summary is pinned by a separate marker on the MODEL
+            // reply. The tool's temporary USER instruction and independent
+            // thought cards are eligible for cleanup; never target its reply.
+            const lastGroup = regular[regular.length - 1];
+            let skippedThoughts = 0;
+            if (plan.marker && plan.memoryMarker) {
+                const user = lastGroup.turns[0];
+                const memoryNodes = lastGroup.turns.filter(turn =>
+                    getRole(turn) === "model" &&
+                    (turn.textContent || "").includes(plan.memoryMarker));
+                if (getRole(user) !== "user" ||
+                    !(user.textContent || "").includes(plan.marker) ||
+                    !memoryNodes.length) {
+                    throw new Error("当前压缩摘要没有可见的永久标识，拒绝清理工具消息");
+                }
+                // Thought cards embedded inside a model response cannot be
+                // removed independently without risking the summary itself.
+                for (const turn of lastGroup.turns.slice(1)) {
+                    if (getRole(turn) !== "thought") continue;
+                    if (turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol")) {
+                        targetTurns.push(turn);
+                    } else {
+                        skippedThoughts++;
+                    }
+                }
+                targetTurns.push(user);
             }
-            const deleteGroups = groups.slice(0, plan.olderRounds).map(group =>
-                group.turns.map(turn => turn.id).reverse());
-            return { targetIds: ids, deleteGroups, groups: groups.length, items: selected.length };
+
+            const targetIds = targetTurns.map(turn => turn.id);
+            if (targetIds.some(id => !id) || new Set(targetIds).size !== targetIds.length) {
+                throw new Error("待删除消息缺少稳定 ID，拒绝执行");
+            }
+            const targetSet = new Set(targetIds);
+            const protectedTurns = turns.filter(turn => !targetSet.has(turn.id));
+            if (protectedTurns.some(turn => !turn.id || targetSet.has(turn.id))) {
+                throw new Error("保护内容与删除范围发生冲突");
+            }
+            if (targetTurns.some(turn => !turn.querySelector(
+                "ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"
+            ))) {
+                throw new Error("待删除消息缺少独立的原生删除操作，拒绝执行");
+            }
+            const deletedUserCount = targetTurns.filter(turn => getRole(turn) === "user").length;
+            const deletedOldRounds = plan.olderRounds - pinned.size;
+            return {
+                targetIds,
+                protectedIds: protectedTurns.map(turn => turn.id),
+                deletedUserCount, deletedOldRounds, pinnedCount: pinned.size,
+                skippedThoughts, groups: groups.length, items: targetIds.length
+            };
         }
 
-        // A DOM deletion is only a visual change. The old conversation must
-        // disappear from ResolveDriveResource before we touch the next round.
-        // Never assume the native menu action triggered Google autosave.
-        async function awaitCloudPersistence(plan, deletedRounds, expectedProtected, saveBaseline) {
-            const expectedUsers = plan.totalRounds + 1 - deletedRounds;
+        // Native message menus can autosave independently, but the plugin
+        // performs only one final Google cloud read after the whole batch.
+        async function awaitCloudPersistence(plan, expectedUsers, expectedProtected, preview, saveBaseline) {
             let lastUsers = null;
             for (let i = 0; i < 8; i++) {
-                await sleep(i === 0 ? 700 : 1800);
+                await sleep(i === 0 ? 800 : 1700);
                 const capture = await fetchResolvedPromptThread(plan.promptId);
                 if (!capture?.entries?.length) continue;
                 const turns = extractResolvedTurns(capture.entries);
@@ -153,36 +202,47 @@
                 const users = turns.filter(turn => turn.role === "user");
                 lastUsers = users.length;
                 if (lastUsers < expectedUsers) {
-                    throw new Error("云端消息比计划删除得更多，立即停止（可能删除了保留内容）");
+                    throw new Error("云端消息少于计划保留的数量，可能误删了内容");
                 }
                 if (lastUsers !== expectedUsers) continue;
-                const summary = findSavedSummary(turns, plan.promptId);
-                if (summary.marker !== plan.marker || summary.snapshot.trim() !== plan.snapshot.trim()) {
-                    throw new Error("云端摘要发生变化，立即停止删除");
+
+                // Exact current and previous pinned summaries must remain,
+                // even when the synthetic tool prompt has been deleted.
+                const memory = turns.find(turn => turn.role === "model" &&
+                    (turn.text || "").includes(plan.memoryMarker || "UNMATCHABLE_MARKER"));
+                if (plan.memoryMarker && (!memory ||
+                    String(memory.text).trim() !== plan.snapshot.trim())) {
+                    throw new Error("Google 云端的最新压缩记忆丢失或发生变化");
                 }
-                const original = turns.slice(0, summary.lastUserIndex);
-                // After the last deletion, only the protected N rounds remain;
-                // RoundSplitter.partition rejects that case by design.
-                const startIndices = original.flatMap((turn, index) =>
+                for (const pinnedText of plan.pinnedMemoryTexts || []) {
+                    if (!turns.some(turn => turn.role === "model" &&
+                        String(turn.text || "").trim() === pinnedText)) {
+                        throw new Error("以前压缩过的记忆丢失，立即停止");
+                    }
+                }
+
+                // Compare the last N original conversation rounds, excluding
+                // the new synthetic summary model reply from the tail.
+                const beforeMemory = plan.memoryMarker
+                    ? turns.slice(0, turns.findIndex(turn => turn.role === "model" &&
+                        (turn.text || "").includes(plan.memoryMarker)))
+                    : turns.slice(0, -2);
+                const userStarts = beforeMemory.flatMap((turn, index) =>
                     turn.role === "user" ? [index] : []);
-                if (startIndices.length < plan.recentRounds) {
-                    throw new Error("云端保留轮数不足");
+                if (userStarts.length < plan.recentRounds) {
+                    throw new Error("云端最近保留轮次不足");
                 }
-                const tail = original.slice(startIndices[startIndices.length - plan.recentRounds]);
-                const protectedNow = JSON.stringify(tail.map(turn => [turn.role, turn.text]));
-                if (protectedNow !== expectedProtected) {
-                    throw new Error("云端保留的最近轮次与删除前不一致，立即停止");
+                const recent = beforeMemory.slice(userStarts[userStarts.length - plan.recentRounds]);
+                if (JSON.stringify(recent.map(turn => [turn.role, turn.text])) !== expectedProtected) {
+                    throw new Error("云端最近保留的正文与删除前不一致");
                 }
                 return true;
             }
-            const attemptedSave = SaveMonitor.attempts > saveBaseline;
-            const nativeSave = attemptedSave
-                ? "观察到 UpdatePrompt，最近状态 " + (SaveMonitor.latest?.status || "未知")
-                : "没有观察到本轮删除触发 UpdatePrompt";
-            throw new Error("Google 服务器未确认本轮删除（当前 " +
-                (lastUsers ?? "未知") + " 条用户消息，预期 " + expectedUsers +
-                " 条；" + nativeSave +
-                "）。已停止批量删除；页面变化可能没有上传，刷新后会恢复。");
+            const save = SaveMonitor.attempts > saveBaseline
+                ? "最近原生保存状态 " + (SaveMonitor.latest?.status || "未知")
+                : "未观察到原生 UpdatePrompt";
+            throw new Error("批量删除后 Google 未确认保存（云端用户消息 " +
+                (lastUsers ?? "未知") + "，预期 " + expectedUsers + "；" + save + "）");
         }
 
         async function findNativeDeleteItem() {
