@@ -13,10 +13,18 @@
                 log.ui("Input box not found, cannot run compression");
                 return;
             }
-            const prompt = getCompressPrompt() + "\n\nOnly summarize the completed dialogue BEFORE the last " + (Number(userSettings.keepRounds) || 8) + " full user/model exchanges. Do not summarize those last exchanges; they will be preserved verbatim.";
+            const promptId = Branching.getCurrentPromptId();
+            if (!promptId || promptId === "new_chat") {
+                PromptPanel.status("先保存当前聊天，再执行摘要压缩");
+                return;
+            }
+            const task = CompactionTask.create(promptId, Number(userSettings.keepRounds) || 8);
+            const prompt = CompactionTask.compose(getCompressPrompt(), task);
+            CompactionTask.save(task);
             Compression.prepareRunContext();
             state.activeCompressionPrompt = prompt;
-            state.activeCompressionSnippet = deriveSnippet(prompt);
+            state.activeCompressionSnippet = deriveSnippet(getCompressPrompt());
+            state.activeCompressionMarker = task.marker;
             state.compressionInProgress = true;
             state.compressionRequestPending = true;
             state.compressionResponsePending = false;
@@ -148,9 +156,8 @@
         },
 
         isCompressionPrompt(bodyText) {
-            if (typeof bodyText !== "string") {
-                return false;
-            }
+            if (typeof bodyText !== "string") return false;
+            if (state.activeCompressionMarker && bodyText.includes(state.activeCompressionMarker)) return true;
             const snippet = state.activeCompressionSnippet || deriveSnippet(getCompressPrompt());
             if (!snippet) {
                 return bodyText.includes(Config.PROMPTS.SNIPPET);
