@@ -276,12 +276,14 @@
             state.branchInProgress = true;
             let processed = 0;
             const saveBaseline = SaveMonitor.attempts;
+            let lastDeletionStartedAt = 0;
             try {
                 const protectedSet = new Set(preview.protectedIds);
                 for (const id of preview.targetIds) {
                     if (Branching.getCurrentPromptId() !== plan.promptId) {
                         throw new Error("清理过程中会话已经切换");
                     }
+                    lastDeletionStartedAt = Date.now();
                     await deleteOne(id);
                     processed++;
                     // An Angular cascading delete may remove the summary
@@ -300,7 +302,7 @@
                 // AI Studio's native delete action triggers UpdatePrompt
                 // automatically. Observe one quiet period after the batch.
                 PromptPanel.status("批量删除完成，等待 Google 原生自动保存请求结束……");
-                const autosave = await SaveMonitor.waitForNativeSave(saveBaseline);
+                const autosave = await SaveMonitor.waitForNativeSave(saveBaseline, lastDeletionStartedAt);
                 if (!autosave.observed) {
                     PromptPanel.status("页面删除已完成，但未观察到 UpdatePrompt 自动保存。" +
                         "请确认 Google 页面已同步，保存前不要刷新。");
