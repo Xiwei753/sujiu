@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.1.2
+// @version      0.1.3
 // @description  AI Studio prompt presets and manual context compaction
 // @match        https://aistudio.google.com/*
 // @noframes
@@ -11,7 +11,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.1.2", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.1.3", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -69,7 +69,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.1.2";
+    const SCRIPT_VERSION = "0.1.3";
 
     const state = {
         compressionInProgress: false,
@@ -1579,6 +1579,7 @@ const RoundSplitter = Object.freeze({
                 if (doc.getElementById(Config.UI.BUTTON_ID)) return;
                 const toolbar = UI.findToolbar(doc);
                 if (!toolbar) continue;
+                UI.toolbarMissingLogged = false;
                 const button = UI.createButton(doc);
                 const moreButton = toolbar.querySelector(
                     'button[iconname="more_vert"], button[aria-label="View more actions"], button[aria-label="More actions"], button[aria-label="More options"]'
@@ -1600,7 +1601,10 @@ const RoundSplitter = Object.freeze({
                 }
                 return;
             }
-            log.ui("Toolbar not found, wait for next mutation");
+            if (!UI.toolbarMissingLogged) {
+                log.ui("Toolbar not found yet; waiting for AI Studio to load");
+                UI.toolbarMissingLogged = true;
+            }
         },
         findToolbar(doc) {
             const selectors = Array.isArray(Config.UI.TOOLBAR_SELECTORS)
@@ -2102,45 +2106,64 @@ const PromptPanel = (() => {
       host.id = "sujiu-aistudio-host";
       host.style.cssText = "position:fixed;right:18px;bottom:18px;z-index:2147483000";
       const shadow = host.attachShadow({ mode: "open" });
-      shadow.innerHTML = `
-        <style>
-          *{box-sizing:border-box} button,input,select,textarea{font:inherit}
-          button{cursor:pointer;border:1px solid #64748b66;border-radius:8px;padding:6px 8px;background:#ffffff12;color:inherit}
-          button:hover{background:#94a3b833}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0d9488}
-          #toggle{background:#156f67;color:white;border:0;box-shadow:0 3px 16px #0005}
-          #pane{width:min(405px,calc(100vw - 24px));max-height:min(82vh,850px);margin-bottom:9px;overflow:auto;color:#f1f5f9;background:#1b2029;border:1px solid #64748b55;border-radius:14px;padding:15px;box-shadow:0 6px 40px #0008;font:13px/1.5 system-ui,sans-serif}
-          #pane[hidden]{display:none}h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;margin:16px 0 7px}.line{display:flex;align-items:center;gap:6px;margin:6px 0}.line>*{min-width:0}
-          select,input[type=number],textarea{width:100%;background:#0f172a;color:#f8fafc;border:1px solid #64748b99;border-radius:8px;padding:7px}
-          textarea{display:block;resize:vertical;min-height:62px;margin:5px 0 10px}
-          label{font-size:12px;color:#cbd5e1}.section-header{display:flex;align-items:center;gap:7px;justify-content:space-between}
-          .section-header label{flex:1}.small{padding:3px 7px;font-size:12px}
-          #status{color:#99f6e4;min-height:1.5em;font-size:12px;margin-top:10px}
-          .hint{color:#94a3b8;font-size:11px;margin:7px 0}
-          .check-line{display:flex;gap:8px;align-items:center}.check-line input{width:auto}
-          hr{border:0;border-top:1px solid #64748b55;margin:14px 0}
-        </style>
-        <section id="pane" hidden aria-label="素酒 AI Studio 工具">
-          <h2>素酒 · AI Studio</h2>
-          <label>提示词预设</label>
-          <div class="line">
-            <select data-role="preset" aria-label="当前预设"></select>
-            <button data-action="new">新建</button><button data-action="delete">删除</button>
-          </div>
-          <div class="line"><button data-action="import">导入</button><button data-action="export">导出</button></div>
-          <input data-role="file" type="file" accept=".json,application/json" hidden>
-          <div id="fields"></div>
-          <div class="line"><button data-action="apply">注入系统指令</button><button data-action="copy">复制组合内容</button></div>
-          <label class="check-line"><input type="checkbox" data-role="auto-inject"> 自动同步提示词到系统指令框</label>
-          <p class="hint">按勾选和顺序合并所有提示词；自动同步仅在 AI Studio 的原生编辑框可访问时执行。</p>
-          <hr>
-          <h3>上下文管理</h3>
-          <label>保留最近完整轮数</label><input data-role="keep" type="number" min="1" max="100" step="1">
-          <label>压缩摘要提示词</label><textarea data-role="summary-prompt" rows="5"></textarea>
-          <div class="line"><button data-action="compress">立即压缩并创建分支</button></div>
-          <p class="hint">建议上下文接近 20 万 tokens 时手动压缩，并为下一次回复预留空间（实际以当前模型上限为准）。压缩只创建新的摘要分支，原始会话保留。</p>
-          <div id="status" data-role="status" role="status" aria-live="polite"></div>
-        </section>
-        <button id="toggle" aria-expanded="false" aria-controls="pane">素酒工具</button>`;
+      // AI Studio enforces Trusted Types; construct the panel with DOM APIs.
+      // Do not assign strings to innerHTML / insertAdjacentHTML / document.write.
+      const make = (tag, attributes = {}, children = []) => {
+        const element = document.createElement(tag);
+        for (const [name, value] of Object.entries(attributes)) {
+          if (name === "text") element.textContent = String(value);
+          else if (name === "className") element.className = String(value);
+          else if (name === "hidden") element.hidden = Boolean(value);
+          else element.setAttribute(name, String(value));
+        }
+        element.append(...children);
+        return element;
+      };
+      const style = make("style", { text: "\n          *{box-sizing:border-box} button,input,select,textarea{font:inherit}\n          button{cursor:pointer;border:1px solid #64748b66;border-radius:8px;padding:6px 8px;background:#ffffff12;color:inherit}\n          button:hover{background:#94a3b833}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0d9488}\n          #toggle{background:#156f67;color:white;border:0;box-shadow:0 3px 16px #0005}\n          #pane{width:min(405px,calc(100vw - 24px));max-height:min(82vh,850px);margin-bottom:9px;overflow:auto;color:#f1f5f9;background:#1b2029;border:1px solid #64748b55;border-radius:14px;padding:15px;box-shadow:0 6px 40px #0008;font:13px/1.5 system-ui,sans-serif}\n          #pane[hidden]{display:none}h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;margin:16px 0 7px}.line{display:flex;align-items:center;gap:6px;margin:6px 0}.line>*{min-width:0}\n          select,input[type=number],textarea{width:100%;background:#0f172a;color:#f8fafc;border:1px solid #64748b99;border-radius:8px;padding:7px}\n          textarea{display:block;resize:vertical;min-height:62px;margin:5px 0 10px}\n          label{font-size:12px;color:#cbd5e1}.section-header{display:flex;align-items:center;gap:7px;justify-content:space-between}\n          .section-header label{flex:1}.small{padding:3px 7px;font-size:12px}\n          #status{color:#99f6e4;min-height:1.5em;font-size:12px;margin-top:10px}\n          .hint{color:#94a3b8;font-size:11px;margin:7px 0}\n          .check-line{display:flex;gap:8px;align-items:center}.check-line input{width:auto}\n          hr{border:0;border-top:1px solid #64748b55;margin:14px 0}\n        " });
+      const line = (...children) => make("div", { className: "line" }, children);
+      const action = (label, name) => make("button", { type: "button", "data-action": name, text: label });
+      const role = (name, tag = "input", attributes = {}) =>
+        make(tag, { ...attributes, "data-role": name });
+      const heading = make("h2", { text: "素酒 · AI Studio" });
+      const pane = make("section", { id: "pane", hidden: true, "aria-label": "素酒 AI Studio 工具" }, [
+        heading,
+        make("label", { text: "提示词预设" }),
+        line(role("preset", "select", { "aria-label": "当前预设" }), action("新建", "new"), action("删除", "delete")),
+        line(action("导入", "import"), action("导出", "export")),
+        role("file", "input", { type: "file", accept: ".json,application/json", hidden: true }),
+        make("div", { id: "fields" }),
+        line(action("注入系统指令", "apply"), action("复制组合内容", "copy")),
+        make("label", { className: "check-line" }, [
+          role("auto-inject", "input", { type: "checkbox" }),
+          document.createTextNode(" 自动同步提示词到系统指令框")
+        ]),
+        make("p", { className: "hint", text: "按勾选和顺序合并所有提示词；自动同步仅在 AI Studio 的原生编辑框可访问时执行。" }),
+        make("hr"),
+        make("h3", { text: "上下文管理" }),
+        make("label", { text: "保留最近完整轮数" }),
+        role("keep", "input", { type: "number", min: "1", max: "100", step: "1" }),
+        make("label", { text: "压缩摘要提示词" }),
+        role("summary-prompt", "textarea", { rows: "5" }),
+        line(action("立即压缩并创建分支", "compress")),
+        make("p", { className: "hint", text: "建议上下文接近 20 万 tokens 时手动压缩，并为下一次回复预留空间（实际以当前模型上限为准）。压缩只创建新的摘要分支，原始会话保留。" }),
+        make("div", { id: "status", "data-role": "status", role: "status", "aria-live": "polite" })
+      ]);
+      const toggle = make("button", { id: "toggle", type: "button",
+        "aria-expanded": "false", "aria-controls": "pane", text: "素酒工具" });
+      shadow.append(style, pane, toggle);
+      // Inline style fallback if the host blocks injecting a <style> element.
+      pane.style.width = "min(405px, calc(100vw - 24px))";
+      pane.style.maxHeight = "min(82vh, 850px)";
+      pane.style.overflow = "auto";
+      pane.style.backgroundColor = "#1b2029";
+      pane.style.color = "#f1f5f9";
+      pane.style.padding = "15px";
+      pane.style.borderRadius = "14px";
+      toggle.style.backgroundColor = "#156f67";
+      toggle.style.color = "white";
+      toggle.style.padding = "8px 12px";
+      toggle.style.borderRadius = "9px";
+      toggle.style.cursor = "pointer";
       root = shadow;
       panel = shadow.getElementById("pane");
       const container = shadow.getElementById("fields");
