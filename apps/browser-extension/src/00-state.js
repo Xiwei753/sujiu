@@ -83,8 +83,6 @@
         compressPrompt: Config.PROMPTS.FULL,
         snapshotRegex: "",
         keepRounds: 8,
-        autoCompact: false,
-        autoThreshold: 50,
         autoInject: false
     };
     let userSettings = loadUserSettings();
