@@ -9,8 +9,8 @@
             if (!promptId || !Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) {
                 throw new Error("无效的会话 ID 或保留轮数");
             }
-            const id = typeof crypto?.randomUUID === "function"
-                ? crypto.randomUUID()
+            const id = typeof globalThis.crypto?.randomUUID === "function"
+                ? globalThis.crypto.randomUUID()
                 : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
             return {
                 promptId,
