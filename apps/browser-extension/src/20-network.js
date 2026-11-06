@@ -60,6 +60,12 @@
             const url = typeof input === "string" ? input : input?.url;
             const shouldLogGenerate = isTargetRequest(url, "GENERATE");
             const shouldCaptureResolve = isTargetRequest(url, "RESOLVE");
+            const shouldMonitorSave = isTargetRequest(url, "UPDATE");
+            if (shouldMonitorSave) {
+                const result = await originalFetch(input, init);
+                SaveMonitor.record(result.status, url);
+                return result;
+            }
             if (!shouldLogGenerate && !shouldCaptureResolve) {
                 return originalFetch(input, init);
             }
@@ -179,7 +185,8 @@
             realXHR.open = function (...args) {
                 const [, url] = args;
                 requestUrl = url || null;
-                monitored = Boolean(url) && (isTargetRequest(url, "GENERATE") || isTargetRequest(url, "RESOLVE"));
+                monitored = Boolean(url) && (isTargetRequest(url, "GENERATE") ||
+                    isTargetRequest(url, "RESOLVE") || isTargetRequest(url, "UPDATE"));
                 if (monitored) {
                     log.net("Monitored XHR detected in", label, url);
                 }
@@ -247,6 +254,10 @@
                     return;
                 }
                 const responseUrl = realXHR.responseURL || resolveUrl(requestUrl);
+                if (isTargetRequest(responseUrl, "UPDATE")) {
+                    SaveMonitor.record(realXHR.status, responseUrl);
+                    return;
+                }
                 const parsed = safeParseJSON(realXHR.responseText);
                 maybeCaptureResolvedPromptThread(responseUrl, realXHR.responseText, parsed);
 
