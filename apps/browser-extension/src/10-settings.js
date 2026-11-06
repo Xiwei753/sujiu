@@ -10,7 +10,8 @@
                 // literal string. Upgrade only that exact default and leave
                 // user-edited summary prompts untouched.
                 if ([Config.PROMPTS.LEGACY_FULL, Config.PROMPTS.PREVIOUS_FULL,
-                    Config.PROMPTS.PRIOR_V3_FULL].includes(parsed.compressPrompt)) {
+                    Config.PROMPTS.PRIOR_V3_FULL, Config.PROMPTS.PRIOR_V35_FULL]
+                    .includes(parsed.compressPrompt)) {
                     parsed.compressPrompt = Config.PROMPTS.FULL;
                     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed)); }
                     catch {}
