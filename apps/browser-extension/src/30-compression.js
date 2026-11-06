@@ -25,13 +25,17 @@
             textarea.focus();
             textarea.dispatchEvent(new InputEvent("input", { bubbles: true, data: prompt, inputType: "insertText" }));
             textarea.dispatchEvent(new Event("change", { bubbles: true }));
-            enableSendButton();
-            sendCompressionRequest(textarea).then(sent => {
+            sendCompressionRequest().then(sent => {
                 if (sent) {
                     log.ui("Compression request sent");
                     return;
                 }
-                log.ui("Failed to trigger compression request; aborting this run");
+                log.ui("Compression request was not confirmed; no retry attempted");
+                PromptPanel.status("未确认摘要请求。为避免误触停止按钮，插件已停止监听；请检查当前聊天是否仍在生成。");
+                Compression.finalizeRun();
+            }).catch(error => {
+                log.ui("Compression single click failed", error);
+                PromptPanel.status("摘要发送失败：" + String(error?.message || error));
                 Compression.finalizeRun();
             });
         },
@@ -139,164 +143,49 @@
         }
     };
 
-    function enableSendButton() {
-        const sendButton = UI.findSendButton();
-        if (sendButton) {
-            sendButton.removeAttribute("disabled");
-            sendButton.removeAttribute("aria-disabled");
-            sendButton.disabled = false;
-            sendButton.classList.remove("disabled");
-        }
-    }
-
     function delay(ms) {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    function nextFrame() {
-        return new Promise(resolve => requestAnimationFrame(() => resolve()));
-    }
-
-    async function waitForCompressionRequestCapture(timeoutMs = 1800) {
+    async function waitForCompressionRequestCapture(timeoutMs = 12000) {
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
-            if (!state.compressionInProgress) {
-                return false;
-            }
-            if (state.compressionResponsePending || !state.compressionRequestPending) {
-                return true;
-            }
-            await delay(50);
+            if (!state.compressionInProgress) return false;
+            if (state.compressionResponsePending || !state.compressionRequestPending) return true;
+            await delay(100);
         }
         return state.compressionResponsePending || !state.compressionRequestPending;
     }
 
-    function dispatchPointerClickSequence(el) {
-        if (!el || typeof el.dispatchEvent !== "function") return false;
-        const doc = el.ownerDocument || document;
-        const view = doc.defaultView || window;
-        const rect = typeof el.getBoundingClientRect === "function"
-            ? el.getBoundingClientRect()
-            : { left: 0, top: 0, width: 0, height: 0 };
-        const centerX = rect.left + (rect.width || 0) / 2;
-        const centerY = rect.top + (rect.height || 0) / 2;
-        const eventSteps = [
-            { type: "pointerdown", pointer: true, buttons: 1, detail: 0 },
-            { type: "mousedown", buttons: 1, detail: 1 },
-            { type: "pointerup", pointer: true, buttons: 0, detail: 0 },
-            { type: "mouseup", buttons: 0, detail: 1 },
-            { type: "click", buttons: 0, detail: 1 }
-        ];
-
-        try {
-            if (typeof el.focus === "function") {
-                el.focus({ preventScroll: true });
-            }
-        } catch {
-            if (typeof el.focus === "function") {
-                el.focus();
-            }
-        }
-
-        for (const step of eventSteps) {
-            const init = {
-                bubbles: true,
-                cancelable: true,
-                composed: true,
-                view,
-                clientX: centerX,
-                clientY: centerY,
-                button: 0,
-                buttons: step.buttons,
-                detail: step.detail
-            };
-            let event;
-            if (step.pointer && typeof view.PointerEvent === "function") {
-                event = new view.PointerEvent(step.type, {
-                    ...init,
-                    pointerId: 1,
-                    pointerType: "mouse",
-                    isPrimary: true
-                });
-            } else {
-                event = new view.MouseEvent(step.type, init);
-            }
-            el.dispatchEvent(event);
-        }
-        return true;
+    function isStopControl(button) {
+        const icon = button.querySelector?.("mat-icon, .material-symbols-outlined");
+        const label = [
+            button.getAttribute?.("aria-label"),
+            button.getAttribute?.("title"),
+            button.getAttribute?.("iconname"),
+            icon?.textContent,
+            button.textContent
+        ].filter(Boolean).join(" ").toLowerCase();
+        return /\\b(stop|cancel|interrupt|abort|close)\\b|停止|中断生成|取消生成/.test(label);
     }
 
-    function triggerKeyboardSend(textarea) {
-        const doc = textarea.ownerDocument || document;
-        const view = doc.defaultView || window;
-        const keyOptions = {
-            key: "Enter",
-            code: "Enter",
-            keyCode: 13,
-            bubbles: true,
-            cancelable: true,
-            view
-        };
-        if (env.isMac) {
-            keyOptions.metaKey = true;
-        } else {
-            keyOptions.ctrlKey = true;
+    async function sendCompressionRequest() {
+        // Wait for the site's reactive input state to update. Never retry
+        // a click: the original Run control may turn into Stop.
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        if (!state.compressionInProgress) return false;
+        const button = UI.findSendButton();
+        if (!button || button.disabled || button.getAttribute?.("aria-disabled") === "true" || isStopControl(button)) {
+            PromptPanel.status("未发送：原生运行按钮尚未就绪或正在生成。请检查输入框里的摘要指令后手动点击一次运行。");
+            log.ui("Compression not auto-sent: Run button not ready");
+            return false;
         }
-        textarea.dispatchEvent(new view.KeyboardEvent("keydown", keyOptions));
-        textarea.dispatchEvent(new view.KeyboardEvent("keyup", keyOptions));
-        log.ui("Prompt send attempted via keyboard shortcut fallback");
-    }
-
-    async function sendPromptWithRetries(textarea, options = {}) {
-        const clickPlan = [
-            { label: "immediate", delayMs: 0, useFrame: false },
-            { label: "next-frame", delayMs: 0, useFrame: true },
-            { label: "delay-80ms", delayMs: 80, useFrame: false },
-            { label: "delay-220ms", delayMs: 220, useFrame: false }
-        ];
-        const verifyFn = typeof options.verifyFn === "function" ? options.verifyFn : null;
-        const labelPrefix = options.labelPrefix || "Prompt send";
-        const abortCheck = typeof options.abortCheck === "function" ? options.abortCheck : null;
-
-        for (const step of clickPlan) {
-            if (step.useFrame) {
-                await nextFrame();
-            } else if (step.delayMs > 0) {
-                await delay(step.delayMs);
-            }
-            if (abortCheck && abortCheck()) {
-                return false;
-            }
-
-            enableSendButton();
-            const sendButton = UI.findSendButton();
-            if (!sendButton) {
-                log.ui("Send button missing before click attempt", `${labelPrefix} ${step.label}`);
-                continue;
-            }
-
-            dispatchPointerClickSequence(sendButton);
-            log.ui(`${labelPrefix} click attempted`, step.label);
-            if (!verifyFn || await verifyFn()) {
-                log.ui(`${labelPrefix} confirmed`, step.label);
-                return true;
-            }
-        }
-
-        triggerKeyboardSend(textarea);
-        if (!verifyFn || await verifyFn()) {
-            log.ui(`${labelPrefix} confirmed via keyboard fallback`);
-            return true;
-        }
-        return false;
-    }
-
-    async function sendCompressionRequest(textarea) {
-        return sendPromptWithRetries(textarea, {
-            labelPrefix: "Compression request",
-            verifyFn: () => waitForCompressionRequestCapture(),
-            abortCheck: () => !state.compressionInProgress
-        });
+        // One native click. No synthetic pointer sequence, force-enabling
+        // the button, keyboard fallback, or second click on missed requests.
+        button.click();
+        log.ui("Compression request: single native Run click");
+        PromptPanel.status("已点击运行一次，等待 AI Studio 接收请求；不会自动再次点击");
+        return waitForCompressionRequestCapture();
     }
 
     function setTextareaValue(textarea, value) {
