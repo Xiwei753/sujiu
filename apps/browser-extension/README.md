@@ -50,6 +50,10 @@ v0.1.2 起 `@match` 覆盖 `https://aistudio.google.com/*` 全站路径、`@sand
 
 这些文件仍处于同一个打包后的 IIFE 作用域，暂时沿用上游的内部结构，避免在首轮移植时同时重写未公开 RPC 协议。模块边界首先按职责划开，后续可以逐步收敛为显式依赖接口。
 
+## AI Studio Trusted Types 兼容性（v0.1.3）
+
+AI Studio 的内容安全策略可能要求所有 HTML 解析操作使用 `TrustedHTML`。v0.1.2 及更早版本尝试通过 `shadow.innerHTML` 构建侧栏，会被浏览器拒绝，表现为网络拦截已经启动而「素酒工具」悬浮窗完全不出现，控制台有 `This document requires 'TrustedHTML' assignment`。v0.1.3 改用 `createElement`、`append`、`textContent`、`setAttribute` 逐个创建 DOM，不申请任何 Trusted Types 绕过策略；并增加在禁止写入 `innerHTML` 的模拟环境下验证面板成功挂载的测试。油猴和 MV3 均通过同一构建入口打包。
+
 ## 已知限制与安全边界
 
 - Google AI Studio 使用未公开的内部 RPC，索引位置和页面选择器会变。当前无法在用户的登录态浏览器里实测，因此这是**待验收的初版**，请勿当作稳定功能。
