@@ -109,22 +109,30 @@
             const turns = [...document.querySelectorAll("ms-chat-turn")];
             const groups = collectGroups(turns);
             const regular = groups.filter(group => group.kind !== "memory");
-            if (regular.length <= keepRounds) {
-                throw new Error("当前只有 " + regular.length +
-                    " 轮完整对话，没有超出保留范围的历史");
+            // A tool-generated summary is a memory record, not one of the
+            // user's recent N conversational rounds.
+            const isToolRound = group => {
+                const user = group.turns[0];
+                return normalizeType(user) === "user" &&
+                    (user.textContent || "").includes("[[SUJIU_SCOPE_V2:") &&
+                    group.turns.some(turn => normalizeType(turn) === "model" &&
+                        CompactionTask.isPinnedSummary(turn.textContent || ""));
+            };
+            const chatIndices = regular.flatMap((group, index) =>
+                isToolRound(group) ? [] : [index]);
+            if (chatIndices.length <= keepRounds) {
+                throw new Error("当前只有 " + chatIndices.length +
+                    " 轮普通对话，没有超出保留范围的历史");
             }
-            const olderRounds = regular.length - keepRounds;
-            const pinnedOlderRounds = [];
-            for (let i = 0; i < olderRounds; i++) {
-                if (regular[i].turns.some(turn => normalizeType(turn) === "model" &&
-                    CompactionTask.isPinnedSummary(turn.textContent || ""))) {
-                    pinnedOlderRounds.push(i);
-                }
-            }
+            const olderGroupIndices = chatIndices.slice(0, -keepRounds);
+            const pinnedOlderRounds = olderGroupIndices.filter(index =>
+                regular[index].turns.some(turn => normalizeType(turn) === "model" &&
+                    CompactionTask.isPinnedSummary(turn.textContent || "")));
             const plan = {
                 manual: true,
                 promptId, snapshot: "", marker: null, memoryMarker: null,
-                totalRounds: regular.length, olderRounds, recentRounds: keepRounds,
+                totalRounds: regular.length, olderRounds: olderGroupIndices.length,
+                olderGroupIndices, recentRounds: keepRounds,
                 pinnedOlderRounds, pinnedMemoryTexts: [], legacy: false,
                 // UI may virtualize or reorder chat nodes; never delete a
                 // stale selection after the page has changed.
@@ -180,7 +188,8 @@
             const pinned = new Set(plan.pinnedOlderRounds || []);
             const getRole = turn => normalizeType(turn);
             for (const index of pinned) {
-                if (index < 0 || index >= plan.olderRounds ||
+                if (index < 0 || index >= regular.length ||
+                    (plan.manual && !plan.olderGroupIndices.includes(index)) ||
                     !regular[index]?.turns?.some(turn =>
                         getRole(turn) === "model" &&
                         CompactionTask.isPinnedSummary(turn.textContent || ""))) {
@@ -192,7 +201,9 @@
             // are pinned in their entirety, so their visible memory survives.
             const targetTurns = [];
             const ignoredOldThoughts = new Set();
-            for (let i = 0; i < plan.olderRounds; i++) {
+            const olderIndices = plan.manual ? plan.olderGroupIndices :
+                Array.from({ length: plan.olderRounds }, (_, i) => i);
+            for (const i of olderIndices) {
                 if (pinned.has(i)) continue;
                 for (const turn of [...regular[i].turns].reverse()) {
                     if (getRole(turn) === "thought" && !turn.querySelector(
