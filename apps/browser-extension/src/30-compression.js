@@ -25,6 +25,8 @@
             state.activeCompressionPrompt = prompt;
             state.activeCompressionSnippet = deriveSnippet(getCompressPrompt());
             state.activeCompressionMarker = task.marker;
+            state.activeCompressionKeepRounds = task.keepRounds;
+            state.scopedCompression = null;
             state.compressionInProgress = true;
             state.compressionRequestPending = true;
             state.compressionResponsePending = false;
