@@ -1,0 +1,26 @@
+name: Browser extension checks
+on:
+  pull_request:
+    paths:
+      - 'apps/browser-extension/**'
+      - '.github/workflows/browser-extension.yml'
+  push:
+    paths:
+      - 'apps/browser-extension/**'
+      - '.github/workflows/browser-extension.yml'
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - run: npm run check
+        working-directory: apps/browser-extension
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sujiu-aistudio-browser-extension
+          path: |
+            apps/browser-extension/dist/extension/
+            apps/browser-extension/dist/sujiu-aistudio.user.js
