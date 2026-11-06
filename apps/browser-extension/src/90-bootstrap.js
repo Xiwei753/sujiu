@@ -26,6 +26,7 @@
 
         // The panel is independent of AI Studio's private RPCs and fragile
         // toolbar selectors; initialize it before any hooks.
+        attempt("performance", () => PerformanceTuning.init());
         runtimeInfo.panelInitialized = attempt("panel", () => PromptPanel.mount());
         attempt("events", installTopLevelHandlers);
         runtimeInfo.networkInitialized = attempt("network", () => NetworkMonitor.init());
