@@ -85,6 +85,10 @@ test("default prompt summarizes only the supplied story chronology", () => {
   const m = stateSource.match(/\n            FULL: ("(?:\\.|[^"\\])*"),\n            SNIPPET:/);
   assert.ok(m);
   const prompt = JSON.parse(m[1]);
-  assert.match(prompt, /实际提供的历史记录/);
+  assert.match(prompt, /时间线|时间先后/);
+  assert.match(prompt, /历史截点/);
+  assert.match(prompt, /人物与关系/);
+  assert.match(prompt, /未解决线索/);
+  assert.ok(prompt.length > 1100);
   assert.doesNotMatch(prompt, /最近保留轮次|指定的较早轮次|最新剧情由保留/);
 });
