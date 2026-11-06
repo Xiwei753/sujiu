@@ -46,6 +46,7 @@
                 if (doc.getElementById(Config.UI.BUTTON_ID)) return;
                 const toolbar = UI.findToolbar(doc);
                 if (!toolbar) continue;
+                UI.toolbarMissingLogged = false;
                 const button = UI.createButton(doc);
                 const moreButton = toolbar.querySelector(
                     'button[iconname="more_vert"], button[aria-label="View more actions"], button[aria-label="More actions"], button[aria-label="More options"]'
@@ -67,7 +68,10 @@
                 }
                 return;
             }
-            log.ui("Toolbar not found, wait for next mutation");
+            if (!UI.toolbarMissingLogged) {
+                log.ui("Toolbar not found yet; waiting for AI Studio to load");
+                UI.toolbarMissingLogged = true;
+            }
         },
         findToolbar(doc) {
             const selectors = Array.isArray(Config.UI.TOOLBAR_SELECTORS)
