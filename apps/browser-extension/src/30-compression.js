@@ -27,7 +27,7 @@
             textarea.dispatchEvent(new Event("change", { bubbles: true }));
             sendCompressionRequest().then(sent => {
                 if (sent) {
-                    log.ui("Compression request sent");
+                    log.ui("Compression click sent; listening without a time limit");
                     return;
                 }
                 log.ui("Compression request was not confirmed; no retry attempted");
@@ -50,7 +50,7 @@
 
         handleRequestEvent(event) {
             const detail = event?.detail;
-            if (!detail?.bodyText) return;
+            if (!isTargetRequest(detail?.url, "GENERATE") || !detail?.bodyText) return;
             const isCompressionBody = Compression.isCompressionPrompt(detail.bodyText);
 
             if (!state.historyCapturePending && !state.compressionInProgress) {
@@ -92,6 +92,7 @@
                 return;
             }
             const detail = event?.detail;
+            if (!isTargetRequest(detail?.url, "GENERATE")) return;
             if (!detail?.bodyText) {
                 log.net("GenerateContent response missing bodyText");
                 Compression.finalizeRun();
@@ -109,12 +110,33 @@
                 Compression.finalizeRun();
                 return;
             }
-            log.net("Compression snapshot extracted; preparing in-place deletion preview");
-            prepareInPlaceCompaction(snapshot).catch(err => {
-                log.net("Failed to prepare in-place deletion", err.message);
-                alert("素酒压缩失败： " + err.message);
-            });
+            log.net("Summary response completed; ready for manual review", { length: snapshot.length });
+            PromptPanel.status("AI Studio 已返回摘要。请先确认模型已经完成，再点击「读取已完成摘要」核对并准备清理。");
             Compression.finalizeRun();
+        },
+
+        stopTracking() {
+            if (!state.compressionInProgress) {
+                PromptPanel.status("当前没有正在监听的摘要请求");
+                return;
+            }
+            Compression.finalizeRun();
+            PromptPanel.status("已停止插件监听，AI Studio 正在生成的内容不会被中断；完成后可以手动读取摘要。");
+        },
+
+        async recover() {
+            if (state.branchInProgress) {
+                PromptPanel.status("正在清理旧消息，请先完成当前操作");
+                return;
+            }
+            try {
+                PromptPanel.status("正在从当前会话重新读取已保存的摘要……");
+                await recoverLatestCompletedSummary();
+                Compression.finalizeRun();
+            } catch (error) {
+                PromptPanel.status("尚未取得可用于清理的完整摘要：" + String(error?.message || error));
+                log.ui("Manual summary recovery failed", String(error?.message || error));
+            }
         },
 
         finalizeRun() {
@@ -142,20 +164,6 @@
             return false;
         }
     };
-
-    function delay(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    async function waitForCompressionRequestCapture(timeoutMs = 12000) {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            if (!state.compressionInProgress) return false;
-            if (state.compressionResponsePending || !state.compressionRequestPending) return true;
-            await delay(100);
-        }
-        return state.compressionResponsePending || !state.compressionRequestPending;
-    }
 
     function isStopControl(button) {
         const icon = button.querySelector?.("mat-icon, .material-symbols-outlined");
@@ -185,7 +193,9 @@
         button.click();
         log.ui("Compression request: single native Run click");
         PromptPanel.status("已点击运行一次，等待 AI Studio 接收请求；不会自动再次点击");
-        return waitForCompressionRequestCapture();
+        // Keep the capture handlers active for as long as the model needs.
+        // Recovery is a separate user-initiated step, so no timeout or retry.
+        return true;
     }
 
     function setTextareaValue(textarea, value) {
