@@ -17,8 +17,13 @@
 1. npm run check
 2. Chrome / Edge 打开 chrome://extensions，启用开发者模式，加载 dist/extension 目录。
 3. 使用 Tampermonkey 时导入 dist/sujiu-aistudio.user.js，避免同时启用扩展与油猴版本。
-4. 打开 https://aistudio.google.com/prompts/ 下的已有聊天，右下角点击「素酒工具」。
-5. 先测试提示词填写；压缩前建议保存原聊天，再测试压缩分支，刷新新会话核对内容。
+4. **Chrome / Edge 新版必须检查用户脚本权限：** 浏览器扩展管理页 → Tampermonkey →「详情」→ 开启「允许用户脚本（Allow User Scripts）」。这个开关关闭时，脚本可以显示为已导入、已启用，但不会在网页执行。参考 [Tampermonkey FAQ](https://www.tampermonkey.net/faq.php?ext=dhdg&q=Q209&version=5.1.0)。
+5. 打开 https://aistudio.google.com/prompts/new_chat 并强制刷新；也兼容旧的 /app/prompts/* 路径。首次安装后工具面板默认展开，此后通过右下角「素酒工具」开关。
+6. 先测试提示词填写；压缩前建议保存原聊天，再测试压缩分支，刷新新会话核对内容。
+
+### 面板未出现时的最小诊断
+
+在 AI Studio 标签页按 F12 打开 Console，输入 `window.__SUJIU_AISTUDIO_RUNTIME__`。如果返回 `undefined`，优先检查 Tampermonkey 是否真正执行、是否允许用户脚本、脚本的站点匹配与启用状态；如果返回对象，检查 `errors` 数组及 `panelInitialized` 字段，并附上不含密钥的错误信息反馈。v0.1.1 起网络监听失败不应影响面板初始化。
 
 ## 架构
 
