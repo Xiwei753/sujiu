@@ -57,14 +57,20 @@
         const originalFetch = ctx.fetch.bind(ctx);
 
         ctx.fetch = async function interceptFetch(input, init = {}) {
-            const request = new Request(input, init);
-            const shouldLogGenerate = isTargetRequest(request.url, "GENERATE");
-            const shouldCaptureResolve = isTargetRequest(request.url, "RESOLVE");
-
-            if (shouldLogGenerate) {
-                await logRequestPayload(request);
+            const url = typeof input === "string" ? input : input?.url;
+            const shouldLogGenerate = isTargetRequest(url, "GENERATE");
+            const shouldCaptureResolve = isTargetRequest(url, "RESOLVE");
+            if (!shouldLogGenerate && !shouldCaptureResolve) {
+                return originalFetch(input, init);
             }
-
+            let request;
+            try {
+                request = new Request(input, init);
+            } catch {
+                // Never break the host application because our inspector cannot clone a request.
+                return originalFetch(input, init);
+            }
+            if (shouldLogGenerate) await logRequestPayload(request);
             const response = await originalFetch(input, init);
 
             if (shouldLogGenerate || shouldCaptureResolve) {
