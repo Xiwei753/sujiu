@@ -9,7 +9,8 @@ function mockTurn(id, type) {
     id,
     isConnected: true,
     getAttribute(key) { return key === "data-turn-type" ? type : ""; },
-    querySelector() { return { click() {} }; }
+    querySelector(selector) { return selector.includes("ms-chat-turn-options") ? { click() {} } : null; },
+    classList: { contains() { return false; } }
   };
 }
 function context(turns) {
