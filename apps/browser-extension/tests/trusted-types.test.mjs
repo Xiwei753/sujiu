@@ -36,7 +36,10 @@ class StrictNode {
     const match = selector.match(/^\[([^=]+)="([^"]+)"\]$/);
     if (!match) return null;
     const [_, key, value] = match;
-    return this.find(node => node.getAttribute?.(key) === value);
+    const datasetKey = key.startsWith("data-")
+      ? key.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()) : null;
+    return this.find(node => node.getAttribute?.(key) === value ||
+      (datasetKey && node.dataset?.[datasetKey] === value));
   }
   getElementById(id) { return this.find(node => node.id === id); }
   find(predicate) {
