@@ -25,6 +25,16 @@ const PromptPanel = (() => {
       return data.presets[data.active];
     }
     const combined = () => PromptProfiles.compile(current());
+    function showCompactionReview(plan) {
+      const container = root?.getElementById("inplace-review");
+      if (!container) return;
+      container.hidden = !plan;
+      if (plan) {
+        root.querySelector('[data-role="snapshot-preview"]').value = plan.snapshot;
+        status("摘要已生成：" + plan.totalRounds + " 轮中，将删除旧 " +
+          plan.olderRounds + " 轮、保留最近 " + plan.recentRounds + " 轮。请先检查摘要。");
+      }
+    }
     function status(message) {
       const el = root?.querySelector('[data-role="status"]');
       if (el) el.textContent = String(message);
@@ -178,7 +188,7 @@ const PromptPanel = (() => {
         element.append(...children);
         return element;
       };
-      const style = make("style", { text: "\n          *{box-sizing:border-box} button,input,select,textarea{font:inherit}\n          button{cursor:pointer;border:1px solid #64748b66;border-radius:8px;padding:6px 8px;background:#ffffff12;color:inherit}\n          button:hover{background:#94a3b833}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0d9488}\n          #toggle{background:#156f67;color:white;border:0;box-shadow:0 3px 16px #0005}\n          #pane{width:min(405px,calc(100vw - 24px));max-height:min(82vh,850px);margin-bottom:9px;overflow:auto;color:#f1f5f9;background:#1b2029;border:1px solid #64748b55;border-radius:14px;padding:15px;box-shadow:0 6px 40px #0008;font:13px/1.5 system-ui,sans-serif}\n          #pane[hidden]{display:none}h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;margin:16px 0 7px}.line{display:flex;align-items:center;gap:6px;margin:6px 0}.line>*{min-width:0}\n          select,input[type=number],textarea{width:100%;background:#0f172a;color:#f8fafc;border:1px solid #64748b99;border-radius:8px;padding:7px}\n          textarea{display:block;resize:vertical;min-height:62px;margin:5px 0 10px}\n          label{font-size:12px;color:#cbd5e1}.section-header{display:flex;align-items:center;gap:7px;justify-content:space-between}\n          .section-header label{flex:1}.small{padding:3px 7px;font-size:12px}\n          #status{color:#99f6e4;min-height:1.5em;font-size:12px;margin-top:10px}\n          .hint{color:#94a3b8;font-size:11px;margin:7px 0}\n          .check-line{display:flex;gap:8px;align-items:center}.check-line input{width:auto}\n          hr{border:0;border-top:1px solid #64748b55;margin:14px 0}\n        " });
+      const style = make("style", { text: "\n          *{box-sizing:border-box} button,input,select,textarea{font:inherit}\n          button{cursor:pointer;border:1px solid #64748b66;border-radius:8px;padding:6px 8px;background:#ffffff12;color:inherit}\n          button:hover{background:#94a3b833}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0d9488}\n          #toggle{background:#156f67;color:white;border:0;box-shadow:0 3px 16px #0005}\n          #pane{width:min(405px,calc(100vw - 24px));max-height:min(82vh,850px);margin-bottom:9px;overflow:auto;color:#f1f5f9;background:#1b2029;border:1px solid #64748b55;border-radius:14px;padding:15px;box-shadow:0 6px 40px #0008;font:13px/1.5 system-ui,sans-serif}\n          #pane[hidden]{display:none}h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;margin:16px 0 7px}.line{display:flex;align-items:center;gap:6px;margin:6px 0}.line>*{min-width:0}\n          select,input[type=number],textarea{width:100%;background:#0f172a;color:#f8fafc;border:1px solid #64748b99;border-radius:8px;padding:7px}\n          textarea{display:block;resize:vertical;min-height:62px;margin:5px 0 10px}\n          label{font-size:12px;color:#cbd5e1}.section-header{display:flex;align-items:center;gap:7px;justify-content:space-between}\n          .section-header label{flex:1}.small{padding:3px 7px;font-size:12px}\n          #status{color:#99f6e4;min-height:1.5em;font-size:12px;margin-top:10px}\n          .hint{color:#94a3b8;font-size:11px;margin:7px 0}\n          .check-line{display:flex;gap:8px;align-items:center}.check-line input{width:auto}\n          hr{border:0;border-top:1px solid #64748b55;margin:14px 0}\n          #inplace-review[hidden]{display:none}\n        " });
       const line = (...children) => make("div", { className: "line" }, children);
       const action = (label, name) => make("button", { type: "button", "data-action": name, text: label });
       const role = (name, tag = "input", attributes = {}) =>
@@ -203,8 +213,14 @@ const PromptPanel = (() => {
         role("keep", "input", { type: "number", min: "1", max: "100", step: "1" }),
         make("label", { text: "压缩摘要提示词" }),
         role("summary-prompt", "textarea", { rows: "5" }),
-        line(action("立即压缩并创建分支", "compress")),
-        make("p", { className: "hint", text: "建议上下文接近 20 万 tokens 时手动压缩，并为下一次回复预留空间（实际以当前模型上限为准）。压缩只创建新的摘要分支，原始会话保留。" }),
+        line(action("生成摘要（当前聊天）", "compress")),
+        make("div", { id: "inplace-review", hidden: true }, [
+          make("label", { text: "摘要预览（已写入原聊天）" }),
+          role("snapshot-preview", "textarea", { rows: "8", readonly: "readonly" }),
+          line(action("确认删除较早的聊天和思考", "commit-delete"),
+               action("保留原历史", "cancel-delete"))
+        ]),
+        make("p", { className: "hint", text: "摘要生成后需再次确认才会删除早期轮次和关联思考。直接修改当前聊天，无新分支，也无法撤销。请先在测试会话使用。" }),
         make("div", { id: "status", "data-role": "status", role: "status", "aria-live": "polite" })
       ]);
       const toggle = make("button", { id: "toggle", type: "button",
@@ -352,9 +368,14 @@ const PromptPanel = (() => {
           status(ok ? "已复制提示词，可粘贴至系统指令框" : "复制失败：请检查剪贴板权限");
         }
         if (action === "compress") {
-          status("准备生成摘要并创建新分支，原会话仍会保留");
+          status("正在当前会话生成摘要；生成后需再次确认删除旧消息");
           Compression.run();
         }
+        if (action === "commit-delete") {
+          try { await InPlaceCompaction.commit(); }
+          catch (error) { status("原地压缩停止：" + String(error?.message || error)); }
+        }
+        if (action === "cancel-delete") InPlaceCompaction.cancel();
       });
       // Open once after a fresh install so users can confirm injection
       // without having to find the small bottom-right launcher.
@@ -374,5 +395,5 @@ const PromptPanel = (() => {
       render();
       setInterval(autoInjectOnce, 1800);
     }
-    return { mount, status };
+    return { mount, status, showCompactionReview };
   })();
