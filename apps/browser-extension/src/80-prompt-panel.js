@@ -373,7 +373,7 @@ const PromptPanel = (() => {
         }
         if (action === "commit-delete") {
           try { await InPlaceCompaction.commit(); }
-          catch (error) { status("原地压缩停止：" + String(error?.message || error)); }
+          catch (error) { console.warn("[Sujiu AI Studio] in-place deletion halted", String(error?.message || error)); }
         }
         if (action === "cancel-delete") InPlaceCompaction.cancel();
       });
