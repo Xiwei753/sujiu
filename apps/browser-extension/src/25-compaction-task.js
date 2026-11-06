@@ -32,6 +32,16 @@
             try { localStorage.setItem(this.storagePrefix + task.promptId, JSON.stringify(task)); }
             catch {}
         },
+        confirmScoped(promptId, marker, stats) {
+            const previous = this.read(promptId);
+            if (!previous || previous.marker !== marker ||
+                stats?.recentRounds !== previous.keepRounds ||
+                !Number.isSafeInteger(stats.olderRounds) || stats.olderRounds < 1) {
+                throw new Error("摘要任务与已裁剪的模型请求不一致");
+            }
+            this.save({ ...previous, scopeVerified: true,
+                olderRounds: stats.olderRounds, totalRounds: stats.totalRounds });
+        },
         read(promptId) {
             try {
                 const raw = localStorage.getItem(this.storagePrefix + promptId);
