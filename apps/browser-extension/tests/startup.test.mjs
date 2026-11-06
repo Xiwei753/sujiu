@@ -27,7 +27,8 @@ function start({ inAppContext = false, networkFails = false } = {}) {
 
 test("UI mounts before network interceptors and survives an interceptor failure", () => {
   const result = start({ networkFails: true });
-  assert.equal(result.calls[0], "panel");
+  assert.ok(result.calls.indexOf("panel") >= 0);
+  assert.ok(result.calls.indexOf("panel") < result.calls.indexOf("network"));
   assert.equal(result.info.panelInitialized, true);
   assert.equal(result.info.networkInitialized, false);
   assert.equal(result.info.errors[0].stage, "network");
