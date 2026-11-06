@@ -9,6 +9,7 @@ const roundSource = await readFile(new URL("../src/35-rounds.js", import.meta.ur
 const stateSource = await readFile(new URL("../src/00-state.js", import.meta.url), "utf8");
 const recoveryCode = history.slice(0, history.indexOf("    function extractStateSnapshot("));
 const marker = "[[SUJIU_SCOPE_V2:abcd1234-0000]]";
+const memory = "[[SUJIU_MEMORY_V1:abcd1234-0000]]";
 const pairs = count => Array.from({ length: count }, (_, i) =>
   [{ role: "user", text: "u" + i }, { role: "model", text: "m" + i }]).flat();
 
@@ -37,26 +38,26 @@ function setup(turns, storageState = {}) {
 
 test("reads only a verified old-only model summary and preserves protected rounds", async () => {
   const turns = [...pairs(3), { role: "user", text: "Summarize\n" + marker },
-    { role: "model", text: "Past scenes are complete." },
+    { role: "model", text: memory + "\nPast scenes are complete." },
     { role: "model", text: "hidden reasoning", thought: true }];
   const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 2, totalRounds: 3,
     olderRounds: 1, scopeVerified: true });
   await x.recover();
   assert.equal(x.staged.length, 1);
-  assert.equal(x.staged[0][0], "Past scenes are complete.");
+  assert.equal(x.staged[0][0], memory + "\nPast scenes are complete.");
   assert.equal(x.staged[0][1].olderRounds, 1);
   assert.equal(x.staged[0][1].recentRounds, 2);
 });
 
 test("refuses cleanup when the generated request was not verified to exclude protected turns", async () => {
-  const turns = [...pairs(3), { role: "user", text: marker }, { role: "model", text: "summary" }];
+  const turns = [...pairs(3), { role: "user", text: marker }, { role: "model", text: memory + "\nsummary" }];
   const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 2, totalRounds: 3 });
   await assert.rejects(x.recover(), /无法确认本次模型请求已经裁掉近期对话/);
   assert.equal(x.staged.length, 0);
 });
 
 test("detects changed cloud history instead of deleting old records", async () => {
-  const turns = [...pairs(2), { role: "user", text: marker }, { role: "model", text: "summary" }];
+  const turns = [...pairs(2), { role: "user", text: marker }, { role: "model", text: memory + "\nsummary" }];
   const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 1, totalRounds: 3,
     scopeVerified: true });
   await assert.rejects(x.recover(), /Google 保存的原聊天轮数与压缩前不一致/);
