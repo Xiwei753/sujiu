@@ -226,13 +226,14 @@ const PromptPanel = (() => {
         line(action("生成摘要（当前聊天）", "compress")),
         make("p", { className: "hint", text: "生成没有固定等待时限。模型完成回复后，再点击读取摘要；两项操作相互独立。" }),
         line(action("读取已完成摘要", "recover-summary"), action("停止插件监听", "stop-tracking")),
+        line(action("直接清理旧历史", "cleanup-history")),
+        make("p", { className: "hint", text: "清理历史可以单独使用：按保留轮数删除较早的完整对话，已标记压缩记忆会保留。无需先生成或读取摘要；清理前会显示数量让你确认。" }),
         make("div", { id: "inplace-review", hidden: true }, [
           make("label", { text: "摘要预览（已写入原聊天）" }),
           role("snapshot-preview", "textarea", { rows: "8", readonly: "readonly" }),
-          line(action("确认删除较早的聊天和思考", "commit-delete"),
-               action("保留原历史", "cancel-delete"))
+          line(action("收起摘要预览", "cancel-delete"))
         ]),
-        make("p", { className: "hint", text: "摘要生成后需再次确认才会删除早期轮次和关联思考。直接修改当前聊天，无新分支，也无法撤销。请先在测试会话使用。" }),
+        make("p", { className: "hint", text: "生成摘要不会自动删除历史；独立清理是不可撤销操作，使用 Google 原生删除菜单和自动保存。重要聊天请先备份。" }),
         make("div", { id: "status", "data-role": "status", role: "status", "aria-live": "polite" })
       ]);
       const toggle = make("button", { id: "toggle", type: "button",
@@ -329,7 +330,7 @@ const PromptPanel = (() => {
             render();
           } else {
             updateUserSettings({ keepRounds: keep });
-            status("压缩将保留最近 " + keep + " 轮完整对话");
+            status("摘要请求和独立历史清理均保留最近 " + keep + " 轮完整对话");
           }
         }
         if (role === "summary-prompt") {
@@ -389,8 +390,8 @@ const PromptPanel = (() => {
         }
         if (action === "recover-summary") await Compression.recover();
         if (action === "stop-tracking") Compression.stopTracking();
-        if (action === "commit-delete") {
-          try { await InPlaceCompaction.commit(); }
+        if (action === "cleanup-history") {
+          try { await InPlaceCompaction.manualCleanup(); }
           catch (error) {
             const reason = String(error?.message || error);
             status("删除未完成：" + reason);
