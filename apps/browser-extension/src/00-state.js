@@ -40,9 +40,6 @@
                 'button[type="submit"]'
             ]
         },
-        SETTINGS: {
-            PAGE_URL: null
-        },
         PROMPTS: {
             FULL: "Summarize the earlier role-play conversation as a compact, accurate memory snapshot.\nOnly summarize the history BEFORE the most recent completed exchanges identified in the final instruction. Preserve established characters, relationships, identity, world rules, important events, state changes, promises, possessions, unresolved conflicts, and the current situation before those exchanges. Avoid adding fictional details or overriding established facts.\nReturn only:\n<state_snapshot>\n[Concise, structured summary in the language of the conversation]\n</state_snapshot>",
             SNIPPET: "Summarize the earlier role-play conversation"
@@ -54,8 +51,7 @@
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const settingsOrigin = getSettingsOrigin();
-    const SCRIPT_VERSION = "0.3.2";
+    const SCRIPT_VERSION = "0.1.0";
 
     const state = {
         compressionInProgress: false,
@@ -86,8 +82,6 @@
     const DEFAULT_SETTINGS = {
         compressPrompt: Config.PROMPTS.FULL,
         snapshotRegex: "",
-        tailPercent: 30,
-        tailMinChars: 2000,
         keepRounds: 8
     };
     let userSettings = loadUserSettings();
