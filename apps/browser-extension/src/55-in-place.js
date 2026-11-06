@@ -98,6 +98,49 @@
             return pending;
         }
 
+        function planManualCleanup(keepRounds = Number(userSettings.keepRounds) || 8) {
+            const promptId = Branching.getCurrentPromptId();
+            if (!promptId || promptId === "new_chat") {
+                throw new Error("请先保存当前聊天");
+            }
+            if (!Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) {
+                throw new Error("保留轮数必须是 1 到 100 的整数");
+            }
+            const turns = [...document.querySelectorAll("ms-chat-turn")];
+            const groups = collectGroups(turns);
+            const regular = groups.filter(group => group.kind !== "memory");
+            if (regular.length <= keepRounds) {
+                throw new Error("当前只有 " + regular.length +
+                    " 轮完整对话，没有超出保留范围的历史");
+            }
+            const olderRounds = regular.length - keepRounds;
+            const pinnedOlderRounds = [];
+            for (let i = 0; i < olderRounds; i++) {
+                if (regular[i].turns.some(turn => normalizeType(turn) === "model" &&
+                    CompactionTask.isPinnedSummary(turn.textContent || ""))) {
+                    pinnedOlderRounds.push(i);
+                }
+            }
+            const plan = {
+                manual: true,
+                promptId, snapshot: "", marker: null, memoryMarker: null,
+                totalRounds: regular.length, olderRounds, recentRounds: keepRounds,
+                pinnedOlderRounds, pinnedMemoryTexts: [], legacy: false,
+                // UI may virtualize or reorder chat nodes; never delete a
+                // stale selection after the page has changed.
+                domIds: turns.map(turn => turn.id)
+            };
+            return plan;
+        }
+
+        async function manualCleanup() {
+            if (deleting) return;
+            // This path is independent of compression / task markers.
+            // A user may clear old history without producing any summary.
+            const plan = planManualCleanup();
+            return commit(plan);
+        }
+
         async function verifyPersistedSummary(plan) {
             const capture = await fetchResolvedPromptThread(plan.promptId);
             if (!capture?.entries?.length) throw new Error("未能读取最新会话，停止删除");
@@ -125,9 +168,14 @@
             const turns = [...document.querySelectorAll("ms-chat-turn")];
             const groups = collectGroups(turns);
             const regular = groups.filter(group => group.kind !== "memory");
-            if (regular.length !== plan.totalRounds + 1) {
-                throw new Error("网页未完整加载历史轮次（检测到 " +
-                    regular.length + "，预期 " + (plan.totalRounds + 1) + "），拒绝删除");
+            const expected = plan.totalRounds + (plan.manual ? 0 : 1);
+            if (regular.length !== expected) {
+                throw new Error("网页历史轮次已改变（检测到 " +
+                    regular.length + "，预期 " + expected + "），请重新操作");
+            }
+            if (plan.manual && (turns.length !== plan.domIds.length ||
+                turns.some((turn, index) => !turn.id || turn.id !== plan.domIds[index]))) {
+                throw new Error("网页聊天节点在准备期间发生变化，请重新点击清理");
             }
             const pinned = new Set(plan.pinnedOlderRounds || []);
             const getRole = turn => normalizeType(turn);
@@ -143,9 +191,19 @@
             // Regular old exchanges can be removed; completed summary rounds
             // are pinned in their entirety, so their visible memory survives.
             const targetTurns = [];
+            const ignoredOldThoughts = new Set();
             for (let i = 0; i < plan.olderRounds; i++) {
-                if (!pinned.has(i)) {
-                    targetTurns.push(...[...regular[i].turns].reverse());
+                if (pinned.has(i)) continue;
+                for (const turn of [...regular[i].turns].reverse()) {
+                    if (getRole(turn) === "thought" && !turn.querySelector(
+                        "ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"
+                    )) {
+                        // It may disappear with its parent response; avoid
+                        // independently targeting an unclickable thought node.
+                        ignoredOldThoughts.add(turn.id);
+                    } else {
+                        targetTurns.push(turn);
+                    }
                 }
             }
 
@@ -182,7 +240,8 @@
                 throw new Error("待删除消息缺少稳定 ID，拒绝执行");
             }
             const targetSet = new Set(targetIds);
-            const protectedTurns = turns.filter(turn => !targetSet.has(turn.id));
+            const protectedTurns = turns.filter(turn =>
+                !targetSet.has(turn.id) && !ignoredOldThoughts.has(turn.id));
             if (protectedTurns.some(turn => !turn.id || targetSet.has(turn.id))) {
                 throw new Error("保护内容与删除范围发生冲突");
             }
@@ -253,21 +312,23 @@
             throw new Error("消息 " + id + " 删除后未从页面消失，已停止");
         }
 
-        async function commit() {
+        async function commit(selectedPlan = null) {
             if (deleting) return;
-            const plan = pending;
-            if (!plan) throw new Error("没有可应用的摘要");
+            const plan = selectedPlan || pending;
+            if (!plan) throw new Error("请先读取摘要或使用「直接清理旧历史」");
             if (Branching.getCurrentPromptId() !== plan.promptId) {
                 throw new Error("会话已切换，请重新读取摘要");
             }
             // Preflight still verifies the staged summary and protected
             // boundary; only post-deletion server polling is removed.
-            await verifyPersistedSummary(plan);
+            if (!plan.manual) await verifyPersistedSummary(plan);
             const preview = preflightDom(plan);
-            const prompt = "准备一次性清理 " + preview.deletedOldRounds + " 轮旧历史" +
+            const prompt = (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
+                preview.deletedOldRounds + " 轮旧历史" +
                 (preview.pinnedCount ? "（已保护 " + preview.pinnedCount + " 条旧压缩记忆）" : "") +
                 (plan.memoryMarker ? "，并清理本次工具指令及可独立删除的思考块" : "") +
                 "。保留最近 " + plan.recentRounds + " 轮与已标记摘要。" +
+                (plan.manual ? "本次不依赖新摘要；未标记的旧摘要可能按普通历史删除。" : "") +
                 (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                     " 个无法独立删除的思考块会保留。" : "") +
                 "删除操作使用 AI Studio 原生消息菜单，Google 会自行自动保存。全部删除后统一等待保存响应。该操作不可撤销，继续？";
@@ -313,8 +374,10 @@
                         "，请检查网络和页面状态，暂勿刷新。");
                     return;
                 }
-                pending = null;
-                PromptPanel.showCompactionReview(null);
+                if (!selectedPlan) {
+                    pending = null;
+                    PromptPanel.showCompactionReview(null);
+                }
                 PromptPanel.status("批量删除已完成；观察到 " + autosave.attempts +
                     " 次原生 UpdatePrompt 响应，最后状态 " + autosave.status +
                     "。这表示保存请求有成功响应，刷新后可核对实际云端历史。" +
@@ -337,5 +400,8 @@
             PromptPanel.status("已取消清理。摘要已生成在当前聊天中，原始历史仍在。");
         }
 
-        return Object.freeze({ stage, commit, cancel, collectGroups, preflightDom, get pending() { return pending; } });
+        return Object.freeze({
+            stage, commit, manualCleanup, planManualCleanup, cancel,
+            collectGroups, preflightDom, get pending() { return pending; }
+        });
     })();
