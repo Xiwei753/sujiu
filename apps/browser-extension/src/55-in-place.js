@@ -302,52 +302,58 @@
             const plan = pending;
             if (!plan) throw new Error("没有可应用的摘要");
             if (Branching.getCurrentPromptId() !== plan.promptId) {
-                throw new Error("会话已切换，需重新压缩");
+                throw new Error("会话已切换，请重新读取摘要");
             }
             const baseline = await verifyPersistedSummary(plan);
-            const baselineSummary = findSavedSummary(baseline.turns, plan.promptId);
-            const original = baseline.turns.slice(0, baselineSummary.lastUserIndex);
-            const expectedProtected = JSON.stringify(
-                RoundSplitter.partition(original, plan.recentRounds).recent.map(
-                    turn => [turn.role, turn.text]));
+            const latest = findSavedSummary(baseline.turns, plan.promptId);
+            const original = baseline.turns.slice(0, latest.lastUserIndex);
+            const recent = RoundSplitter.partition(original, plan.recentRounds).recent;
+            const expectedProtected = JSON.stringify(recent.map(turn => [turn.role, turn.text]));
             const preview = preflightDom(plan);
-            if (!confirm("将逐轮删除最旧的 " + plan.olderRounds +
-                    " 轮（包括关联思考内容），保留最近 " + plan.recentRounds +
-                    " 轮和摘要。每轮必须获得 Google 云端确认，未保存会立刻停止。此操作无法撤销，确认继续？")) return;
+            const expectedUsers = baseline.turns.filter(turn => turn.role === "user").length -
+                preview.deletedUserCount;
+            const prompt = "准备一次性清理 " + preview.deletedOldRounds + " 轮旧历史" +
+                (preview.pinnedCount ? "（已保护 " + preview.pinnedCount + " 条旧压缩记忆）" : "") +
+                (plan.memoryMarker ? "，并清理本次工具指令及可独立删除的思考块" : "") +
+                "。保留最近 " + plan.recentRounds + " 轮与已标记摘要。" +
+                (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
+                    " 个无法独立删除的思考块会保留。" : "") +
+                "所有页面删除完成后只进行一次云端保存验证。该操作不可撤销，继续？";
+            if (!confirm(prompt)) return;
             deleting = true;
             state.branchInProgress = true;
             let processed = 0;
             const saveBaseline = SaveMonitor.attempts;
             try {
-                for (let roundIndex = 0; roundIndex < preview.deleteGroups.length; roundIndex++) {
-                    const groupIds = preview.deleteGroups[roundIndex];
-                    for (const id of groupIds) {
-                        if (Branching.getCurrentPromptId() !== plan.promptId) {
-                            throw new Error("删除过程中会话发生切换");
-                        }
-                        await deleteOne(id);
-                        processed++;
+                const protectedSet = new Set(preview.protectedIds);
+                for (const id of preview.targetIds) {
+                    if (Branching.getCurrentPromptId() !== plan.promptId) {
+                        throw new Error("清理过程中会话已经切换");
                     }
-                    PromptPanel.status("已在页面删除第 " + (roundIndex + 1) +
-                        " 轮，等待 Google 服务器确认保存……");
-                    await awaitCloudPersistence(plan, roundIndex + 1, expectedProtected, saveBaseline);
-                    PromptPanel.status("Google 云端确认删除 " + (roundIndex + 1) +
-                        "/" + plan.olderRounds + " 轮，继续下一轮");
+                    await deleteOne(id);
+                    processed++;
+                    // An Angular cascading delete may remove the summary
+                    // alongside its temporary user prompt. Stop immediately
+                    // if that happens, instead of deleting the rest blindly.
+                    for (const protectedId of protectedSet) {
+                        if (!document.getElementById(protectedId)) {
+                            throw new Error("原生删除联动影响了受保护消息 " +
+                                protectedId + "，已立即停止。请刷新并核对摘要");
+                        }
+                    }
+                    PromptPanel.status("批量清理中 " + processed + "/" + preview.items +
+                        "，完成后统一验证 Google 保存");
                 }
-                const after = await fetchResolvedPromptThread(plan.promptId);
-                if (!after?.entries?.length) throw new Error("无法验证 Google 端保存结果");
-                const remaining = extractResolvedTurns(after.entries);
-                const remainingUsers = remaining.filter(t => t.role === "user").length;
-                if (remainingUsers !== plan.recentRounds + 1) {
-                    throw new Error("已执行删除，但云端仍有 " + remainingUsers +
-                        " 条用户消息；请刷新确认，避免重复操作");
-                }
+                PromptPanel.status("本批次已在页面处理，正在统一核对 Google 云端……");
+                await awaitCloudPersistence(plan, expectedUsers, expectedProtected, preview, saveBaseline);
                 pending = null;
                 PromptPanel.showCompactionReview(null);
-                PromptPanel.status("原地压缩完成，聊天地址保持不变。建议刷新后核对历史。");
+                PromptPanel.status("Google 云端已核对：旧历史清理完成，标记的压缩记忆和最近轮次仍在。" +
+                    (preview.skippedThoughts ? "部分内嵌思考块因缺少独立删除入口而保留。" : ""));
             } catch (error) {
-                PromptPanel.status("已处理 " + processed + "/" + preview.items + " 条后停止：" +
-                    String(error?.message || error) + "。请刷新检查现有历史。");
+                PromptPanel.status("批量清理处理了 " + processed + "/" + preview.items +
+                    " 个页面消息后停止：" + String(error?.message || error) +
+                    "。请刷新检查服务器实际状态");
                 throw error;
             } finally {
                 deleting = false;
