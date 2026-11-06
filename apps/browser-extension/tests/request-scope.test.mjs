@@ -37,14 +37,14 @@ test("model request contains full older turns and summary but never protected re
 });
 
 test("refuses unsafe private RPC schemas instead of leaking full history", () => {
-  assert.throws(() => Scope.prepare(JSON.stringify(["other", {}, {}]), marker, 1), /格式无法验证/);
+  assert.throws(() => Scope.prepare(JSON.stringify(["other", {}, { marker }]), marker, 1), /格式无法验证/);
   assert.throws(() => Scope.prepare(JSON.stringify(["other", [
     make("user", "old"), make("model", "reply"),
     [[null], "tool"], make("user", marker)
   ]]), marker, 1), /不兼容/);
   assert.throws(() => Scope.prepare(JSON.stringify(["other", [
     ...initial.slice(0, -1), make("user", "ordinary")
-  ]]), marker, 1), /本次压缩指令/);
+  ], { taskMarker: marker }]), marker, 1), /本次压缩指令/);
   assert.equal(Scope.prepare(wire, "[[SUJIU_SCOPE_V2:other-task]]", 1), null);
 });
 
