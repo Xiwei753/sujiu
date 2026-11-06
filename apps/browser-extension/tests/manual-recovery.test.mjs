@@ -10,6 +10,7 @@ const compression = await readFile(new URL("../src/30-compression.js", import.me
 const network = await readFile(new URL("../src/20-network.js", import.meta.url), "utf8");
 const roundSource = await readFile(new URL("../src/35-rounds.js", import.meta.url), "utf8");
 const stateSource = await readFile(new URL("../src/00-state.js", import.meta.url), "utf8");
+const settingsSource = await readFile(new URL("../src/10-settings.js", import.meta.url), "utf8");
 
 const makeTurn = (role, text, thought = false) =>
   ({ role, text, entry: thought ? Object.assign(Array(33).fill(null), { 19: 1 }) : null });
@@ -135,4 +136,36 @@ test("compression has no fixed capture timeout and permits manual recovery", () 
   assert.doesNotMatch(compression, /waitForCompressionRequestCapture|timeoutMs = 12000/);
   assert.match(compression, /async recover\(\)/);
   assert.match(compression, /stopTracking\(\)/);
+});
+
+
+test("only the old built-in summary prompt migrates; user-authored prompts remain untouched", () => {
+  const oldMatch = stateSource.match(/\n            LEGACY_FULL: ("(?:\\.|[^"\\])*"),\n            FULL:/);
+  const newMatch = stateSource.match(/\n            FULL: ("(?:\\.|[^"\\])*"),\n            SNIPPET:/);
+  assert.ok(oldMatch && newMatch);
+  const oldPrompt = JSON.parse(oldMatch[1]);
+  const newPrompt = JSON.parse(newMatch[1]);
+  function load(text) {
+    let lastSaved = null;
+    const storage = {
+      getItem() { return JSON.stringify({ compressPrompt: text, keepRounds: 20 }); },
+      setItem(_, value) { lastSaved = JSON.parse(value); }
+    };
+    const ctx = {
+      localStorage: storage,
+      STORAGE_KEY: "test-key",
+      DEFAULT_SETTINGS: { compressPrompt: newPrompt, keepRounds: 8 },
+      Config: { PROMPTS: { FULL: newPrompt, LEGACY_FULL: oldPrompt }, TAGS: { NET: "test" } },
+      console
+    };
+    const loadUserSettings = vm.runInNewContext(settingsSource + "\nloadUserSettings", ctx);
+    return { loaded: loadUserSettings(), lastSaved };
+  }
+  const legacy = load(oldPrompt);
+  assert.equal(legacy.loaded.compressPrompt, newPrompt);
+  assert.equal(legacy.loaded.keepRounds, 20);
+  assert.equal(legacy.lastSaved.compressPrompt, newPrompt);
+  const custom = load("自定义摘要提示词");
+  assert.equal(custom.loaded.compressPrompt, "自定义摘要提示词");
+  assert.equal(custom.lastSaved, null);
 });
