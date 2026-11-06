@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.2.2
+// @version      0.2.3
 // @description  AI Studio prompt presets and manual context compaction
 // @match        https://aistudio.google.com/*
 // @noframes
@@ -11,7 +11,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.2.2", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.2.3", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -58,8 +58,9 @@ const unsafeWindow = window;
             ]
         },
         PROMPTS: {
-            FULL: "Summarize the earlier role-play conversation as a compact, accurate memory snapshot.\nOnly summarize the history BEFORE the most recent completed exchanges identified in the final instruction. Preserve established characters, relationships, identity, world rules, important events, state changes, promises, possessions, unresolved conflicts, and the current situation before those exchanges. Avoid adding fictional details or overriding established facts.\nReturn only:\n<state_snapshot>\n[Concise, structured summary in the language of the conversation]\n</state_snapshot>",
-            SNIPPET: "Summarize the earlier role-play conversation"
+            LEGACY_FULL: "Summarize the earlier role-play conversation as a compact, accurate memory snapshot.\nOnly summarize the history BEFORE the most recent completed exchanges identified in the final instruction. Preserve established characters, relationships, identity, world rules, important events, state changes, promises, possessions, unresolved conflicts, and the current situation before those exchanges. Avoid adding fictional details or overriding established facts.\nReturn only:\n<state_snapshot>\n[Concise, structured summary in the language of the conversation]\n</state_snapshot>",
+            FULL: "请为这段长期对话制作按剧情时间线整理的精炼记忆，用于之后继续对话。仅总结后附说明指定的较早轮次。\n\n按以下顺序组织：\n【稳定设定】人物身份、关系、世界规则、持续有效的约定。\n【已发生的关键事件】按先后顺序记录重要行动、变化和结果；已结束的事件使用完成时态，标明结局和后续影响。\n【截至压缩截点的状态】只描述待删除历史结束时已经确立的状态、尚未解决的矛盾和后续伏笔，明确这是“压缩截点”而非整段对话的现在。\n【时间线衔接】说明最近保留轮次将接在什么事件之后。真正正在发生的剧情、地点和时间，应由保留的最近轮次决定。\n\n优先保留后续会影响人物决策和剧情因果的细节；输出应清晰、紧凑、忠于原文。仅返回上述结构化记忆，使用原对话语言。",
+            SNIPPET: "请为这段长期对话制作按剧情时间线整理的精炼记忆"
         }
     };
 
@@ -68,7 +69,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.2.2";
+    const SCRIPT_VERSION = "0.2.3";
 
     const state = {
         compressionInProgress: false,
@@ -86,6 +87,7 @@ const unsafeWindow = window;
         historyCapturePending: false,
         branchInProgress: false,
         activeCompressionPrompt: "",
+        activeCompressionMarker: "",
         activeCompressionSnippet: Config.PROMPTS.SNIPPET
     };
 
@@ -112,6 +114,14 @@ const unsafeWindow = window;
             }
             const parsed = JSON.parse(raw);
             if (parsed && typeof parsed === "object") {
+                // Existing installations store the original default as a
+                // literal string. Upgrade only that exact default and leave
+                // user-edited summary prompts untouched.
+                if (parsed.compressPrompt === Config.PROMPTS.LEGACY_FULL) {
+                    parsed.compressPrompt = Config.PROMPTS.FULL;
+                    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed)); }
+                    catch {}
+                }
                 return { ...DEFAULT_SETTINGS, ...parsed };
             }
             return { ...DEFAULT_SETTINGS };
@@ -182,6 +192,67 @@ const unsafeWindow = window;
     // ---------------------------
     // Network monitor module
     // ---------------------------
+
+    // Summary markers are metadata in the user message. They let us match a
+    // saved summary even if AI Studio adds thought entries after the reply.
+    // No prompt contents, API keys or conversation text are stored locally.
+    const CompactionTask = Object.freeze({
+        markerPattern: /\[\[SUJIU_SUMMARY_V1:([a-z0-9-]{8,80}):KEEP=(\d{1,3})\]\]/i,
+        legacyPattern: /Only summarize the completed dialogue BEFORE the last\s+(\d{1,3})\s+full user\/model exchanges\./i,
+        storagePrefix: "sujiu:aistudio:summary-task:v1:",
+        create(promptId, keepRounds) {
+            if (!promptId || !Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) {
+                throw new Error("无效的会话 ID 或保留轮数");
+            }
+            const id = typeof globalThis.crypto?.randomUUID === "function"
+                ? globalThis.crypto.randomUUID()
+                : Date.now().toString(36) + "-" + Math.random().toString(36).slice(2);
+            return {
+                promptId,
+                id,
+                marker: "[[SUJIU_SUMMARY_V1:" + id + ":KEEP=" + keepRounds + "]]",
+                keepRounds,
+                createdAt: Date.now()
+            };
+        },
+        compose(basePrompt, task) {
+            return basePrompt.trim() +
+                "\n\n只总结最近 " + task.keepRounds + " 轮完整用户/模型对话之前的历史。" +
+                "最近这些轮次由原聊天保留，用它们判断故事真正的最新状态。" +
+                "\n\n【客户端任务标识】\n" + task.marker +
+                "\n该标识用于匹配这次摘要与清理任务。";
+        },
+        parsePrompt(prompt) {
+            if (typeof prompt !== "string") return null;
+            const match = prompt.match(this.markerPattern);
+            if (match) {
+                const keepRounds = Number(match[2]);
+                if (!Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) return null;
+                return { marker: match[0], keepRounds, legacy: false };
+            }
+            const legacy = prompt.match(this.legacyPattern);
+            if (!legacy) return null;
+            const keepRounds = Number(legacy[1]);
+            if (!Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) return null;
+            return { marker: null, keepRounds, legacy: true };
+        },
+        save(task) {
+            try {
+                localStorage.setItem(this.storagePrefix + task.promptId, JSON.stringify(task));
+            } catch {}
+        },
+        read(promptId) {
+            try {
+                const raw = localStorage.getItem(this.storagePrefix + promptId);
+                if (!raw) return null;
+                const task = JSON.parse(raw);
+                if (task?.promptId !== promptId || typeof task.marker !== "string") return null;
+                return task;
+            } catch {
+                return null;
+            }
+        }
+    });
 
     const NetworkMonitor = {
         init() {
@@ -484,10 +555,18 @@ const unsafeWindow = window;
                 log.ui("Input box not found, cannot run compression");
                 return;
             }
-            const prompt = getCompressPrompt() + "\n\nOnly summarize the completed dialogue BEFORE the last " + (Number(userSettings.keepRounds) || 8) + " full user/model exchanges. Do not summarize those last exchanges; they will be preserved verbatim.";
+            const promptId = Branching.getCurrentPromptId();
+            if (!promptId || promptId === "new_chat") {
+                PromptPanel.status("先保存当前聊天，再执行摘要压缩");
+                return;
+            }
+            const task = CompactionTask.create(promptId, Number(userSettings.keepRounds) || 8);
+            const prompt = CompactionTask.compose(getCompressPrompt(), task);
+            CompactionTask.save(task);
             Compression.prepareRunContext();
             state.activeCompressionPrompt = prompt;
-            state.activeCompressionSnippet = deriveSnippet(prompt);
+            state.activeCompressionSnippet = deriveSnippet(getCompressPrompt());
+            state.activeCompressionMarker = task.marker;
             state.compressionInProgress = true;
             state.compressionRequestPending = true;
             state.compressionResponsePending = false;
@@ -619,9 +698,8 @@ const unsafeWindow = window;
         },
 
         isCompressionPrompt(bodyText) {
-            if (typeof bodyText !== "string") {
-                return false;
-            }
+            if (typeof bodyText !== "string") return false;
+            if (state.activeCompressionMarker && bodyText.includes(state.activeCompressionMarker)) return true;
             const snippet = state.activeCompressionSnippet || deriveSnippet(getCompressPrompt());
             if (!snippet) {
                 return bodyText.includes(Config.PROMPTS.SNIPPET);
@@ -724,13 +802,56 @@ const RoundSplitter = Object.freeze({
     }
   });
 
+    function findSavedSummary(turns, promptId) {
+        // A thinking model may persist additional model/thought entries after
+        // its visible reply. Identify the last USER turn, rather than assuming
+        // the last two serialized records are exactly user/model.
+        const lastUserIndex = turns.findLastIndex(turn => turn?.role === "user");
+        if (lastUserIndex < 0) throw new Error("会话中没有可识别的用户消息");
+        const latestUser = turns[lastUserIndex];
+        const task = CompactionTask.parsePrompt(latestUser?.text || "");
+        if (!task) {
+            const trailingRoles = turns.slice(-5).map(turn => turn.role).join(", ");
+            log.ui("Summary marker not found on last user turn", {
+                trailingRoles,
+                lastUserIndex,
+                totalEntries: turns.length,
+                lastUserLength: latestUser?.text?.length || 0
+            });
+            throw new Error("最新用户消息没有素酒摘要任务标识（旧版兼容标识也未匹配）。请确认 Google 已保存摘要，并且摘要之后没有发送其他用户消息");
+        }
+        const stored = CompactionTask.read(promptId);
+        if (task.marker && stored && task.marker !== stored.marker) {
+            throw new Error("摘要任务标识与本机最近一次生成任务不同，请重新生成摘要后再确认清理");
+        }
+        const responses = turns.slice(lastUserIndex + 1);
+        if (!responses.length || responses.some(turn => turn.role !== "model")) {
+            throw new Error("摘要后尚无完整的模型回复，或会话结构已变更");
+        }
+        const snapshot = responses
+            .filter(turn => !isThoughtOnlyTurn(turn))
+            .map(turn => String(turn.text || "").trim())
+            .filter(Boolean).join("\n").trim();
+        if (!snapshot) throw new Error("Google 端仍未保存可见的模型摘要，请等生成结束后重试");
+        return {
+            snapshot,
+            lastUserIndex,
+            marker: task.marker,
+            keepRounds: task.keepRounds,
+            legacy: task.legacy
+        };
+    }
+
     async function recoverLatestCompletedSummary() {
         const id = Branching.getCurrentPromptId();
         if (!id || id === "new_chat") {
             throw new Error("当前聊天还没有保存为独立会话");
         }
-        // Always fetch the latest remote state. In-memory thread snapshots
-        // may be stale while the model is still thinking or streaming.
+        const button = UI.findSendButton();
+        if (button && isStopControl(button)) {
+            throw new Error("AI Studio 仍在生成中，请等停止按钮恢复为运行按钮后重试");
+        }
+        // Read the live server copy, never an older intercepted response.
         const capture = await fetchResolvedPromptThread(id);
         if (!capture?.entries?.length) {
             throw new Error("未能读取 Google 保存的聊天记录，请确认网络与账号状态");
@@ -738,23 +859,16 @@ const RoundSplitter = Object.freeze({
         const turns = extractResolvedTurns(capture.entries);
         assertSupportedEntries(capture.entries, turns);
         if (turns.length < 4) throw new Error("尚无足够的完整聊天轮次");
-        const summaryPrompt = turns[turns.length - 2];
-        const summaryReply = turns[turns.length - 1];
-        if (summaryPrompt?.role !== "user" ||
-            !summaryPrompt.text.includes("Only summarize the completed dialogue BEFORE the last ")) {
-            throw new Error("当前聊天的最后一条用户消息不是素酒生成的摘要指令");
-        }
-        if (summaryReply?.role !== "model" || !summaryReply.text?.trim()) {
-            throw new Error("Google 端尚无对应的完整模型摘要回复；请在生成结束后重试");
-        }
-        // Never include the synthetic request/response in the prior history.
-        const originalTurns = turns.slice(0, -2);
-        const split = RoundSplitter.partition(originalTurns, Number(userSettings.keepRounds) || 8);
-        InPlaceCompaction.stage(summaryReply.text.trim(), split);
-        log.ui("Completed summary loaded from Google; awaiting explicit deletion confirmation", {
+        const task = findSavedSummary(turns, id);
+        const originalTurns = turns.slice(0, task.lastUserIndex);
+        const split = RoundSplitter.partition(originalTurns, task.keepRounds);
+        InPlaceCompaction.stage(task.snapshot, split, task);
+        log.ui("Saved summary recognized; awaiting explicit confirmation", {
             originalRounds: split.totalRounds,
             olderRounds: split.olderRounds,
-            recentRounds: split.recentRounds
+            recentRounds: split.recentRounds,
+            markerPresent: Boolean(task.marker),
+            legacy: task.legacy
         });
     }
 
@@ -1334,7 +1448,7 @@ const RoundSplitter = Object.freeze({
             return groups;
         }
 
-        function stage(snapshot, split) {
+        function stage(snapshot, split, task = null) {
             const id = Branching.getCurrentPromptId();
             if (!id || id === "new_chat") throw new Error("保存会话后才能原地压缩");
             if (!snapshot?.trim()) throw new Error("摘要为空，无法压缩");
@@ -1344,6 +1458,8 @@ const RoundSplitter = Object.freeze({
                 olderRounds: split.olderRounds,
                 recentRounds: split.recentRounds,
                 totalRounds: split.totalRounds,
+                marker: task?.marker || null,
+                legacy: Boolean(task?.legacy),
                 createdAt: Date.now()
             };
             PromptPanel.showCompactionReview(pending);
@@ -1359,9 +1475,16 @@ const RoundSplitter = Object.freeze({
             if (users.length !== plan.totalRounds + 1) {
                 throw new Error("会话轮数与生成摘要前不一致，请刷新后重新生成摘要");
             }
-            const last = turns[turns.length - 1];
-            if (last?.role !== "model" || !last.text.includes(plan.snapshot.slice(0, 70))) {
-                throw new Error("摘要尚未保存在 Google 会话中，拒绝删除旧消息");
+            const latest = findSavedSummary(turns, plan.promptId);
+            if (latest.marker !== plan.marker ||
+                latest.keepRounds !== plan.recentRounds ||
+                latest.snapshot.trim() !== plan.snapshot.trim() ) {
+                throw new Error("Google 端摘要或保留轮数与预览不一致，拒绝删除");
+            }
+            const previous = turns.slice(0, latest.lastUserIndex);
+            const split = RoundSplitter.partition(previous, plan.recentRounds);
+            if (split.totalRounds !== plan.totalRounds || split.olderRounds !== plan.olderRounds) {
+                throw new Error("原聊天已经变化，请重新读取摘要再清理");
             }
             return { capture, turns };
         }
