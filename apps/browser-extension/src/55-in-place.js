@@ -135,7 +135,14 @@
                     throw new Error("云端摘要发生变化，立即停止删除");
                 }
                 const original = turns.slice(0, summary.lastUserIndex);
-                const tail = RoundSplitter.partition(original, plan.recentRounds).recent;
+                // After the last deletion, only the protected N rounds remain;
+                // RoundSplitter.partition rejects that case by design.
+                const startIndices = original.flatMap((turn, index) =>
+                    turn.role === "user" ? [index] : []);
+                if (startIndices.length < plan.recentRounds) {
+                    throw new Error("云端保留轮数不足");
+                }
+                const tail = original.slice(startIndices[startIndices.length - plan.recentRounds]);
                 const protectedNow = JSON.stringify(tail.map(turn => [turn.role, turn.text]));
                 if (protectedNow !== expectedProtected) {
                     throw new Error("云端保留的最近轮次与删除前不一致，立即停止");
