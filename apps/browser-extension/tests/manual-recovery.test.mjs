@@ -119,9 +119,12 @@ test("summary marker is parseable and base prompt remains editable", () => {
 });
 
 test("default memory prompt distinguishes archived events from the actual current scene", () => {
-  assert.match(stateSource, /压缩截点/);
-  assert.match(stateSource, /已发生的关键事件/);
-  assert.doesNotMatch(stateSource, /the current situation before those exchanges\. Avoid adding/);
+  const match = stateSource.match(/\n            FULL: ("(?:\\.|[^"\\])*"),\n            SNIPPET:/);
+  assert.ok(match, "default prompt literal exists");
+  const defaultPrompt = JSON.parse(match[1]);
+  assert.match(defaultPrompt, /压缩截点/);
+  assert.match(defaultPrompt, /已发生的关键事件/);
+  assert.doesNotMatch(defaultPrompt, /current situation before/);
 });
 
 test("XHR request observer provides bodyText for compression matching", () => {
