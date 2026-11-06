@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.2.3
+// @version      0.3.0
 // @description  AI Studio prompt presets and manual context compaction
 // @match        https://aistudio.google.com/*
 // @noframes
@@ -11,7 +11,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.2.3", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.3.0", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -59,7 +59,8 @@ const unsafeWindow = window;
         },
         PROMPTS: {
             LEGACY_FULL: "Summarize the earlier role-play conversation as a compact, accurate memory snapshot.\nOnly summarize the history BEFORE the most recent completed exchanges identified in the final instruction. Preserve established characters, relationships, identity, world rules, important events, state changes, promises, possessions, unresolved conflicts, and the current situation before those exchanges. Avoid adding fictional details or overriding established facts.\nReturn only:\n<state_snapshot>\n[Concise, structured summary in the language of the conversation]\n</state_snapshot>",
-            FULL: "请为这段长期对话制作按剧情时间线整理的精炼记忆，用于之后继续对话。仅总结后附说明指定的较早轮次。\n\n按以下顺序组织：\n【稳定设定】人物身份、关系、世界规则、持续有效的约定。\n【已发生的关键事件】按先后顺序记录重要行动、变化和结果；已结束的事件使用完成时态，标明结局和后续影响。\n【截至压缩截点的状态】只描述待删除历史结束时已经确立的状态、尚未解决的矛盾和后续伏笔，明确这是“压缩截点”而非整段对话的现在。\n【时间线衔接】说明最近保留轮次将接在什么事件之后。真正正在发生的剧情、地点和时间，应由保留的最近轮次决定。\n\n优先保留后续会影响人物决策和剧情因果的细节；输出应清晰、紧凑、忠于原文。仅返回上述结构化记忆，使用原对话语言。",
+            PREVIOUS_FULL: "请为这段长期对话制作按剧情时间线整理的精炼记忆，用于之后继续对话。仅总结后附说明指定的较早轮次。\n\n按以下顺序组织：\n【稳定设定】人物身份、关系、世界规则、持续有效的约定。\n【已发生的关键事件】按先后顺序记录重要行动、变化和结果；已结束的事件使用完成时态，标明结局和后续影响。\n【截至压缩截点的状态】只描述待删除历史结束时已经确立的状态、尚未解决的矛盾和后续伏笔，明确这是“压缩截点”而非整段对话的现在。\n【时间线衔接】说明最近保留轮次将接在什么事件之后。真正正在发生的剧情、地点和时间，应由保留的最近轮次决定。\n\n优先保留后续会影响人物决策和剧情因果的细节；输出应清晰、紧凑、忠于原文。仅返回上述结构化记忆，使用原对话语言。",
+            FULL: "请只根据本次请求中实际提供的历史记录，制作供后续剧情使用的准确记忆摘要。按照事件发生顺序记录已完成的行动及后果、持续有效的人物关系和世界规则，以及记录末尾仍未解决的矛盾和伏笔。明确区分“已经结束的事件”和“在这些记录的末尾仍持续的状态”。所有状态都只截至本次提供的最后一条历史记录，不要推测未提供的后续剧情，也不要把过去情节描述成此刻正在发生。保留时间、地点、因果和重要关系的变化，忠实于原文，使用原对话语言，尽可能精炼。",
             SNIPPET: "请为这段长期对话制作按剧情时间线整理的精炼记忆"
         }
     };
@@ -69,7 +70,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.2.3";
+    const SCRIPT_VERSION = "0.3.0";
 
     const state = {
         compressionInProgress: false,
@@ -88,6 +89,8 @@ const unsafeWindow = window;
         branchInProgress: false,
         activeCompressionPrompt: "",
         activeCompressionMarker: "",
+        activeCompressionKeepRounds: 0,
+        scopedCompression: null,
         activeCompressionSnippet: Config.PROMPTS.SNIPPET
     };
 
@@ -117,7 +120,8 @@ const unsafeWindow = window;
                 // Existing installations store the original default as a
                 // literal string. Upgrade only that exact default and leave
                 // user-edited summary prompts untouched.
-                if (parsed.compressPrompt === Config.PROMPTS.LEGACY_FULL) {
+                if ([Config.PROMPTS.LEGACY_FULL, Config.PROMPTS.PREVIOUS_FULL]
+                    .includes(parsed.compressPrompt)) {
                     parsed.compressPrompt = Config.PROMPTS.FULL;
                     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed)); }
                     catch {}
@@ -193,13 +197,9 @@ const unsafeWindow = window;
     // Network monitor module
     // ---------------------------
 
-    // Summary markers are metadata in the user message. They let us match a
-    // saved summary even if AI Studio adds thought entries after the reply.
-    // No prompt contents, API keys or conversation text are stored locally.
     const CompactionTask = Object.freeze({
-        markerPattern: /\[\[SUJIU_SUMMARY_V1:([a-z0-9-]{8,80}):KEEP=(\d{1,3})\]\]/i,
-        legacyPattern: /Only summarize the completed dialogue BEFORE the last\s+(\d{1,3})\s+full user\/model exchanges\./i,
-        storagePrefix: "sujiu:aistudio:summary-task:v1:",
+        markerPattern: /\[\[SUJIU_SCOPE_V2:([a-z0-9-]{8,80})\]\]/i,
+        storagePrefix: "sujiu:aistudio:summary-task:v2:",
         create(promptId, keepRounds) {
             if (!promptId || !Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) {
                 throw new Error("无效的会话 ID 或保留轮数");
@@ -210,47 +210,104 @@ const unsafeWindow = window;
             return {
                 promptId,
                 id,
-                marker: "[[SUJIU_SUMMARY_V1:" + id + ":KEEP=" + keepRounds + "]]",
+                marker: "[[SUJIU_SCOPE_V2:" + id + "]]",
                 keepRounds,
                 createdAt: Date.now()
             };
         },
         compose(basePrompt, task) {
+            // Only old turns are carried in the scoped request. Protected
+            // recent-turn counts must never be included in the model input.
             return basePrompt.trim() +
-                "\n\n只总结最近 " + task.keepRounds + " 轮完整用户/模型对话之前的历史。" +
-                "最近这些轮次由原聊天保留，用它们判断故事真正的最新状态。" +
-                "\n\n【客户端任务标识】\n" + task.marker +
-                "\n该标识用于匹配这次摘要与清理任务。";
+                "\n\n请仅依据本次请求实际提供的历史记录整理摘要。不要推测后续剧情。" +
+                "\n\n[客户端任务] " + task.marker;
         },
         parsePrompt(prompt) {
             if (typeof prompt !== "string") return null;
             const match = prompt.match(this.markerPattern);
-            if (match) {
-                const keepRounds = Number(match[2]);
-                if (!Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) return null;
-                return { marker: match[0], keepRounds, legacy: false };
-            }
-            const legacy = prompt.match(this.legacyPattern);
-            if (!legacy) return null;
-            const keepRounds = Number(legacy[1]);
-            if (!Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) return null;
-            return { marker: null, keepRounds, legacy: true };
+            return match ? { marker: match[0] } : null;
         },
         save(task) {
-            try {
-                localStorage.setItem(this.storagePrefix + task.promptId, JSON.stringify(task));
-            } catch {}
+            try { localStorage.setItem(this.storagePrefix + task.promptId, JSON.stringify(task)); }
+            catch {}
+        },
+        confirmScoped(promptId, marker, stats) {
+            const previous = this.read(promptId);
+            if (!previous || previous.marker !== marker ||
+                stats?.recentRounds !== previous.keepRounds ||
+                !Number.isSafeInteger(stats.olderRounds) || stats.olderRounds < 1) {
+                throw new Error("摘要任务与已裁剪的模型请求不一致");
+            }
+            this.save({ ...previous, scopeVerified: true,
+                olderRounds: stats.olderRounds, totalRounds: stats.totalRounds });
         },
         read(promptId) {
             try {
                 const raw = localStorage.getItem(this.storagePrefix + promptId);
-                if (!raw) return null;
-                const task = JSON.parse(raw);
-                if (task?.promptId !== promptId || typeof task.marker !== "string") return null;
+                const task = raw ? JSON.parse(raw) : null;
+                if (task?.promptId !== promptId || typeof task.marker !== "string" ||
+                    !Number.isSafeInteger(task.keepRounds)) return null;
                 return task;
-            } catch {
+            } catch { return null; }
+        }
+    });
+
+    // Restrict ONLY the marked summary GenerateContent request. Normal
+    // conversations are sent through unchanged. Never silently fall back to
+    // sending full history when the private RPC schema cannot be verified.
+    const RequestScope = Object.freeze({
+        prepare(bodyText, marker, keepRounds) {
+            if (typeof bodyText !== "string" || !marker || !bodyText.includes(marker)) {
                 return null;
             }
+            const payload = safeParseJSON(bodyText);
+            if (!Array.isArray(payload) || !Array.isArray(payload[1])) {
+                throw new Error("Google 请求历史格式无法验证，已阻止发送完整上下文");
+            }
+            const entries = payload[1];
+            if (entries.length < 4 || entries.some(item =>
+                !Array.isArray(item) ||
+                !["user", "model"].includes(item[1]) ||
+                !Array.isArray(item[0]))) {
+                throw new Error("请求含不兼容或多模态轮次，已停止压缩");
+            }
+            const last = entries[entries.length - 1];
+            if (last[1] !== "user" || !JSON.stringify(last).includes(marker)) {
+                throw new Error("无法确认请求末尾是本次压缩指令");
+            }
+            const original = entries.slice(0, -1);
+            const split = RoundSplitter.partition(original.map(entry => ({
+                role: entry[1], entry
+            })), keepRounds);
+            if (!split.olderRounds || split.recentRounds !== keepRounds) {
+                throw new Error("旧历史与保留范围无法严格划分");
+            }
+            const old = split.older.map(turn => turn.entry);
+            const recent = split.recent.map(turn => turn.entry);
+            // The request is reconstructed from the original RPC payload with
+            // the full original serialized old turns and one summary prompt.
+            // Never send any protected recent turn entries in this request.
+            const scoped = payload.slice();
+            scoped[1] = [...old, last];
+            const serialized = JSON.stringify(scoped);
+            if (serialized === bodyText) {
+                throw new Error("摘要请求没有真正缩减上下文，已拒绝发送");
+            }
+            // Guard against redundant copies of protected full turns outside
+            // payload[1]. Google may change its wire schema in the future.
+            const remainingFields = JSON.stringify(scoped.filter((_, i) => i !== 1));
+            for (const entry of recent) {
+                const text = JSON.stringify(entry[0]);
+                if (remainingFields.includes(text)) {
+                    throw new Error("近期内容存在于请求的其他字段，已停止发送以防泄露到摘要上下文");
+                }
+            }
+            return {
+                bodyText: serialized,
+                olderRounds: split.olderRounds,
+                recentRounds: split.recentRounds,
+                totalRounds: split.totalRounds
+            };
         }
     });
 
@@ -326,8 +383,28 @@ const unsafeWindow = window;
                 // Never break the host application because our inspector cannot clone a request.
                 return originalFetch(input, init);
             }
-            if (shouldLogGenerate) await logRequestPayload(request);
-            const response = await originalFetch(input, init);
+            let actualRequest = request;
+            if (shouldLogGenerate && state.compressionInProgress && state.activeCompressionMarker) {
+                try {
+                    const scope = RequestScope.prepare(await request.clone().text(),
+                        state.activeCompressionMarker, state.activeCompressionKeepRounds);
+                    if (!scope) throw new Error("本次请求未包含有效的摘要任务标识");
+                    actualRequest = new Request(request, { body: scope.bodyText });
+                    state.scopedCompression = scope;
+                    CompactionTask.confirmScoped(Branching.getCurrentPromptId(),
+                        state.activeCompressionMarker, scope);
+                    PromptPanel.status("模型请求已仅保留较早 " + scope.olderRounds +
+                        " 轮历史；最近 " + scope.recentRounds + " 轮未发送");
+                } catch (error) {
+                    PromptPanel.status("摘要请求已阻止：" + String(error?.message || error));
+                    Compression.finalizeRun();
+                    throw error;
+                }
+            }
+            if (shouldLogGenerate) await logRequestPayload(actualRequest);
+            const response = await originalFetch(
+                shouldLogGenerate && actualRequest !== request ? actualRequest : input,
+                shouldLogGenerate && actualRequest !== request ? undefined : init);
 
             if (shouldLogGenerate || shouldCaptureResolve) {
                 void logResponsePayload(request.url, response.clone());
@@ -435,7 +512,26 @@ const unsafeWindow = window;
             realXHR.send = function (body) {
                 if (monitored) {
                     const absoluteUrl = resolveUrl(requestUrl);
-                    const bodyText = bodyToText(body);
+                    let bodyText = bodyToText(body);
+                    if (isTargetRequest(absoluteUrl, "GENERATE") &&
+                        state.compressionInProgress && state.activeCompressionMarker) {
+                        try {
+                            const scope = RequestScope.prepare(bodyText,
+                                state.activeCompressionMarker, state.activeCompressionKeepRounds);
+                            if (!scope) throw new Error("本次请求缺少有效的摘要任务标识");
+                            bodyText = scope.bodyText;
+                            body = scope.bodyText;
+                            state.scopedCompression = scope;
+                            CompactionTask.confirmScoped(Branching.getCurrentPromptId(),
+                                state.activeCompressionMarker, scope);
+                            PromptPanel.status("模型请求已仅保留旧 " + scope.olderRounds +
+                                " 轮；最近 " + scope.recentRounds + " 轮未发送");
+                        } catch (error) {
+                            PromptPanel.status("摘要请求已阻止：" + String(error?.message || error));
+                            Compression.finalizeRun();
+                            throw error;
+                        }
+                    }
                     const headers = Object.keys(requestHeaders).length ? { ...requestHeaders } : null;
                     rememberGoogleApiKey(headers, absoluteUrl);
 
@@ -567,6 +663,8 @@ const unsafeWindow = window;
             state.activeCompressionPrompt = prompt;
             state.activeCompressionSnippet = deriveSnippet(getCompressPrompt());
             state.activeCompressionMarker = task.marker;
+            state.activeCompressionKeepRounds = task.keepRounds;
+            state.scopedCompression = null;
             state.compressionInProgress = true;
             state.compressionRequestPending = true;
             state.compressionResponsePending = false;
@@ -821,8 +919,8 @@ const RoundSplitter = Object.freeze({
             throw new Error("最新用户消息没有素酒摘要任务标识（旧版兼容标识也未匹配）。请确认 Google 已保存摘要，并且摘要之后没有发送其他用户消息");
         }
         const stored = CompactionTask.read(promptId);
-        if (task.marker && stored && task.marker !== stored.marker) {
-            throw new Error("摘要任务标识与本机最近一次生成任务不同，请重新生成摘要后再确认清理");
+        if (!stored || !stored.scopeVerified || task.marker !== stored.marker) {
+            throw new Error("无法确认本次模型请求已经裁掉近期对话；拒绝打开清理功能");
         }
         const responses = turns.slice(lastUserIndex + 1);
         if (!responses.length || responses.some(turn => turn.role !== "model")) {
@@ -837,8 +935,9 @@ const RoundSplitter = Object.freeze({
             snapshot,
             lastUserIndex,
             marker: task.marker,
-            keepRounds: task.keepRounds,
-            legacy: task.legacy
+            keepRounds: stored.keepRounds,
+            originalRounds: stored.totalRounds,
+            legacy: false
         };
     }
 
@@ -862,13 +961,16 @@ const RoundSplitter = Object.freeze({
         const task = findSavedSummary(turns, id);
         const originalTurns = turns.slice(0, task.lastUserIndex);
         const split = RoundSplitter.partition(originalTurns, task.keepRounds);
+        if (split.totalRounds !== task.originalRounds) {
+            throw new Error("Google 保存的原聊天轮数与压缩前不一致，可能是请求裁剪影响了保存；已停止删除");
+        }
         InPlaceCompaction.stage(task.snapshot, split, task);
         log.ui("Saved summary recognized; awaiting explicit confirmation", {
             originalRounds: split.totalRounds,
             olderRounds: split.olderRounds,
             recentRounds: split.recentRounds,
             markerPresent: Boolean(task.marker),
-            legacy: task.legacy
+            scopeVerified: true
         });
     }
 
@@ -1420,12 +1522,22 @@ const RoundSplitter = Object.freeze({
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
         function normalizeType(turn) {
+            const container = turn.querySelector(".chat-turn-container");
+            if (container?.classList?.contains("user")) return "user";
+            if (turn.classList?.contains("thought-activity-host")) return "thought";
+            if (turn.querySelector("ms-thought-chunk, .thought-panel") &&
+                !turn.querySelector(".turn-content ms-text-chunk, .turn-content ms-code-block, .turn-content .cmark-node")) {
+                return "thought";
+            }
             const raw = (turn.getAttribute("data-turn-type") ||
                 turn.getAttribute("data-turn-role") ||
                 turn.dataset?.turnType || turn.dataset?.turnRole || "").toLowerCase();
             if (raw === "user" || raw === "prompt") return "user";
             if (raw === "thought") return "thought";
             if (raw === "model" || raw === "text" || raw === "response") return "model";
+            if (container?.classList?.contains("model") ||
+                container?.classList?.contains("render") ||
+                turn.querySelector(".turn-content, .virtual-scroll-container")) return "model";
             return "unknown";
         }
 
@@ -1496,7 +1608,11 @@ const RoundSplitter = Object.freeze({
                 throw new Error("网页未完整加载所有历史轮次（检测到 " +
                     groups.length + "，预期 " + (plan.totalRounds + 1) + "），拒绝删除");
             }
-            const selected = groups.slice(0, plan.olderRounds).flatMap(group => group.turns);
+            // Delete response and attached thought blocks before each user
+            // prompt. Some native UI builds remove thought blocks together
+            // with the model response.
+            const selected = groups.slice(0, plan.olderRounds)
+                .flatMap(group => [...group.turns].reverse());
             const protectedTurns = groups.slice(plan.olderRounds).flatMap(group => group.turns);
             const ids = selected.map(turn => turn.id);
             if (ids.some(id => !id) || new Set(ids).size !== ids.length) {
@@ -1505,8 +1621,9 @@ const RoundSplitter = Object.freeze({
             if (protectedTurns.some(turn => ids.includes(turn.id))) {
                 throw new Error("删除范围与保留范围重叠");
             }
-            if (selected.some(turn => !turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"))) {
-                throw new Error("部分消息不支持原生删除菜单");
+            if (selected.some(turn => normalizeType(turn) !== "thought" &&
+                !turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"))) {
+                throw new Error("部分消息缺少 Google 原生删除菜单，拒绝开始清理");
             }
             return { targetIds: ids, groups: groups.length, items: selected.length };
         }
@@ -1514,13 +1631,19 @@ const RoundSplitter = Object.freeze({
         async function findNativeDeleteItem() {
             for (let attempt = 0; attempt < 12; attempt++) {
                 const items = [...document.querySelectorAll(
-                    ".cdk-overlay-container .mat-mdc-menu-content button, .cdk-overlay-container [role=menuitem]"
+                    ".cdk-overlay-container .mat-mdc-menu-content button, .cdk-overlay-container [role=menuitem], .cdk-overlay-pane button"
                 )];
                 const target = items.find(item => {
-                    const icon = item.querySelector("mat-icon, .material-symbols-outlined");
-                    const label = (item.getAttribute("aria-label") || "") + " " +
-                        (icon?.textContent || "") + " " + (item.textContent || "");
-                    return /(?:^|\s)(delete|删除)(?:\s|$)/i.test(label.trim());
+                    if (item.disabled || item.getAttribute("aria-disabled") === "true") return false;
+                    const icon = item.querySelector("mat-icon, .material-symbols-outlined, [data-mat-icon-name]");
+                    const label = [
+                        item.getAttribute("aria-label"),
+                        icon?.getAttribute("fonticon"),
+                        icon?.getAttribute("data-mat-icon-name"),
+                        icon?.textContent,
+                        item.textContent
+                    ].filter(Boolean).join(" ").toLowerCase();
+                    return /(?:delete|trash|删除|移除)/i.test(label);
                 });
                 if (target) return target;
                 await sleep(80);
@@ -1531,16 +1654,26 @@ const RoundSplitter = Object.freeze({
         async function deleteOne(id) {
             const turn = document.getElementById(id);
             if (!turn || !turn.isConnected) return;
-            const button = turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
-                turn.querySelector("ms-chat-turn-options button") ||
-                turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol");
-            if (!button) throw new Error("消息 " + id + " 缺少原生操作菜单");
+            const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
+                turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
+                turn.querySelector("ms-chat-turn-options button");
+            if (!button) {
+                if (normalizeType(turn) === "thought") {
+                    throw new Error("思考块 " + id + " 尚未随回复被删除，也没有独立的原生删除菜单");
+                }
+                throw new Error("消息 " + id + " 缺少原生操作菜单");
+            }
             button.click();
             const item = await findNativeDeleteItem();
             if (!item) throw new Error("找不到 Google 原生删除选项，已停止");
+            item.focus?.();
+            item.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+            item.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+            item.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }));
+            item.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
             item.click();
             // A further confirmation dialog is deliberately not bypassed.
-            for (let i = 0; i < 30; i++) {
+            for (let i = 0; i < 100; i++) {
                 if (!document.getElementById(id)) return;
                 await sleep(100);
             }
@@ -2345,7 +2478,11 @@ const PromptPanel = (() => {
         if (action === "stop-tracking") Compression.stopTracking();
         if (action === "commit-delete") {
           try { await InPlaceCompaction.commit(); }
-          catch (error) { console.warn("[Sujiu AI Studio] in-place deletion halted", String(error?.message || error)); }
+          catch (error) {
+            const reason = String(error?.message || error);
+            status("删除未完成：" + reason);
+            console.warn("[Sujiu AI Studio] in-place deletion halted", reason);
+          }
         }
         if (action === "cancel-delete") InPlaceCompaction.cancel();
       });
