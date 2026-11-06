@@ -5,6 +5,9 @@
     }
 
     function buildMutationThreadEntry(turn, sequence = 0) {
+        if (turn?.role !== "user" && turn?.role !== "model") {
+            throw new Error("Unsupported history role: " + turn?.role);
+        }
         if (isReusablePromptThreadEntry(turn?.entry)) {
             const entry = deepClone(turn.entry);
             entry[0] = turn?.text || "";
