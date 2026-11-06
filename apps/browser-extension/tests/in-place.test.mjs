@@ -120,14 +120,15 @@ test("previously compressed summary rounds are pinned and never enter the deleti
   assert.equal(selection.deletedUserCount, 2);
 });
 
-test("one native Save action follows the whole batch with no post-delete cloud polling", () => {
+test("native deletion autosaves without a separate Save click or cloud polling", () => {
   const loopStart = source.indexOf("for (const id of preview.targetIds)");
-  const save = source.indexOf("NativeSave.triggerOnce()", loopStart);
-  assert.ok(save > loopStart);
-  const loop = source.slice(loopStart, save);
+  const wait = source.indexOf("SaveMonitor.waitForNativeSave(", loopStart);
+  assert.ok(wait > loopStart);
+  const loop = source.slice(loopStart, wait);
   assert.doesNotMatch(loop, /fetchResolvedPromptThread|awaitCloudPersistence|NativeSave\.triggerOnce/);
-  assert.equal((source.match(/NativeSave\.triggerOnce\(\)/g) || []).length, 1);
-  assert.doesNotMatch(source, /async function awaitCloudPersistence/);
+  assert.equal((source.match(/SaveMonitor\.waitForNativeSave\(/g) || []).length, 1);
+  assert.match(source, /lastDeletionStartedAt = Date\.now\(\)/);
+  assert.match(source, /waitForNativeSave\(saveBaseline, lastDeletionStartedAt\)/);
 });
 
 test("temporary tool prompt is selected but its marked model summary is protected", () => {
