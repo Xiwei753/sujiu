@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.3.0
+// @version      0.3.1
 // @description  AI Studio prompt presets and manual context compaction
 // @match        https://aistudio.google.com/*
 // @noframes
@@ -11,7 +11,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.3.0", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.3.1", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -24,7 +24,8 @@ const unsafeWindow = window;
         },
         TARGETS: {
             GENERATE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/GenerateContent",
-            RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource"
+            RESOLVE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/ResolveDriveResource",
+            UPDATE: "/$rpc/google.internal.alkali.applications.makersuite.v1.MakerSuiteService/UpdatePrompt"
         },
         NETWORK: {
             RPC_ORIGIN: "https://alkalimakersuite-pa.clients6.google.com"
@@ -70,7 +71,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.3.0";
+    const SCRIPT_VERSION = "0.3.1";
 
     const state = {
         compressionInProgress: false,
@@ -373,6 +374,12 @@ const unsafeWindow = window;
             const url = typeof input === "string" ? input : input?.url;
             const shouldLogGenerate = isTargetRequest(url, "GENERATE");
             const shouldCaptureResolve = isTargetRequest(url, "RESOLVE");
+            const shouldMonitorSave = isTargetRequest(url, "UPDATE");
+            if (shouldMonitorSave) {
+                const result = await originalFetch(input, init);
+                SaveMonitor.record(result.status, url);
+                return result;
+            }
             if (!shouldLogGenerate && !shouldCaptureResolve) {
                 return originalFetch(input, init);
             }
@@ -492,7 +499,8 @@ const unsafeWindow = window;
             realXHR.open = function (...args) {
                 const [, url] = args;
                 requestUrl = url || null;
-                monitored = Boolean(url) && (isTargetRequest(url, "GENERATE") || isTargetRequest(url, "RESOLVE"));
+                monitored = Boolean(url) && (isTargetRequest(url, "GENERATE") ||
+                    isTargetRequest(url, "RESOLVE") || isTargetRequest(url, "UPDATE"));
                 if (monitored) {
                     log.net("Monitored XHR detected in", label, url);
                 }
@@ -560,6 +568,10 @@ const unsafeWindow = window;
                     return;
                 }
                 const responseUrl = realXHR.responseURL || resolveUrl(requestUrl);
+                if (isTargetRequest(responseUrl, "UPDATE")) {
+                    SaveMonitor.record(realXHR.status, responseUrl);
+                    return;
+                }
                 const parsed = safeParseJSON(realXHR.responseText);
                 maybeCaptureResolvedPromptThread(responseUrl, realXHR.responseText, parsed);
 
@@ -1625,7 +1637,56 @@ const RoundSplitter = Object.freeze({
                 !turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"))) {
                 throw new Error("部分消息缺少 Google 原生删除菜单，拒绝开始清理");
             }
-            return { targetIds: ids, groups: groups.length, items: selected.length };
+            const deleteGroups = groups.slice(0, plan.olderRounds).map(group =>
+                group.turns.map(turn => turn.id).reverse());
+            return { targetIds: ids, deleteGroups, groups: groups.length, items: selected.length };
+        }
+
+        // A DOM deletion is only a visual change. The old conversation must
+        // disappear from ResolveDriveResource before we touch the next round.
+        // Never assume the native menu action triggered Google autosave.
+        async function awaitCloudPersistence(plan, deletedRounds, expectedProtected, saveBaseline) {
+            const expectedUsers = plan.totalRounds + 1 - deletedRounds;
+            let lastUsers = null;
+            for (let i = 0; i < 8; i++) {
+                await sleep(i === 0 ? 700 : 1800);
+                const capture = await fetchResolvedPromptThread(plan.promptId);
+                if (!capture?.entries?.length) continue;
+                const turns = extractResolvedTurns(capture.entries);
+                assertSupportedEntries(capture.entries, turns);
+                const users = turns.filter(turn => turn.role === "user");
+                lastUsers = users.length;
+                if (lastUsers < expectedUsers) {
+                    throw new Error("云端消息比计划删除得更多，立即停止（可能删除了保留内容）");
+                }
+                if (lastUsers !== expectedUsers) continue;
+                const summary = findSavedSummary(turns, plan.promptId);
+                if (summary.marker !== plan.marker || summary.snapshot.trim() !== plan.snapshot.trim()) {
+                    throw new Error("云端摘要发生变化，立即停止删除");
+                }
+                const original = turns.slice(0, summary.lastUserIndex);
+                // After the last deletion, only the protected N rounds remain;
+                // RoundSplitter.partition rejects that case by design.
+                const startIndices = original.flatMap((turn, index) =>
+                    turn.role === "user" ? [index] : []);
+                if (startIndices.length < plan.recentRounds) {
+                    throw new Error("云端保留轮数不足");
+                }
+                const tail = original.slice(startIndices[startIndices.length - plan.recentRounds]);
+                const protectedNow = JSON.stringify(tail.map(turn => [turn.role, turn.text]));
+                if (protectedNow !== expectedProtected) {
+                    throw new Error("云端保留的最近轮次与删除前不一致，立即停止");
+                }
+                return true;
+            }
+            const attemptedSave = SaveMonitor.attempts > saveBaseline;
+            const nativeSave = attemptedSave
+                ? "观察到 UpdatePrompt，最近状态 " + (SaveMonitor.latest?.status || "未知")
+                : "没有观察到本轮删除触发 UpdatePrompt";
+            throw new Error("Google 服务器未确认本轮删除（当前 " +
+                (lastUsers ?? "未知") + " 条用户消息，预期 " + expectedUsers +
+                " 条；" + nativeSave +
+                "）。已停止批量删除；页面变化可能没有上传，刷新后会恢复。");
         }
 
         async function findNativeDeleteItem() {
@@ -1687,22 +1748,35 @@ const RoundSplitter = Object.freeze({
             if (Branching.getCurrentPromptId() !== plan.promptId) {
                 throw new Error("会话已切换，需重新压缩");
             }
-            await verifyPersistedSummary(plan);
+            const baseline = await verifyPersistedSummary(plan);
+            const baselineSummary = findSavedSummary(baseline.turns, plan.promptId);
+            const original = baseline.turns.slice(0, baselineSummary.lastUserIndex);
+            const expectedProtected = JSON.stringify(
+                RoundSplitter.partition(original, plan.recentRounds).recent.map(
+                    turn => [turn.role, turn.text]));
             const preview = preflightDom(plan);
-            if (!confirm("即将在当前聊天中删除最旧的 " + plan.olderRounds +
+            if (!confirm("将逐轮删除最旧的 " + plan.olderRounds +
                     " 轮（包括关联思考内容），保留最近 " + plan.recentRounds +
-                    " 轮和刚生成的摘要。此操作无法撤销，确认继续？")) return;
+                    " 轮和摘要。每轮必须获得 Google 云端确认，未保存会立刻停止。此操作无法撤销，确认继续？")) return;
             deleting = true;
             state.branchInProgress = true;
             let processed = 0;
+            const saveBaseline = SaveMonitor.attempts;
             try {
-                for (const id of preview.targetIds) {
-                    if (Branching.getCurrentPromptId() !== plan.promptId) {
-                        throw new Error("删除过程中会话发生切换");
+                for (let roundIndex = 0; roundIndex < preview.deleteGroups.length; roundIndex++) {
+                    const groupIds = preview.deleteGroups[roundIndex];
+                    for (const id of groupIds) {
+                        if (Branching.getCurrentPromptId() !== plan.promptId) {
+                            throw new Error("删除过程中会话发生切换");
+                        }
+                        await deleteOne(id);
+                        processed++;
                     }
-                    await deleteOne(id);
-                    processed++;
-                    PromptPanel.status("正在原地清理：" + processed + "/" + preview.items);
+                    PromptPanel.status("已在页面删除第 " + (roundIndex + 1) +
+                        " 轮，等待 Google 服务器确认保存……");
+                    await awaitCloudPersistence(plan, roundIndex + 1, expectedProtected, saveBaseline);
+                    PromptPanel.status("Google 云端确认删除 " + (roundIndex + 1) +
+                        "/" + plan.olderRounds + " 轮，继续下一轮");
                 }
                 const after = await fetchResolvedPromptThread(plan.promptId);
                 if (!after?.entries?.length) throw new Error("无法验证 Google 端保存结果");
@@ -1975,6 +2049,80 @@ const RoundSplitter = Object.freeze({
     // Prompt thread builders
     // ---------------------------
 
+    // CSS-only performance workaround inspired by xgloom/fix-aistudio-lag.
+    // No removal, rewriting, or hiding of chat history. Toggle is reversible.
+    const PerformanceTuning = (() => {
+        const KEY = "sujiu:aistudio:reduce-visual-effects:v1";
+        const STYLE_ID = "sujiu-aistudio-performance-style";
+        const CSS = [
+            "*, *::before, *::after {",
+            "  backdrop-filter: none !important;",
+            "  -webkit-backdrop-filter: none !important;",
+            "  scroll-behavior: auto !important;",
+            "}"
+        ].join("\n");
+        let enabled = true;
+        try { enabled = localStorage.getItem(KEY) !== "false"; }
+        catch {}
+
+        function apply(doc = document) {
+            const existing = doc.getElementById?.(STYLE_ID);
+            if (!enabled) {
+                existing?.remove();
+                return false;
+            }
+            if (existing) return true;
+            if (!doc.head) return false;
+            const style = doc.createElement("style");
+            style.id = STYLE_ID;
+            style.textContent = CSS; // Trusted Types safe.
+            doc.head.appendChild(style);
+            return true;
+        }
+
+        function init() {
+            apply();
+            if (!document.head && document.readyState === "loading") {
+                document.addEventListener("DOMContentLoaded", () => apply(), { once: true });
+            }
+        }
+
+        function setEnabled(value) {
+            enabled = Boolean(value);
+            try { localStorage.setItem(KEY, String(enabled)); }
+            catch {}
+            apply();
+            return enabled;
+        }
+
+        return Object.freeze({ init, apply, setEnabled, get enabled() { return enabled; } });
+    })();
+
+    // Passive observation only. Never replay or synthesize UpdatePrompt:
+    // its internal schema changes and an invalid write can corrupt chat data.
+    const SaveMonitor = (() => {
+        let attempts = 0;
+        let successes = 0;
+        let last = null;
+        function record(status, url = "") {
+            if (!isTargetRequest(url, "UPDATE")) return;
+            attempts++;
+            const ok = Number(status) >= 200 && Number(status) < 300;
+            if (ok) successes++;
+            last = { ok, status: Number(status) || 0, time: new Date().toISOString() };
+            const runtime = window.__SUJIU_AISTUDIO_RUNTIME__;
+            if (runtime) runtime.save = { attempts, successes, ...last };
+            log.net("Observed native Google UpdatePrompt result", {
+                status: last.status, ok: last.ok
+            });
+        }
+        return Object.freeze({
+            record,
+            get latest() { return last; },
+            get attempts() { return attempts; }
+        });
+    })();
+
     function extractMutationPromptId(root) {
         const resourceName = typeof root?.[0] === "string" ? root[0] : "";
         const match = resourceName.match(/prompts\/([^/?#]+)/);
@@ -2217,6 +2365,7 @@ const PromptPanel = (() => {
       renderFields();
       root.querySelector('[data-role="keep"]').value = String(userSettings.keepRounds || 8);
       root.querySelector('[data-role="auto-inject"]').checked = Boolean(userSettings.autoInject);
+      root.querySelector('[data-role="reduce-visual-effects"]').checked = PerformanceTuning.enabled;
       root.querySelector('[data-role="summary-prompt"]').value = getCompressPrompt();
     }
     function exportPresets() {
@@ -2309,6 +2458,12 @@ const PromptPanel = (() => {
         ]),
         make("p", { className: "hint", text: "按勾选和顺序合并所有提示词；自动同步仅在 AI Studio 的原生编辑框可访问时执行。" }),
         make("hr"),
+        make("h3", { text: "性能" }),
+        make("label", { className: "check-line" }, [
+          role("reduce-visual-effects", "input", { type: "checkbox" }),
+          document.createTextNode(" 减少页面特效（模糊与平滑滚动）")
+        ]),
+        make("p", { className: "hint", text: "可减少 GPU 重绘引起的卡顿；不会删减消息，也无法解决超长对话的全部 DOM 和 token 计算开销。" }),
         make("h3", { text: "上下文管理" }),
         make("label", { text: "保留最近完整轮数" }),
         role("keep", "input", { type: "number", min: "1", max: "100", step: "1" }),
@@ -2404,6 +2559,10 @@ const PromptPanel = (() => {
           return;
         }
         const role = el?.dataset?.role;
+        if (role === "reduce-visual-effects") {
+          const enabled = PerformanceTuning.setEnabled(el.checked);
+          status(enabled ? "已减少页面模糊与平滑滚动，可随时关闭" : "已恢复网页原有视觉效果");
+        }
         if (role === "auto-inject") {
           updateUserSettings({ autoInject: el.checked });
           lastAutoApplied = "";
@@ -2535,6 +2694,7 @@ const PromptPanel = (() => {
 
         // The panel is independent of AI Studio's private RPCs and fragile
         // toolbar selectors; initialize it before any hooks.
+        attempt("performance", () => PerformanceTuning.init());
         runtimeInfo.panelInitialized = attempt("panel", () => PromptPanel.mount());
         attempt("events", installTopLevelHandlers);
         runtimeInfo.networkInitialized = attempt("network", () => NetworkMonitor.init());
