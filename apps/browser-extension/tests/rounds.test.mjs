@@ -34,3 +34,25 @@ const test = (await import("node:test")).default;
     assert.throws(()=>splitter.partition(make(8),8));
     assert.throws(()=>splitter.partition(make(3),0));
   });
+
+  test("old standalone marked memories are preserved separately from recent user rounds", () => {
+    const source = make(5);
+    source.splice(4, 0, {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-1234]] earlier summary"});
+    const result = splitter.partition(source, 2);
+    assert.equal(result.totalRounds, 5);
+    assert.equal(result.olderRounds, 3);
+    assert.equal(result.pinnedMemories, 1);
+    assert.ok(result.older.some(t => t.text?.includes("SUJIU_MEMORY_V1")));
+    assert.equal(result.recent[0].text, "user 3");
+  });
+  test("a tool-generated marked summary remains paired with its task prompt", () => {
+    const source = make(4);
+    source.splice(4, 0,
+      {role:"user",text:"Summary task [[SUJIU_SCOPE_V2:12345678-1234]]"},
+      {role:"model",text:"reasoning before snapshot"},
+      {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-1234]] pinned reply"});
+    const result = splitter.partition(source, 2);
+    assert.equal(result.totalRounds, 5);
+    assert.equal(result.pinnedMemories, 0);
+    assert.ok(result.older.some(t => t.text?.includes("SUJIU_MEMORY_V1")));
+  });
