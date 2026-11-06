@@ -42,7 +42,7 @@ test("keeps the newest exchange and snapshot while selecting old thoughts for de
   });
   assert.equal(x.preview.snapshot, "Remember these events");
   const selection = x.compactor.preflightDom(stage);
-  assert.deepEqual(Array.from(selection.targetIds), ["u1", "t1", "m1"]);
+  assert.deepEqual(Array.from(selection.targetIds), ["m1", "t1", "u1"]);
   assert.equal(selection.groups, 3);
   assert.equal(selection.items, 3);
   assert.equal(x.confirmationCalls, 0);
@@ -65,4 +65,25 @@ test("cancel clears staged deletion without mutating chat history", () => {
   assert.equal(x.compactor.pending, null);
   assert.equal(x.preview, null);
   assert.equal(x.confirmationCalls, 0);
+});
+
+test("recognizes AI Studio user and model turns without invented data-turn-type attributes", () => {
+  const user = { id: "userA", getAttribute() { return ""; }, querySelector(sel) {
+    if (sel === ".chat-turn-container") return { classList: { contains: name => name === "user" } };
+    return {};
+  }, classList: { contains: () => false } };
+  const thought = { id: "thoughtA", getAttribute() { return ""; }, querySelector(sel) {
+    if (sel === ".chat-turn-container") return null;
+    if (sel === "ms-thought-chunk, .thought-panel") return {};
+    if (sel === ".turn-content ms-text-chunk, .turn-content ms-code-block, .turn-content .cmark-node") return null;
+    return {};
+  }, classList: { contains: name => name === "thought-activity-host" } };
+  const model = { id: "modelA", getAttribute() { return ""; }, querySelector(sel) {
+    if (sel === ".chat-turn-container") return { classList: { contains: name => name === "render" } };
+    return {};
+  }, classList: { contains: () => false } };
+  const x = context([]);
+  const grouped = x.compactor.collectGroups([user, thought, model]);
+  assert.equal(grouped.length, 1);
+  assert.equal(grouped[0].turns.length, 3);
 });
