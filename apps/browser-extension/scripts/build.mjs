@@ -1,0 +1,30 @@
+const fs = await import("node:fs/promises");
+  const path = await import("node:path");
+  const root = path.resolve(import.meta.dirname || path.dirname(new URL(import.meta.url).pathname), "..");
+  const files = ["00-state.js","10-settings.js","20-network.js","30-compression.js","35-rounds.js","40-history.js","50-branching.js","60-native-ui.js","70-utils.js","80-prompt-panel.js","90-bootstrap.js"];
+  const text = (await Promise.all(files.map(file => fs.readFile(path.join(root,"src",file),"utf8")))).join("\n");
+  const bundle = '(function () {\n"use strict";\nconst unsafeWindow = window;\n' + text + '\n})();\n';
+  await fs.mkdir(path.join(root,"dist","extension"), {recursive:true});
+  await fs.writeFile(path.join(root,"dist","extension","main.js"),bundle);
+  const manifest = {
+    manifest_version:3,
+    name:"素酒 · AI Studio 工具",
+    version:"0.1.0",
+    description:"AI Studio 提示词预设和手动上下文压缩分支",
+    content_scripts:[{matches:["https://aistudio.google.com/prompts/*"],js:["main.js"],run_at:"document_start",world:"MAIN"}]
+  };
+  await fs.writeFile(path.join(root,"dist","extension","manifest.json"),JSON.stringify(manifest,null,2)+"\n");
+  const header = [
+    "// ==UserScript==",
+    "// @name         Sujiu AI Studio Tools",
+    "// @namespace    https://github.com/Xiwei753/sujiu",
+    "// @version      0.1.0",
+    "// @description  AI Studio prompt presets and manual context compaction",
+    "// @match        https://aistudio.google.com/prompts/*",
+    "// @run-at       document-start",
+    "// @grant        none",
+    "// ==/UserScript==",
+    ""
+  ].join("\n");
+  await fs.writeFile(path.join(root,"dist","sujiu-aistudio.user.js"),header+bundle);
+  process.stdout.write("Generated userscript and MV3 extension.\n");
