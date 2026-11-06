@@ -201,62 +201,6 @@
             };
         }
 
-        // Native message menus can autosave independently, but the plugin
-        // performs only one final Google cloud read after the whole batch.
-        async function awaitCloudPersistence(plan, expectedUsers, expectedProtected, preview, saveBaseline) {
-            let lastUsers = null;
-            for (let i = 0; i < 8; i++) {
-                await sleep(i === 0 ? 800 : 1700);
-                const capture = await fetchResolvedPromptThread(plan.promptId);
-                if (!capture?.entries?.length) continue;
-                const turns = extractResolvedTurns(capture.entries);
-                assertSupportedEntries(capture.entries, turns);
-                const users = turns.filter(turn => turn.role === "user");
-                lastUsers = users.length;
-                if (lastUsers < expectedUsers) {
-                    throw new Error("云端消息少于计划保留的数量，可能误删了内容");
-                }
-                if (lastUsers !== expectedUsers) continue;
-
-                // Exact current and previous pinned summaries must remain,
-                // even when the synthetic tool prompt has been deleted.
-                const memory = turns.find(turn => turn.role === "model" &&
-                    (turn.text || "").includes(plan.memoryMarker || "UNMATCHABLE_MARKER"));
-                if (plan.memoryMarker && (!memory ||
-                    String(memory.text).trim() !== plan.snapshot.trim())) {
-                    throw new Error("Google 云端的最新压缩记忆丢失或发生变化");
-                }
-                for (const pinnedText of plan.pinnedMemoryTexts || []) {
-                    if (!turns.some(turn => turn.role === "model" &&
-                        String(turn.text || "").trim() === pinnedText)) {
-                        throw new Error("以前压缩过的记忆丢失，立即停止");
-                    }
-                }
-
-                // Compare the last N original conversation rounds, excluding
-                // the new synthetic summary model reply from the tail.
-                const beforeMemory = plan.memoryMarker
-                    ? turns.slice(0, turns.findIndex(turn => turn.role === "model" &&
-                        (turn.text || "").includes(plan.memoryMarker)))
-                    : turns.slice(0, -2);
-                const userStarts = beforeMemory.flatMap((turn, index) =>
-                    turn.role === "user" ? [index] : []);
-                if (userStarts.length < plan.recentRounds) {
-                    throw new Error("云端最近保留轮次不足");
-                }
-                const recent = beforeMemory.slice(userStarts[userStarts.length - plan.recentRounds]);
-                if (JSON.stringify(recent.map(turn => [turn.role, turn.text])) !== expectedProtected) {
-                    throw new Error("云端最近保留的正文与删除前不一致");
-                }
-                return true;
-            }
-            const save = SaveMonitor.attempts > saveBaseline
-                ? "最近原生保存状态 " + (SaveMonitor.latest?.status || "未知")
-                : "未观察到原生 UpdatePrompt";
-            throw new Error("批量删除后 Google 未确认保存（云端用户消息 " +
-                (lastUsers ?? "未知") + "，预期 " + expectedUsers + "；" + save + "）");
-        }
-
         async function findNativeDeleteItem() {
             for (let attempt = 0; attempt < 12; attempt++) {
                 const items = [...document.querySelectorAll(
@@ -316,26 +260,21 @@
             if (Branching.getCurrentPromptId() !== plan.promptId) {
                 throw new Error("会话已切换，请重新读取摘要");
             }
-            const baseline = await verifyPersistedSummary(plan);
-            const latest = findSavedSummary(baseline.turns, plan.promptId);
-            const original = baseline.turns.slice(0, latest.lastUserIndex);
-            const recent = RoundSplitter.partition(original, plan.recentRounds).recent;
-            const expectedProtected = JSON.stringify(recent.map(turn => [turn.role, turn.text]));
+            // Preflight still verifies the staged summary and protected
+            // boundary; only post-deletion server polling is removed.
+            await verifyPersistedSummary(plan);
             const preview = preflightDom(plan);
-            const expectedUsers = baseline.turns.filter(turn => turn.role === "user").length -
-                preview.deletedUserCount;
             const prompt = "准备一次性清理 " + preview.deletedOldRounds + " 轮旧历史" +
                 (preview.pinnedCount ? "（已保护 " + preview.pinnedCount + " 条旧压缩记忆）" : "") +
                 (plan.memoryMarker ? "，并清理本次工具指令及可独立删除的思考块" : "") +
                 "。保留最近 " + plan.recentRounds + " 轮与已标记摘要。" +
                 (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                     " 个无法独立删除的思考块会保留。" : "") +
-                "所有页面删除完成后只进行一次云端保存验证。该操作不可撤销，继续？";
+                "完成批量删除后将触发一次 AI Studio 原生保存。该操作不可撤销，继续？";
             if (!confirm(prompt)) return;
             deleting = true;
             state.branchInProgress = true;
             let processed = 0;
-            const saveBaseline = SaveMonitor.attempts;
             try {
                 const protectedSet = new Set(preview.protectedIds);
                 for (const id of preview.targetIds) {
@@ -354,14 +293,23 @@
                         }
                     }
                     PromptPanel.status("批量清理中 " + processed + "/" + preview.items +
-                        "，完成后统一验证 Google 保存");
+                        "，完成后触发一次原生保存");
                 }
-                PromptPanel.status("本批次已在页面处理，正在统一核对 Google 云端……");
-                await awaitCloudPersistence(plan, expectedUsers, expectedProtected, preview, saveBaseline);
+                // Single deliberate save action, after all DOM removals.
+                // A native 200 response is not proof that the right content
+                // was persisted; do not claim a verified cloud save.
+                PromptPanel.status("批量删除已完成，正在触发一次 AI Studio 原生保存……");
+                const saved = await NativeSave.triggerOnce();
+                if (!saved.triggered) {
+                    PromptPanel.status("页面删除已完成，但未找到原生保存入口：" +
+                        saved.reason + "。请立即在 AI Studio 手动保存，保存前不要刷新！");
+                    return;
+                }
                 pending = null;
                 PromptPanel.showCompactionReview(null);
-                PromptPanel.status("Google 云端已核对：旧历史清理完成，标记的压缩记忆和最近轮次仍在。" +
-                    (preview.skippedThoughts ? "部分内嵌思考块因缺少独立删除入口而保留。" : ""));
+                PromptPanel.status("批量删除已完成，已调用一次 AI Studio 原生保存（" +
+                    saved.via + "）。请等页面显示保存完成后刷新核对。" +
+                    (preview.skippedThoughts ? "部分无法独立删除的思考块已保留。" : ""));
             } catch (error) {
                 PromptPanel.status("批量清理处理了 " + processed + "/" + preview.items +
                     " 个页面消息后停止：" + String(error?.message || error) +
