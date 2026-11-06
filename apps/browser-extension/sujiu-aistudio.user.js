@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.2.1
+// @version      0.2.2
 // @description  AI Studio prompt presets and manual context compaction
 // @match        https://aistudio.google.com/*
 // @noframes
@@ -11,7 +11,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.2.1", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.2.2", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -68,7 +68,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.2.1";
+    const SCRIPT_VERSION = "0.2.2";
 
     const state = {
         compressionInProgress: false,
@@ -382,6 +382,7 @@ const unsafeWindow = window;
                     emitNetworkEvent(Config.EVENTS.REQUEST, {
                         url: absoluteUrl,
                         headers,
+                        bodyText
                     });
                 }
                 return originalSend.apply(this, arguments);
@@ -497,7 +498,7 @@ const unsafeWindow = window;
             textarea.dispatchEvent(new Event("change", { bubbles: true }));
             sendCompressionRequest().then(sent => {
                 if (sent) {
-                    log.ui("Compression request sent");
+                    log.ui("Compression click sent; listening without a time limit");
                     return;
                 }
                 log.ui("Compression request was not confirmed; no retry attempted");
@@ -520,7 +521,7 @@ const unsafeWindow = window;
 
         handleRequestEvent(event) {
             const detail = event?.detail;
-            if (!detail?.bodyText) return;
+            if (!isTargetRequest(detail?.url, "GENERATE") || !detail?.bodyText) return;
             const isCompressionBody = Compression.isCompressionPrompt(detail.bodyText);
 
             if (!state.historyCapturePending && !state.compressionInProgress) {
@@ -562,6 +563,7 @@ const unsafeWindow = window;
                 return;
             }
             const detail = event?.detail;
+            if (!isTargetRequest(detail?.url, "GENERATE")) return;
             if (!detail?.bodyText) {
                 log.net("GenerateContent response missing bodyText");
                 Compression.finalizeRun();
@@ -579,12 +581,33 @@ const unsafeWindow = window;
                 Compression.finalizeRun();
                 return;
             }
-            log.net("Compression snapshot extracted; preparing in-place deletion preview");
-            prepareInPlaceCompaction(snapshot).catch(err => {
-                log.net("Failed to prepare in-place deletion", err.message);
-                alert("素酒压缩失败： " + err.message);
-            });
+            log.net("Summary response completed; ready for manual review", { length: snapshot.length });
+            PromptPanel.status("AI Studio 已返回摘要。请先确认模型已经完成，再点击「读取已完成摘要」核对并准备清理。");
             Compression.finalizeRun();
+        },
+
+        stopTracking() {
+            if (!state.compressionInProgress) {
+                PromptPanel.status("当前没有正在监听的摘要请求");
+                return;
+            }
+            Compression.finalizeRun();
+            PromptPanel.status("已停止插件监听，AI Studio 正在生成的内容不会被中断；完成后可以手动读取摘要。");
+        },
+
+        async recover() {
+            if (state.branchInProgress) {
+                PromptPanel.status("正在清理旧消息，请先完成当前操作");
+                return;
+            }
+            try {
+                PromptPanel.status("正在从当前会话重新读取已保存的摘要……");
+                await recoverLatestCompletedSummary();
+                Compression.finalizeRun();
+            } catch (error) {
+                PromptPanel.status("尚未取得可用于清理的完整摘要：" + String(error?.message || error));
+                log.ui("Manual summary recovery failed", String(error?.message || error));
+            }
         },
 
         finalizeRun() {
@@ -612,20 +635,6 @@ const unsafeWindow = window;
             return false;
         }
     };
-
-    function delay(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
-    async function waitForCompressionRequestCapture(timeoutMs = 12000) {
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-            if (!state.compressionInProgress) return false;
-            if (state.compressionResponsePending || !state.compressionRequestPending) return true;
-            await delay(100);
-        }
-        return state.compressionResponsePending || !state.compressionRequestPending;
-    }
 
     function isStopControl(button) {
         const icon = button.querySelector?.("mat-icon, .material-symbols-outlined");
@@ -655,7 +664,9 @@ const unsafeWindow = window;
         button.click();
         log.ui("Compression request: single native Run click");
         PromptPanel.status("已点击运行一次，等待 AI Studio 接收请求；不会自动再次点击");
-        return waitForCompressionRequestCapture();
+        // Keep the capture handlers active for as long as the model needs.
+        // Recovery is a separate user-initiated step, so no timeout or retry.
+        return true;
     }
 
     function setTextareaValue(textarea, value) {
@@ -713,16 +724,37 @@ const RoundSplitter = Object.freeze({
     }
   });
 
-    async function prepareInPlaceCompaction(snapshotText) {
-        const turns = await getRebuildSourceTurns();
-        if (!turns.length) throw new Error("无法读取当前会话历史");
-        const cleanTurns = stripCompressionArtifacts(turns);
-        if (!cleanTurns.length) throw new Error("压缩范围为空");
-        const split = RoundSplitter.partition(cleanTurns, Number(userSettings.keepRounds) || 8);
-        InPlaceCompaction.stage(snapshotText, split);
-        log.ui("In-place summary ready", {
-            compressedRounds: split.olderRounds,
-            preservedRounds: split.recentRounds
+    async function recoverLatestCompletedSummary() {
+        const id = Branching.getCurrentPromptId();
+        if (!id || id === "new_chat") {
+            throw new Error("当前聊天还没有保存为独立会话");
+        }
+        // Always fetch the latest remote state. In-memory thread snapshots
+        // may be stale while the model is still thinking or streaming.
+        const capture = await fetchResolvedPromptThread(id);
+        if (!capture?.entries?.length) {
+            throw new Error("未能读取 Google 保存的聊天记录，请确认网络与账号状态");
+        }
+        const turns = extractResolvedTurns(capture.entries);
+        assertSupportedEntries(capture.entries, turns);
+        if (turns.length < 4) throw new Error("尚无足够的完整聊天轮次");
+        const summaryPrompt = turns[turns.length - 2];
+        const summaryReply = turns[turns.length - 1];
+        if (summaryPrompt?.role !== "user" ||
+            !summaryPrompt.text.includes("Only summarize the completed dialogue BEFORE the last ")) {
+            throw new Error("当前聊天的最后一条用户消息不是素酒生成的摘要指令");
+        }
+        if (summaryReply?.role !== "model" || !summaryReply.text?.trim()) {
+            throw new Error("Google 端尚无对应的完整模型摘要回复；请在生成结束后重试");
+        }
+        // Never include the synthetic request/response in the prior history.
+        const originalTurns = turns.slice(0, -2);
+        const split = RoundSplitter.partition(originalTurns, Number(userSettings.keepRounds) || 8);
+        InPlaceCompaction.stage(summaryReply.text.trim(), split);
+        log.ui("Completed summary loaded from Google; awaiting explicit deletion confirmation", {
+            originalRounds: split.totalRounds,
+            olderRounds: split.olderRounds,
+            recentRounds: split.recentRounds
         });
     }
 
@@ -2024,6 +2056,8 @@ const PromptPanel = (() => {
         make("label", { text: "压缩摘要提示词" }),
         role("summary-prompt", "textarea", { rows: "5" }),
         line(action("生成摘要（当前聊天）", "compress")),
+        make("p", { className: "hint", text: "生成没有固定等待时限。模型完成回复后，再点击读取摘要；两项操作相互独立。" }),
+        line(action("读取已完成摘要", "recover-summary"), action("停止插件监听", "stop-tracking")),
         make("div", { id: "inplace-review", hidden: true }, [
           make("label", { text: "摘要预览（已写入原聊天）" }),
           role("snapshot-preview", "textarea", { rows: "8", readonly: "readonly" }),
@@ -2178,9 +2212,11 @@ const PromptPanel = (() => {
           status(ok ? "已复制提示词，可粘贴至系统指令框" : "复制失败：请检查剪贴板权限");
         }
         if (action === "compress") {
-          status("正在当前会话生成摘要；生成后需再次确认删除旧消息");
+          status("已开始生成摘要。模型完成后请点击「读取已完成摘要」；不会自动删除任何历史消息");
           Compression.run();
         }
+        if (action === "recover-summary") await Compression.recover();
+        if (action === "stop-tracking") Compression.stopTracking();
         if (action === "commit-delete") {
           try { await InPlaceCompaction.commit(); }
           catch (error) { console.warn("[Sujiu AI Studio] in-place deletion halted", String(error?.message || error)); }
