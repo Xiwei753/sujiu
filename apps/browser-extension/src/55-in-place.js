@@ -270,11 +270,12 @@
                 "。保留最近 " + plan.recentRounds + " 轮与已标记摘要。" +
                 (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                     " 个无法独立删除的思考块会保留。" : "") +
-                "完成批量删除后将触发一次 AI Studio 原生保存。该操作不可撤销，继续？";
+                "删除操作使用 AI Studio 原生消息菜单，Google 会自行自动保存。全部删除后统一等待保存响应。该操作不可撤销，继续？";
             if (!confirm(prompt)) return;
             deleting = true;
             state.branchInProgress = true;
             let processed = 0;
+            const saveBaseline = SaveMonitor.attempts;
             try {
                 const protectedSet = new Set(preview.protectedIds);
                 for (const id of preview.targetIds) {
@@ -293,22 +294,28 @@
                         }
                     }
                     PromptPanel.status("批量清理中 " + processed + "/" + preview.items +
-                        "，完成后触发一次原生保存");
+                        "，原生页面将自行处理自动保存");
                 }
-                // Single deliberate save action, after all DOM removals.
-                // A native 200 response is not proof that the right content
-                // was persisted; do not claim a verified cloud save.
-                PromptPanel.status("批量删除已完成，正在触发一次 AI Studio 原生保存……");
-                const saved = await NativeSave.triggerOnce();
-                if (!saved.triggered) {
-                    PromptPanel.status("页面删除已完成，但未找到原生保存入口：" +
-                        saved.reason + "。请立即在 AI Studio 手动保存，保存前不要刷新！");
+                // The old per-turn path never invoked Save explicitly.
+                // AI Studio's native delete action triggers UpdatePrompt
+                // automatically. Observe one quiet period after the batch.
+                PromptPanel.status("批量删除完成，等待 Google 原生自动保存请求结束……");
+                const autosave = await SaveMonitor.waitForNativeSave(saveBaseline);
+                if (!autosave.observed) {
+                    PromptPanel.status("页面删除已完成，但未观察到 UpdatePrompt 自动保存。" +
+                        "请确认 Google 页面已同步，保存前不要刷新。");
+                    return;
+                }
+                if (!autosave.ok) {
+                    PromptPanel.status("Google 原生自动保存返回 " + autosave.status +
+                        "，请检查网络和页面状态，暂勿刷新。");
                     return;
                 }
                 pending = null;
                 PromptPanel.showCompactionReview(null);
-                PromptPanel.status("批量删除已完成，已调用一次 AI Studio 原生保存（" +
-                    saved.via + "）。请等页面显示保存完成后刷新核对。" +
+                PromptPanel.status("批量删除已完成；观察到 " + autosave.attempts +
+                    " 次原生 UpdatePrompt 响应，最后状态 " + autosave.status +
+                    "。这表示保存请求有成功响应，刷新后可核对实际云端历史。" +
                     (preview.skippedThoughts ? "部分无法独立删除的思考块已保留。" : ""));
             } catch (error) {
                 PromptPanel.status("批量清理处理了 " + processed + "/" + preview.items +
