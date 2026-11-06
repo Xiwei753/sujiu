@@ -29,8 +29,13 @@
             .map(turn => String(turn.text || "").trim())
             .filter(Boolean).join("\n").trim();
         if (!snapshot) throw new Error("Google 端仍未保存可见的模型摘要，请等生成结束后重试");
+        const pinnedMarker = CompactionTask.memoryMarker(task.marker);
+        if (!snapshot.includes(pinnedMarker)) {
+            throw new Error("摘要缺少永久记忆标识，无法确保后续压缩保护它；请重新生成摘要");
+        }
         return {
             snapshot,
+            pinnedMarker,
             lastUserIndex,
             marker: task.marker,
             keepRounds: stored.keepRounds,
