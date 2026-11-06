@@ -337,6 +337,19 @@ const PromptPanel = (() => {
           Compression.run();
         }
       });
+      // Open once after a fresh install so users can confirm injection
+      // without having to find the small bottom-right launcher.
+      try {
+        const seenKey = "sujiu:aistudio:panel-opened:v1";
+        if (!localStorage.getItem(seenKey)) {
+          panel.hidden = false;
+          shadow.getElementById("toggle").setAttribute("aria-expanded", "true");
+          localStorage.setItem(seenKey, "1");
+        }
+      } catch {
+        panel.hidden = false;
+        shadow.getElementById("toggle").setAttribute("aria-expanded", "true");
+      }
       document.body.appendChild(host);
       console.info("[Sujiu AI Studio] prompt panel mounted");
       render();
