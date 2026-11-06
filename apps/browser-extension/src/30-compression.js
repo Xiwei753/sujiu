@@ -102,9 +102,9 @@
                 Compression.finalizeRun();
                 return;
             }
-            log.net("Compression snapshot extracted, rebuilding conversation");
-            rebuildConversation(snapshot).catch(err => {
-                log.net("Failed to rebuild conversation", err.message);
+            log.net("Compression snapshot extracted; preparing in-place deletion preview");
+            prepareInPlaceCompaction(snapshot).catch(err => {
+                log.net("Failed to prepare in-place deletion", err.message);
                 alert("素酒压缩失败： " + err.message);
             });
             Compression.finalizeRun();
