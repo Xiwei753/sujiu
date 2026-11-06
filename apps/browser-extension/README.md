@@ -16,14 +16,20 @@
 
 1. npm run check
 2. Chrome / Edge 打开 chrome://extensions，启用开发者模式，加载 dist/extension 目录。
-3. 使用 Tampermonkey 时导入 dist/sujiu-aistudio.user.js，避免同时启用扩展与油猴版本。
+3. **油猴最简安装：** 直接打开 [最新版 sujiu-aistudio.user.js](https://raw.githubusercontent.com/Xiwei753/sujiu/feat/aistudio-browser-extension/apps/browser-extension/sujiu-aistudio.user.js) 导入 Tampermonkey，或复制其完整内容粘贴到一个新脚本；不需要拼接 src/ 目录。已有旧版请先停用，避免重复注入。构建产物 `dist/sujiu-aistudio.user.js` 与该直接安装文件由同一脚本生成。
 4. **Chrome / Edge 新版必须检查用户脚本权限：** 浏览器扩展管理页 → Tampermonkey →「详情」→ 开启「允许用户脚本（Allow User Scripts）」。这个开关关闭时，脚本可以显示为已导入、已启用，但不会在网页执行。参考 [Tampermonkey FAQ](https://www.tampermonkey.net/faq.php?ext=dhdg&q=Q209&version=5.1.0)。
 5. 打开 https://aistudio.google.com/prompts/new_chat 并强制刷新；也兼容旧的 /app/prompts/* 路径。首次安装后工具面板默认展开，此后通过右下角「素酒工具」开关。
 6. 先测试提示词填写；压缩前建议保存原聊天，再测试压缩分支，刷新新会话核对内容。
 
 ### 面板未出现时的最小诊断
 
-在 AI Studio 标签页按 F12 打开 Console，输入 `window.__SUJIU_AISTUDIO_RUNTIME__`。如果返回 `undefined`，优先检查 Tampermonkey 是否真正执行、是否允许用户脚本、脚本的站点匹配与启用状态；如果返回对象，检查 `errors` 数组及 `panelInitialized` 字段，并附上不含密钥的错误信息反馈。v0.1.1 起网络监听失败不应影响面板初始化。
+在 AI Studio 标签页按 F12 打开 Console，先输入 `window.__SUJIU_AISTUDIO_BOOT__`：
+
+- 返回 `undefined`：用户脚本仍未注入（检查 Tampermonkey 是否对该标签页显示运行脚本数量、脚本启用状态、站点访问许可和「允许用户脚本」）。如果连最小启动标记都没有，排查方向属于浏览器/油猴注入权限。
+- 返回 `{ phase: "error", error: "..." }`：脚本已注入，但内部模块报错。页面右下角应有可点击的红色错误按钮。
+- 返回 `{ phase: "ready" }`：查看 `window.__SUJIU_AISTUDIO_RUNTIME__` 中的 `panelInitialized` 和 `errors`。如果初始化成功但按钮仍不显示，优先检查网页是否覆盖了 DOM。
+
+v0.1.2 起 `@match` 覆盖 `https://aistudio.google.com/*` 全站路径、`@sandbox raw` 明确页面注入，并在执行模块代码前创建启动标记。UI 初始化与网络 RPC 相互隔离。
 
 ## 架构
 
@@ -52,7 +58,7 @@
 - 提示词预设保存在站点 localStorage 中，适合普通设定，不建议写入私密密钥。
 - 旧会话不会被删除。压缩操作会向旧会话额外发送一次总结消息；失败时保持旧会话可访问。自动清理、自动压缩和思维链清理均不启用。
 - 20 万 tokens 是建议的**手动检查时间点**，不是兼容所有模型的统一阈值；当前没有实现可靠的实时 token 计数，请以 AI Studio 显示的用量及模型限制为准。
-- 用户脚本必须以页面上下文运行（@grant none）；Manifest V3 使用 world: MAIN。两者均只匹配 AI Studio 的 prompts 页面。
+- 用户脚本必须以页面上下文运行（@grant none）；Manifest V3 使用 world: MAIN。两者均只匹配 AI Studio 站点；UI 可在首页显示，压缩仅用于聊天页。
 
 ## 验收场景
 
