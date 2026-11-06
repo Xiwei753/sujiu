@@ -6,6 +6,14 @@
             }
             const parsed = JSON.parse(raw);
             if (parsed && typeof parsed === "object") {
+                // Existing installations store the original default as a
+                // literal string. Upgrade only that exact default and leave
+                // user-edited summary prompts untouched.
+                if (parsed.compressPrompt === Config.PROMPTS.LEGACY_FULL) {
+                    parsed.compressPrompt = Config.PROMPTS.FULL;
+                    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed)); }
+                    catch {}
+                }
                 return { ...DEFAULT_SETTINGS, ...parsed };
             }
             return { ...DEFAULT_SETTINGS };
