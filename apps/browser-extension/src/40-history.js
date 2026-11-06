@@ -1,13 +1,34 @@
-    async function prepareInPlaceCompaction(snapshotText) {
-        const turns = await getRebuildSourceTurns();
-        if (!turns.length) throw new Error("无法读取当前会话历史");
-        const cleanTurns = stripCompressionArtifacts(turns);
-        if (!cleanTurns.length) throw new Error("压缩范围为空");
-        const split = RoundSplitter.partition(cleanTurns, Number(userSettings.keepRounds) || 8);
-        InPlaceCompaction.stage(snapshotText, split);
-        log.ui("In-place summary ready", {
-            compressedRounds: split.olderRounds,
-            preservedRounds: split.recentRounds
+    async function recoverLatestCompletedSummary() {
+        const id = Branching.getCurrentPromptId();
+        if (!id || id === "new_chat") {
+            throw new Error("当前聊天还没有保存为独立会话");
+        }
+        // Always fetch the latest remote state. In-memory thread snapshots
+        // may be stale while the model is still thinking or streaming.
+        const capture = await fetchResolvedPromptThread(id);
+        if (!capture?.entries?.length) {
+            throw new Error("未能读取 Google 保存的聊天记录，请确认网络与账号状态");
+        }
+        const turns = extractResolvedTurns(capture.entries);
+        assertSupportedEntries(capture.entries, turns);
+        if (turns.length < 4) throw new Error("尚无足够的完整聊天轮次");
+        const summaryPrompt = turns[turns.length - 2];
+        const summaryReply = turns[turns.length - 1];
+        if (summaryPrompt?.role !== "user" ||
+            !summaryPrompt.text.includes("Only summarize the completed dialogue BEFORE the last ")) {
+            throw new Error("当前聊天的最后一条用户消息不是素酒生成的摘要指令");
+        }
+        if (summaryReply?.role !== "model" || !summaryReply.text?.trim()) {
+            throw new Error("Google 端尚无对应的完整模型摘要回复；请在生成结束后重试");
+        }
+        // Never include the synthetic request/response in the prior history.
+        const originalTurns = turns.slice(0, -2);
+        const split = RoundSplitter.partition(originalTurns, Number(userSettings.keepRounds) || 8);
+        InPlaceCompaction.stage(summaryReply.text.trim(), split);
+        log.ui("Completed summary loaded from Google; awaiting explicit deletion confirmation", {
+            originalRounds: split.totalRounds,
+            olderRounds: split.olderRounds,
+            recentRounds: split.recentRounds
         });
     }
 
