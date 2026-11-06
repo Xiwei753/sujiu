@@ -197,6 +197,7 @@
                     emitNetworkEvent(Config.EVENTS.REQUEST, {
                         url: absoluteUrl,
                         headers,
+                        bodyText
                     });
                 }
                 return originalSend.apply(this, arguments);
