@@ -175,3 +175,30 @@ test("an embedded thought without an independent menu stays protected", () => {
   assert.ok(!preview.targetIds.includes("thought"));
   assert.ok(preview.protectedIds.includes("memory"));
 });
+
+test("standalone pinned memories survive future compression without protecting unrelated old rounds", () => {
+  const pinned = "[[SUJIU_MEMORY_V1:12345678-abcd]]";
+  const older = [
+    {role:"user", text:"first"}, {role:"model", text:"first reply"},
+    {role:"model", text:pinned + " old archive"},
+    {role:"user", text:"second"}, {role:"model", text:"second reply"}
+  ];
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("memory-old","model"),
+    mockTurn("u2","user"), mockTurn("m2","model"),
+    mockTurn("u3","user"), mockTurn("m3","model"),
+    mockTurn("tool","user"), mockTurn("new-memory","model")
+  ];
+  turns[2].textContent = pinned + " old archive";
+  const x = context(turns);
+  const plan = x.compactor.stage("New model summary", {
+    older, totalRounds:3, olderRounds:2, recentRounds:1
+  });
+  assert.deepEqual(Array.from(plan.pinnedOlderRounds), []);
+  assert.deepEqual(Array.from(plan.pinnedMemoryTexts), [pinned + " old archive"]);
+  const selection = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(selection.targetIds), ["m1", "u1", "m2", "u2"]);
+  assert.ok(selection.protectedIds.includes("memory-old"));
+  assert.ok(!selection.targetIds.includes("memory-old"));
+});
