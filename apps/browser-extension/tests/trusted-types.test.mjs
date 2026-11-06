@@ -1,0 +1,101 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import vm from "node:vm";
+
+const source = await readFile(new URL("../src/80-prompt-panel.js", import.meta.url), "utf8");
+
+class StrictNode {
+  constructor(tag = "div") {
+    this.tagName = tag.toUpperCase();
+    this.children = [];
+    this.attributes = {};
+    this.style = {};
+    this.dataset = {};
+    this.hidden = false;
+    this.value = "";
+    this.checked = false;
+    this.id = "";
+  }
+  set innerHTML(_value) { throw new TypeError("This document requires TrustedHTML assignment"); }
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+    if (name === "id") this.id = String(value);
+    if (name.startsWith("data-")) this.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = String(value);
+  }
+  getAttribute(name) { return this.attributes[name] ?? null; }
+  append(...children) { this.children.push(...children); }
+  appendChild(node) { this.append(node); return node; }
+  replaceChildren(...children) { this.children = children; }
+  addEventListener() {}
+  attachShadow() {
+    this.shadowRoot = new StrictNode("shadow");
+    return this.shadowRoot;
+  }
+  querySelector(selector) {
+    const match = selector.match(/^\[([^=]+)="([^"]+)"\]$/);
+    if (!match) return null;
+    const [_, key, value] = match;
+    return this.find(node => node.getAttribute?.(key) === value);
+  }
+  getElementById(id) { return this.find(node => node.id === id); }
+  find(predicate) {
+    for (const child of this.children) {
+      if (predicate(child)) return child;
+      const nested = child.find?.(predicate);
+      if (nested) return nested;
+    }
+    return null;
+  }
+}
+
+function setup() {
+  const document = {
+    body: new StrictNode("body"),
+    readyState: "complete",
+    createElement: tag => new StrictNode(tag),
+    createTextNode: text => ({ textContent: String(text) }),
+    getElementById(id) { return this.body.getElementById(id); }
+  };
+  const rawPreset = () => ({
+    fields: Object.fromEntries(["system","character","world","persona","author"].map(key => [key, ""])),
+    enabled: Object.fromEntries(["system","character","world","persona","author"].map(key => [key, true])),
+    order: ["system","character","world","persona","author"]
+  });
+  const profile = rawPreset();
+  const context = {
+    document,
+    PromptProfiles: {
+      sections: ["system","character","world","persona","author"].map(id => ({ id, title: id })),
+      normalize: () => ({ active: "默认", presets: { 默认: profile } }),
+      compile: () => "",
+      shift: () => profile,
+      maxPresets: 50
+    },
+    localStorage: { getItem: () => null, setItem: () => {} },
+    state: { compressionInProgress: false, branchInProgress: false },
+    userSettings: { keepRounds: 8, autoInject: false },
+    getCompressPrompt: () => "Summary",
+    setInterval: () => 1,
+    console: { info: () => {} }
+  };
+  vm.runInNewContext(source + "\nPromptPanel.mount();", context);
+  return { document };
+}
+
+test("mounts prompt panel without TrustedHTML / innerHTML on the host page", () => {
+  const { document } = setup();
+  const host = document.getElementById("sujiu-aistudio-host");
+  assert.ok(host, "mounted host is present");
+  assert.ok(host.shadowRoot, "Shadow DOM was created");
+  const pane = host.shadowRoot.getElementById("pane");
+  assert.ok(pane, "prompt pane exists");
+  assert.equal(pane.hidden, false, "first install opens the panel");
+  assert.ok(host.shadowRoot.getElementById("toggle"), "floating toggle exists");
+  assert.ok(host.shadowRoot.getElementById("fields"), "prompt fields container exists");
+  assert.ok(host.shadowRoot.querySelector('[data-role="compress"]') === null);
+  assert.ok(host.shadowRoot.querySelector('[data-role="summary-prompt"]'), "compression prompt input exists");
+  assert.ok(host.shadowRoot.querySelector('[data-role="preset"]'), "preset selector exists");
+  assert.ok(host.shadowRoot.querySelector('[data-role="status"]'), "status node exists");
+  assert.doesNotMatch(source, /\.innerHTML\s*=/);
+});
