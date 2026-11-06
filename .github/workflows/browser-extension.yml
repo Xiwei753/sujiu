@@ -18,6 +18,7 @@ jobs:
           node-version: '20'
       - run: npm run check
         working-directory: apps/browser-extension
+      - run: git diff --exit-code -- apps/browser-extension/sujiu-aistudio.user.js
       - uses: actions/upload-artifact@v4
         with:
           name: sujiu-aistudio-browser-extension
