@@ -1,10 +1,53 @@
+    function findSavedSummary(turns, promptId) {
+        // A thinking model may persist additional model/thought entries after
+        // its visible reply. Identify the last USER turn, rather than assuming
+        // the last two serialized records are exactly user/model.
+        const lastUserIndex = turns.findLastIndex(turn => turn?.role === "user");
+        if (lastUserIndex < 0) throw new Error("会话中没有可识别的用户消息");
+        const latestUser = turns[lastUserIndex];
+        const task = CompactionTask.parsePrompt(latestUser?.text || "");
+        if (!task) {
+            const trailingRoles = turns.slice(-5).map(turn => turn.role).join(", ");
+            log.ui("Summary marker not found on last user turn", {
+                trailingRoles,
+                lastUserIndex,
+                totalEntries: turns.length,
+                lastUserLength: latestUser?.text?.length || 0
+            });
+            throw new Error("最新用户消息没有素酒摘要任务标识（旧版兼容标识也未匹配）。请确认 Google 已保存摘要，并且摘要之后没有发送其他用户消息");
+        }
+        const stored = CompactionTask.read(promptId);
+        if (task.marker && stored && task.marker !== stored.marker) {
+            throw new Error("摘要任务标识与本机最近一次生成任务不同，请重新生成摘要后再确认清理");
+        }
+        const responses = turns.slice(lastUserIndex + 1);
+        if (!responses.length || responses.some(turn => turn.role !== "model")) {
+            throw new Error("摘要后尚无完整的模型回复，或会话结构已变更");
+        }
+        const snapshot = responses
+            .filter(turn => !isThoughtOnlyTurn(turn))
+            .map(turn => String(turn.text || "").trim())
+            .filter(Boolean).join("\n").trim();
+        if (!snapshot) throw new Error("Google 端仍未保存可见的模型摘要，请等生成结束后重试");
+        return {
+            snapshot,
+            lastUserIndex,
+            marker: task.marker,
+            keepRounds: task.keepRounds,
+            legacy: task.legacy
+        };
+    }
+
     async function recoverLatestCompletedSummary() {
         const id = Branching.getCurrentPromptId();
         if (!id || id === "new_chat") {
             throw new Error("当前聊天还没有保存为独立会话");
         }
-        // Always fetch the latest remote state. In-memory thread snapshots
-        // may be stale while the model is still thinking or streaming.
+        const button = UI.findSendButton();
+        if (button && isStopControl(button)) {
+            throw new Error("AI Studio 仍在生成中，请等停止按钮恢复为运行按钮后重试");
+        }
+        // Read the live server copy, never an older intercepted response.
         const capture = await fetchResolvedPromptThread(id);
         if (!capture?.entries?.length) {
             throw new Error("未能读取 Google 保存的聊天记录，请确认网络与账号状态");
@@ -12,23 +55,16 @@
         const turns = extractResolvedTurns(capture.entries);
         assertSupportedEntries(capture.entries, turns);
         if (turns.length < 4) throw new Error("尚无足够的完整聊天轮次");
-        const summaryPrompt = turns[turns.length - 2];
-        const summaryReply = turns[turns.length - 1];
-        if (summaryPrompt?.role !== "user" ||
-            !summaryPrompt.text.includes("Only summarize the completed dialogue BEFORE the last ")) {
-            throw new Error("当前聊天的最后一条用户消息不是素酒生成的摘要指令");
-        }
-        if (summaryReply?.role !== "model" || !summaryReply.text?.trim()) {
-            throw new Error("Google 端尚无对应的完整模型摘要回复；请在生成结束后重试");
-        }
-        // Never include the synthetic request/response in the prior history.
-        const originalTurns = turns.slice(0, -2);
-        const split = RoundSplitter.partition(originalTurns, Number(userSettings.keepRounds) || 8);
-        InPlaceCompaction.stage(summaryReply.text.trim(), split);
-        log.ui("Completed summary loaded from Google; awaiting explicit deletion confirmation", {
+        const task = findSavedSummary(turns, id);
+        const originalTurns = turns.slice(0, task.lastUserIndex);
+        const split = RoundSplitter.partition(originalTurns, task.keepRounds);
+        InPlaceCompaction.stage(task.snapshot, split, task);
+        log.ui("Saved summary recognized; awaiting explicit confirmation", {
             originalRounds: split.totalRounds,
             olderRounds: split.olderRounds,
-            recentRounds: split.recentRounds
+            recentRounds: split.recentRounds,
+            markerPresent: Boolean(task.marker),
+            legacy: task.legacy
         });
     }
 
