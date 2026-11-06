@@ -8,54 +8,71 @@ const source = await readFile(new URL("../src/28-request-scope.js", import.meta.
 const network = await readFile(new URL("../src/20-network.js", import.meta.url), "utf8");
 const marker = "[[SUJIU_SCOPE_V2:abcdef12-1234]]";
 const make = (role, text) => [[[null, text]], role];
-const parse = text => JSON.parse(text);
 const context = {
-  safeParseJSON: parse,
+  safeParseJSON: JSON.parse,
   RoundSplitter: vm.runInNewContext(rounds + "\nRoundSplitter")
 };
 const Scope = vm.runInNewContext(source + "\nRequestScope", context);
+
 const initial = [
   make("user", "old message 1"), make("model", "old response 1"),
   make("user", "old message 2"), make("model", "old response 2"),
-  make("user", "private current message"), make("model", "private current response"),
-  make("user", "总结已提供历史\n" + marker)
+  make("user", "recent message"), make("model", "recent response"),
+  make("user", "Summarize whole conversation\n" + marker)
 ];
-const wire = JSON.stringify(["other", initial, { modelOptions: ["keep"] }]);
-test("model request contains full older turns and summary but never protected recent turns", () => {
+const wire = JSON.stringify(["options", initial, { modelOptions: ["keep"] }]);
+
+test("all old and recent original turns are transmitted for the summary", () => {
   const output = Scope.prepare(wire, marker, 1);
   assert.equal(output.olderRounds, 2);
   assert.equal(output.recentRounds, 1);
   assert.equal(output.totalRounds, 3);
+  assert.equal(output.transmittedRounds, 3);
+  assert.equal(output.bodyText, wire, "Google's native request is not rewritten");
   const body = JSON.parse(output.bodyText);
-  assert.equal(body[1].length, 5);
+  assert.equal(body[1].length, 7);
   assert.equal(body[2].modelOptions[0], "keep");
-  assert.match(output.bodyText, /old message 1/);
-  assert.match(output.bodyText, /old message 2/);
-  assert.match(output.bodyText, /SUJIU_SCOPE_V2/);
-  assert.doesNotMatch(output.bodyText, /private current message|private current response/);
-  assert.equal(JSON.parse(wire)[1].length, 7, "original request is unchanged");
+  for(const fragment of ["old message 1","old message 2","recent message","recent response",marker])
+    assert.ok(output.bodyText.includes(fragment));
 });
 
-test("refuses unsafe private RPC schemas instead of leaking full history", () => {
-  assert.throws(() => Scope.prepare(JSON.stringify(["other", {}, { marker }]), marker, 1), /格式无法验证/);
-  assert.throws(() => Scope.prepare(JSON.stringify(["other", [
+test("94-round history transmits the entire 94 rounds while preserving last 20 for cleanup", () => {
+  const history = Array.from({length:94}, (_,i)=>[
+    make("user","user "+i), make("model","model "+i)
+  ]).flat();
+  const body = JSON.stringify(["options", [...history,make("user",marker)]]);
+  const result = Scope.prepare(body, marker, 20);
+  assert.equal(result.olderRounds,74);
+  assert.equal(result.recentRounds,20);
+  assert.equal(result.transmittedRounds,94);
+  assert.equal(JSON.parse(result.bodyText)[1].length,189);
+  assert.ok(result.bodyText.includes("user 93"));
+  assert.ok(result.bodyText.includes("model 93"));
+});
+
+test("unexpected native private RPC structures fail safely rather than rewriting content", () => {
+  assert.throws(() => Scope.prepare(JSON.stringify(["options", {}, { marker }]), marker, 1), /格式无法验证/);
+  assert.throws(() => Scope.prepare(JSON.stringify(["options", [
     make("user", "old"), make("model", "reply"),
     [[null], "tool"], make("user", marker)
-  ]]), marker, 1), /不兼容/);
-  assert.throws(() => Scope.prepare(JSON.stringify(["other", [
-    ...initial.slice(0, -1), make("user", "ordinary")
-  ], { taskMarker: marker }]), marker, 1), /本次压缩指令/);
-  assert.equal(Scope.prepare(wire, "[[SUJIU_SCOPE_V2:other-task]]", 1), null);
+  ]]), marker, 1), /无法识别/);
+  assert.throws(() => Scope.prepare(JSON.stringify(["options", [
+    ...initial.slice(0,-1), make("user","other")
+  ], {marker}]), marker, 1), /本次摘要指令/);
+  assert.equal(Scope.prepare(wire,"[[SUJIU_SCOPE_V2:other-task]]",1),null);
 });
 
-test("scope field outside history containing recent content rejects unsafe request", () => {
-  const dup = JSON.stringify(["other", initial, { mirror: initial[4][0] }]);
-  assert.throws(() => Scope.prepare(dup, marker, 1), /近期内容存在于请求的其他字段/);
+test("duplicate recent content in native request metadata is not altered", () => {
+  const mirrored = JSON.stringify(["options",initial,{ mirror: initial[4][0]}]);
+  const result = Scope.prepare(mirrored,marker,1);
+  assert.equal(result.bodyText,mirrored);
 });
 
-test("both XHR and fetch are routed through the old-only scope before native network send", () => {
-  const uses = network.match(/RequestScope\.prepare\(/g) || [];
-  assert.equal(uses.length, 2);
-  assert.match(network, /originalFetch\(\s*shouldLogGenerate && actualRequest !== request/);
-  assert.match(network, /body = scope\.bodyText/);
+test("both XHR and fetch validate the full request but send the original bytes", () => {
+  assert.equal((network.match(/RequestScope\.prepare\(/g)||[]).length,2);
+  assert.match(network, /const response = await originalFetch\(input, init\)/);
+  assert.match(network, /return originalSend\.apply\(this, arguments\)/);
+  assert.doesNotMatch(network,/body = scope\.bodyText|new Request\(request, \{ body: scope\.bodyText \}\)/);
+  assert.match(network,/摘要请求包含全部/);
+  assert.doesNotMatch(network,/最近 .* 轮未发送/);
 });
