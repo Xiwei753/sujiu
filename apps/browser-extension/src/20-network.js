@@ -241,25 +241,6 @@
         }
     }
 
-    function resolveUrl(init) {
-        if (!init || typeof init !== "object") return undefined;
-        return {
-            body: cloneBody(init.body),
-            cache: init.cache,
-            credentials: init.credentials,
-            headers: init.headers,
-            integrity: init.integrity,
-            keepalive: init.keepalive,
-            method: init.method,
-            mode: init.mode,
-            redirect: init.redirect,
-            referrer: init.referrer,
-            referrerPolicy: init.referrerPolicy,
-            signal: init.signal,
-            window: init.window
-        };
-    }
-
     function resolveUrl(url) {
         if (!url) return "";
         try {
