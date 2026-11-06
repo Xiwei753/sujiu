@@ -17,8 +17,8 @@
             throw new Error("最新用户消息没有素酒摘要任务标识（旧版兼容标识也未匹配）。请确认 Google 已保存摘要，并且摘要之后没有发送其他用户消息");
         }
         const stored = CompactionTask.read(promptId);
-        if (task.marker && stored && task.marker !== stored.marker) {
-            throw new Error("摘要任务标识与本机最近一次生成任务不同，请重新生成摘要后再确认清理");
+        if (!stored || !stored.scopeVerified || task.marker !== stored.marker) {
+            throw new Error("无法确认本次模型请求已经裁掉近期对话；拒绝打开清理功能");
         }
         const responses = turns.slice(lastUserIndex + 1);
         if (!responses.length || responses.some(turn => turn.role !== "model")) {
@@ -33,8 +33,9 @@
             snapshot,
             lastUserIndex,
             marker: task.marker,
-            keepRounds: task.keepRounds,
-            legacy: task.legacy
+            keepRounds: stored.keepRounds,
+            originalRounds: stored.totalRounds,
+            legacy: false
         };
     }
 
@@ -58,13 +59,16 @@
         const task = findSavedSummary(turns, id);
         const originalTurns = turns.slice(0, task.lastUserIndex);
         const split = RoundSplitter.partition(originalTurns, task.keepRounds);
+        if (split.totalRounds !== task.originalRounds) {
+            throw new Error("Google 保存的原聊天轮数与压缩前不一致，可能是请求裁剪影响了保存；已停止删除");
+        }
         InPlaceCompaction.stage(task.snapshot, split, task);
         log.ui("Saved summary recognized; awaiting explicit confirmation", {
             originalRounds: split.totalRounds,
             olderRounds: split.olderRounds,
             recentRounds: split.recentRounds,
             markerPresent: Boolean(task.marker),
-            legacy: task.legacy
+            scopeVerified: true
         });
     }
 
