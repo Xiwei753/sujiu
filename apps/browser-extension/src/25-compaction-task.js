@@ -47,14 +47,16 @@
             try { localStorage.setItem(this.storagePrefix + task.promptId, JSON.stringify(task)); }
             catch {}
         },
-        confirmScoped(promptId, marker, stats) {
+        confirmFullHistory(promptId, marker, stats) {
             const previous = this.read(promptId);
             if (!previous || previous.marker !== marker ||
                 stats?.recentRounds !== previous.keepRounds ||
+                stats?.transmittedRounds !== stats?.totalRounds ||
                 !Number.isSafeInteger(stats.olderRounds) || stats.olderRounds < 1) {
-                throw new Error("摘要任务与已裁剪的模型请求不一致");
+                throw new Error("摘要请求未包含全部历史，或保留轮数不一致");
             }
-            this.save({ ...previous, scopeVerified: true,
+            // The model saw every original turn. keepRounds is deletion-only.
+            this.save({ ...previous, fullHistoryVerified: true,
                 olderRounds: stats.olderRounds, totalRounds: stats.totalRounds });
         },
         read(promptId) {
