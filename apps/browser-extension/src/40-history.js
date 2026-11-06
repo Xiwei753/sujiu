@@ -587,37 +587,6 @@
         return buffer;
     }
 
-    function pickTailTurns(turns) {
-        if (!turns.length) return [];
-        const fullText = turns.map(t => t.text).join("\n");
-        const { percent, minChars } = getTailRetentionConfig();
-        if (percent >= 100) {
-            log.net("Tail retention percent at 100, preserving all turns");
-            return turns.slice();
-        }
-        const computedTarget = Math.floor(fullText.length * (percent / 100));
-        const targetLength = Math.min(fullText.length, Math.max(minChars, computedTarget));
-        if (targetLength <= 0) {
-            log.net("Tail retention target is zero, skipping preserved turns");
-            return [];
-        }
-        let acc = 0;
-        let startIndex = turns.length - 1;
-        while (startIndex >= 0) {
-            acc += turns[startIndex].text.length;
-            if (acc >= targetLength && turns[startIndex].role === "user") {
-                break;
-            }
-            startIndex--;
-        }
-        startIndex = Math.max(0, startIndex);
-        while (startIndex > 0 && turns[startIndex].role !== "user") {
-            startIndex--;
-        }
-        log.net("Preserving tail turns from index", startIndex, "approx chars", acc);
-        return turns.slice(startIndex);
-    }
-
     function createTurn(role, text) {
         return { role, text };
     }
