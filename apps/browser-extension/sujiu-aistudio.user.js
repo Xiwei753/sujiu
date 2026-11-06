@@ -16,7 +16,7 @@ window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
 const unsafeWindow = window;
-// Adapted from lxchx/aistudio-compressor v0.3.3 (MIT); see THIRD_PARTY_NOTICES.md.
+// Adapted from lxchx/aistudio-compressor v0.3.2 (MIT); see THIRD_PARTY_NOTICES.md.
     const Config = {
         TAGS: {
             UI: "[Compressor UI]",
