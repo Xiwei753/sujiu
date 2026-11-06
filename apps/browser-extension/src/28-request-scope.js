@@ -44,7 +44,7 @@
             const remainingFields = JSON.stringify(scoped.filter((_, i) => i !== 1));
             for (const entry of recent) {
                 const text = JSON.stringify(entry[0]);
-                if (text.length > 40 && remainingFields.includes(text)) {
+                if (remainingFields.includes(text)) {
                     throw new Error("近期内容存在于请求的其他字段，已停止发送以防泄露到摘要上下文");
                 }
             }
