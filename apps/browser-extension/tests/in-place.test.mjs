@@ -8,6 +8,7 @@ function mockTurn(id, type) {
   return {
     id,
     isConnected: true,
+    textContent: id,
     getAttribute(key) { return key === "data-turn-type" ? type : ""; },
     querySelector(selector) { return selector.includes("ms-chat-turn-options") ? { click() {} } : null; },
     classList: { contains() { return false; } }
@@ -19,6 +20,8 @@ function context(turns) {
   const ctx = {
     document: { querySelectorAll: selector => selector === "ms-chat-turn" ? turns : [] },
     Branching: { getCurrentPromptId() { return "chat-test"; } },
+    CompactionTask: { isPinnedSummary: text => /\[\[SUJIU_MEMORY_V1:/.test(text), memoryMarker: marker => marker.replace("SCOPE_V2", "MEMORY_V1") },
+    SaveMonitor: { attempts: 0, latest: null },
     PromptPanel: { showCompactionReview(p) { preview = p; }, status() {} },
     state: { branchInProgress: false },
     fetchResolvedPromptThread: async () => ({ entries: [] }),
@@ -87,4 +90,39 @@ test("recognizes AI Studio user and model turns without invented data-turn-type 
   const grouped = x.compactor.collectGroups([user, thought, model]);
   assert.equal(grouped.length, 1);
   assert.equal(grouped[0].turns.length, 3);
+});
+
+test("previously compressed summary rounds are pinned and never enter the deletion list", () => {
+  const older = [
+    {role: "user", text: "very old"},
+    {role: "model", text: "old response"},
+    {role: "user", text: "summarize"},
+    {role: "model", text: "[[SUJIU_MEMORY_V1:12345678-1234]] Archived memory"},
+    {role: "user", text: "more old"},
+    {role: "model", text: "another response"}
+  ];
+  const turns = [
+    mockTurn("u1", "user"), mockTurn("m1", "model"),
+    mockTurn("u2", "user"), mockTurn("m2", "model"),
+    mockTurn("u3", "user"), mockTurn("m3", "model"),
+    mockTurn("u4", "user"), mockTurn("m4", "model"),
+    mockTurn("ut", "user"), mockTurn("mt", "model")
+  ];
+  turns[3].textContent = "[[SUJIU_MEMORY_V1:12345678-1234]] Archived memory";
+  const x = context(turns);
+  const plan = x.compactor.stage("[[SUJIU_MEMORY_V1:87654321-abc]] New memory", {
+    older, totalRounds: 4, olderRounds: 3, recentRounds: 1
+  });
+  assert.deepEqual(Array.from(plan.pinnedOlderRounds), [1]);
+  const selection = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(selection.targetIds), ["m1", "u1", "m3", "u3"]);
+  assert.equal(selection.pinnedCount, 1);
+  assert.equal(selection.deletedUserCount, 2);
+});
+
+test("cloud verification runs after the batch loop, not after every deleted message", () => {
+  const loop = source.slice(source.indexOf("for (const id of preview.targetIds)"),
+    source.indexOf("PromptPanel.status(\"本批次已在页面处理"));
+  assert.doesNotMatch(loop, /fetchResolvedPromptThread|awaitCloudPersistence/);
+  assert.match(source, /await awaitCloudPersistence\(plan, expectedUsers, expectedProtected, preview, saveBaseline\)/);
 });
