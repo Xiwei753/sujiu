@@ -36,12 +36,12 @@ function setup(turns, storageState = {}) {
   return { recover, staged, task: context.CompactionTask };
 }
 
-test("reads only a verified old-only model summary and preserves protected rounds", async () => {
+test("reads full-history model summary while protecting the recent original rounds", async () => {
   const turns = [...pairs(3), { role: "user", text: "Summarize\n" + marker },
     { role: "model", text: memory + "\nPast scenes are complete." },
     { role: "model", text: "hidden reasoning", thought: true }];
   const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 2, totalRounds: 3,
-    olderRounds: 1, scopeVerified: true });
+    olderRounds: 1, fullHistoryVerified: true });
   await x.recover();
   assert.equal(x.staged.length, 1);
   assert.equal(x.staged[0][0], memory + "\nPast scenes are complete.");
@@ -49,18 +49,18 @@ test("reads only a verified old-only model summary and preserves protected round
   assert.equal(x.staged[0][1].recentRounds, 2);
 });
 
-test("refuses cleanup when the generated request was not verified to exclude protected turns", async () => {
+test("refuses to recognize a model summary without verified full history", async () => {
   const turns = [...pairs(3), { role: "user", text: marker }, { role: "model", text: memory + "\nsummary" }];
   const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 2, totalRounds: 3 });
-  await assert.rejects(x.recover(), /无法确认本次模型请求已经裁掉近期对话/);
+  await assert.rejects(x.recover(), /无法确认本次摘要请求包含全部历史/);
   assert.equal(x.staged.length, 0);
 });
 
 test("detects changed cloud history instead of deleting old records", async () => {
   const turns = [...pairs(2), { role: "user", text: marker }, { role: "model", text: memory + "\nsummary" }];
   const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 1, totalRounds: 3,
-    scopeVerified: true });
-  await assert.rejects(x.recover(), /Google 保存的原聊天轮数与压缩前不一致/);
+    fullHistoryVerified: true });
+  await assert.rejects(x.recover(), /Google 保存的聊天轮数与摘要生成时不一致/);
   assert.equal(x.staged.length, 0);
 });
 
@@ -68,7 +68,7 @@ test("rejects a normal question after the summary", async () => {
   const turns = [...pairs(3), { role: "user", text: marker }, { role: "model", text: "summary" },
     { role: "user", text: "next story event" }, { role: "model", text: "new event" }];
   const x = setup(turns, { promptId: "chat-1", marker, keepRounds: 2, totalRounds: 3,
-    scopeVerified: true });
+    fullHistoryVerified: true });
   await assert.rejects(x.recover(), /最新用户消息没有素酒摘要任务标识/);
 });
 
@@ -87,6 +87,8 @@ test("default prompt summarizes only the supplied story chronology", () => {
   const prompt = JSON.parse(m[1]);
   assert.match(prompt, /时间线|时间先后/);
   assert.match(prompt, /历史截点/);
+  assert.match(prompt, /摘要应涵盖整段历史/);
+  assert.match(prompt, /近期对话/);
   assert.match(prompt, /人物与关系/);
   assert.match(prompt, /未解决线索/);
   assert.ok(prompt.length > 1100);
