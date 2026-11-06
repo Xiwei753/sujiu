@@ -31,8 +31,11 @@ const PromptPanel = (() => {
       container.hidden = !plan;
       if (plan) {
         root.querySelector('[data-role="snapshot-preview"]').value = plan.snapshot;
-        status("摘要已生成：" + plan.totalRounds + " 轮中，将删除旧 " +
-          plan.olderRounds + " 轮、保留最近 " + plan.recentRounds + " 轮。请先检查摘要。");
+        const warning = plan.legacy
+          ? "这是旧版摘要，可能把过去剧情写成当前状态；建议重新生成后再清理。"
+          : "请确认已结束事件、最新剧情时间线和摘要内容。";
+        status("已读取摘要：" + plan.totalRounds + " 轮中，拟删除旧 " +
+          plan.olderRounds + " 轮、保留最近 " + plan.recentRounds + " 轮。" + warning);
       }
     }
     function status(message) {
