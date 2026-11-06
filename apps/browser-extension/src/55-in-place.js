@@ -4,6 +4,18 @@
         const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
         function normalizeType(turn) {
+            const container = turn.querySelector(".chat-turn-container");
+            if (container?.classList.contains("user")) return "user";
+            if (turn.classList.contains("thought-activity-host")) return "thought";
+            if (turn.querySelector("ms-thought-chunk, .thought-panel") &&
+                !turn.querySelector(".turn-content ms-text-chunk, .turn-content ms-code-block, .turn-content .cmark-node")) {
+                return "thought";
+            }
+            if (container?.classList.contains("model") ||
+                container?.classList.contains("render") ||
+                turn.querySelector(".turn-content, ms-chat-turn-options, .virtual-scroll-container")) {
+                return "model";
+            }
             const raw = (turn.getAttribute("data-turn-type") ||
                 turn.getAttribute("data-turn-role") ||
                 turn.dataset?.turnType || turn.dataset?.turnRole || "").toLowerCase();
@@ -98,13 +110,19 @@
         async function findNativeDeleteItem() {
             for (let attempt = 0; attempt < 12; attempt++) {
                 const items = [...document.querySelectorAll(
-                    ".cdk-overlay-container .mat-mdc-menu-content button, .cdk-overlay-container [role=menuitem]"
+                    ".cdk-overlay-container .mat-mdc-menu-content button, .cdk-overlay-container [role=menuitem], .cdk-overlay-pane button"
                 )];
                 const target = items.find(item => {
-                    const icon = item.querySelector("mat-icon, .material-symbols-outlined");
-                    const label = (item.getAttribute("aria-label") || "") + " " +
-                        (icon?.textContent || "") + " " + (item.textContent || "");
-                    return /(?:^|\s)(delete|删除)(?:\s|$)/i.test(label.trim());
+                    if (item.disabled || item.getAttribute("aria-disabled") === "true") return false;
+                    const icon = item.querySelector("mat-icon, .material-symbols-outlined, [data-mat-icon-name]");
+                    const label = [
+                        item.getAttribute("aria-label"),
+                        icon?.getAttribute("fonticon"),
+                        icon?.getAttribute("data-mat-icon-name"),
+                        icon?.textContent,
+                        item.textContent
+                    ].filter(Boolean).join(" ").toLowerCase();
+                    return /(?:delete|trash|删除|移除)/i.test(label);
                 });
                 if (target) return target;
                 await sleep(80);
@@ -115,13 +133,18 @@
         async function deleteOne(id) {
             const turn = document.getElementById(id);
             if (!turn || !turn.isConnected) return;
-            const button = turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
-                turn.querySelector("ms-chat-turn-options button") ||
-                turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol");
+            const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
+                turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
+                turn.querySelector("ms-chat-turn-options button");
             if (!button) throw new Error("消息 " + id + " 缺少原生操作菜单");
             button.click();
             const item = await findNativeDeleteItem();
             if (!item) throw new Error("找不到 Google 原生删除选项，已停止");
+            item.focus?.();
+            item.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
+            item.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+            item.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }));
+            item.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
             item.click();
             // A further confirmation dialog is deliberately not bypassed.
             for (let i = 0; i < 30; i++) {
