@@ -1,12 +1,12 @@
 const fs = await import("node:fs/promises");
   const path = await import("node:path");
   const root = path.resolve(import.meta.dirname || path.dirname(new URL(import.meta.url).pathname), "..");
-  const files = ["00-state.js","10-settings.js","25-compaction-task.js","28-request-scope.js","20-network.js","30-compression.js","35-rounds.js","40-history.js","50-branching.js","55-in-place.js","60-native-ui.js","70-utils.js","75-prompt-profiles.js","80-prompt-panel.js","90-bootstrap.js"];
+  const files = ["00-state.js","10-settings.js","25-compaction-task.js","28-request-scope.js","20-network.js","30-compression.js","35-rounds.js","40-history.js","50-branching.js","55-in-place.js","60-native-ui.js","65-performance.js","67-save-monitor.js","70-utils.js","75-prompt-profiles.js","80-prompt-panel.js","90-bootstrap.js"];
   const text = (await Promise.all(files.map(file => fs.readFile(path.join(root,"src",file),"utf8")))).join("\n");
   const bundle = [
     '(function () {',
     '"use strict";',
-    'const bootstrapStatus = { version: "0.3.0", phase: "loaded", loadedAt: new Date().toISOString() };',
+    'const bootstrapStatus = { version: "0.3.1", phase: "loaded", loadedAt: new Date().toISOString() };',
     'window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;',
     'console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);',
     'try {',
@@ -39,7 +39,7 @@ const fs = await import("node:fs/promises");
   const manifest = {
     manifest_version:3,
     name:"素酒 · AI Studio 工具",
-    version:"0.3.0",
+    version:"0.3.1",
     description:"AI Studio 提示词预设与旧历史隔离摘要和手动清理",
     content_scripts:[{matches:["https://aistudio.google.com/*"],js:["main.js"],run_at:"document_start",world:"MAIN"}]
   };
@@ -48,7 +48,7 @@ const fs = await import("node:fs/promises");
     "// ==UserScript==",
     "// @name         Sujiu AI Studio Tools",
     "// @namespace    https://github.com/Xiwei753/sujiu",
-    "// @version      0.3.0",
+    "// @version      0.3.1",
     "// @description  AI Studio prompt presets and manual context compaction",
     "// @match        https://aistudio.google.com/*",
     "// @noframes",
