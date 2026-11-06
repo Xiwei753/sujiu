@@ -70,8 +70,26 @@
                 // Never break the host application because our inspector cannot clone a request.
                 return originalFetch(input, init);
             }
-            if (shouldLogGenerate) await logRequestPayload(request);
-            const response = await originalFetch(input, init);
+            let actualRequest = request;
+            if (shouldLogGenerate && state.compressionInProgress && state.activeCompressionMarker) {
+                try {
+                    const scope = RequestScope.prepare(await request.clone().text(),
+                        state.activeCompressionMarker, state.activeCompressionKeepRounds);
+                    if (!scope) throw new Error("本次请求未包含有效的摘要任务标识");
+                    actualRequest = new Request(request, { body: scope.bodyText });
+                    state.scopedCompression = scope;
+                    PromptPanel.status("模型请求已仅保留较早 " + scope.olderRounds +
+                        " 轮历史；最近 " + scope.recentRounds + " 轮未发送");
+                } catch (error) {
+                    PromptPanel.status("摘要请求已阻止：" + String(error?.message || error));
+                    Compression.finalizeRun();
+                    throw error;
+                }
+            }
+            if (shouldLogGenerate) await logRequestPayload(actualRequest);
+            const response = await originalFetch(
+                shouldLogGenerate && actualRequest !== request ? actualRequest : input,
+                shouldLogGenerate && actualRequest !== request ? undefined : init);
 
             if (shouldLogGenerate || shouldCaptureResolve) {
                 void logResponsePayload(request.url, response.clone());
@@ -179,7 +197,24 @@
             realXHR.send = function (body) {
                 if (monitored) {
                     const absoluteUrl = resolveUrl(requestUrl);
-                    const bodyText = bodyToText(body);
+                    let bodyText = bodyToText(body);
+                    if (isTargetRequest(absoluteUrl, "GENERATE") &&
+                        state.compressionInProgress && state.activeCompressionMarker) {
+                        try {
+                            const scope = RequestScope.prepare(bodyText,
+                                state.activeCompressionMarker, state.activeCompressionKeepRounds);
+                            if (!scope) throw new Error("本次请求缺少有效的摘要任务标识");
+                            bodyText = scope.bodyText;
+                            body = scope.bodyText;
+                            state.scopedCompression = scope;
+                            PromptPanel.status("模型请求已仅保留旧 " + scope.olderRounds +
+                                " 轮；最近 " + scope.recentRounds + " 轮未发送");
+                        } catch (error) {
+                            PromptPanel.status("摘要请求已阻止：" + String(error?.message || error));
+                            Compression.finalizeRun();
+                            throw error;
+                        }
+                    }
                     const headers = Object.keys(requestHeaders).length ? { ...requestHeaders } : null;
                     rememberGoogleApiKey(headers, absoluteUrl);
 
