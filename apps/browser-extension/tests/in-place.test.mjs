@@ -262,3 +262,27 @@ test("manual cleanup path skips generated-summary verification, but still requir
   assert.match(code, /const preview = preflightDom\(plan\)/);
   assert.match(source, /async function manualCleanup\(\)/);
 });
+
+
+test("marked summary/tool exchange does not consume one of the protected recent chat rounds", () => {
+  const turns = [
+    mockTurn("u1", "user"), mockTurn("m1", "model"),
+    mockTurn("task", "user"), mockTurn("archive", "model"),
+    mockTurn("u2", "user"), mockTurn("m2", "model"),
+    mockTurn("u3", "user"), mockTurn("m3", "model")
+  ];
+  turns[2].textContent = "summary command [[SUJIU_SCOPE_V2:12345678-abcd]]";
+  turns[3].textContent = "[[SUJIU_MEMORY_V1:12345678-abcd]] Archived memory";
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(2);
+  assert.equal(plan.totalRounds, 4);
+  assert.equal(plan.olderRounds, 1);
+  assert.equal(plan.recentRounds, 2);
+  assert.deepEqual(Array.from(plan.olderGroupIndices), [0]);
+  const selection = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(selection.targetIds), ["m1","u1"]);
+  assert.ok(selection.protectedIds.includes("task"));
+  assert.ok(selection.protectedIds.includes("archive"));
+  assert.ok(selection.protectedIds.includes("u2"));
+  assert.ok(selection.protectedIds.includes("u3"));
+});
