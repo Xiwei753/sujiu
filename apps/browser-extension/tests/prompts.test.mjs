@@ -12,7 +12,7 @@ test("five prompt fields compile in a stable order", () => {
   p.fields.persona = "User is a traveler";
   p.fields.world = "A fantasy world";
   const text = profiles.compile(p);
-  assert.ok(text.includes("[系统提示词]\\nFollow the format"));
+  assert.ok(text.includes("[系统提示词]\nFollow the format"));
   assert.ok(text.indexOf("[系统提示词]") < text.indexOf("[世界设定]"));
   assert.ok(text.indexOf("[世界设定]") < text.indexOf("[用户人物卡]"));
   p.enabled.world = false;
