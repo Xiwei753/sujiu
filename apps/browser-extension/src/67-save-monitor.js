@@ -19,7 +19,7 @@
         // This does not create any write request. It observes the same
         // native UpdatePrompt completions that already followed message
         // deletion in v0.3.1 and earlier.
-        async function waitForNativeSave(sinceAttempts, quietMs = 900, maxWaitMs = 10000) {
+        async function waitForNativeSave(sinceAttempts, afterTime = 0, quietMs = 900, maxWaitMs = 10000) {
             const start = Date.now();
             let observed = false;
             let lastSeen = start;
@@ -30,12 +30,19 @@
                     lastAttempt = attempts;
                     lastSeen = Date.now();
                 }
+                // The final deletion must have caused (or preceded) an
+                // observed save completion; earlier saves in the batch alone
+                // cannot establish that the last mutation was submitted.
+                if (observed && Date.parse(last?.time || "") < afterTime) {
+                    observed = false;
+                }
                 if (observed && Date.now() - lastSeen >= quietMs) {
                     return { observed: true, ok: Boolean(last?.ok),
                         status: last?.status || 0, attempts: attempts - sinceAttempts };
                 }
                 await new Promise(resolve => setTimeout(resolve, 100));
             }
+            observed = observed && Date.parse(last?.time || "") >= afterTime;
             return { observed, ok: observed && Boolean(last?.ok),
                 status: observed ? last?.status || 0 : 0,
                 attempts: Math.max(0, attempts - sinceAttempts) };
