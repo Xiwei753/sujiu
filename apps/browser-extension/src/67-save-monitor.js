@@ -16,8 +16,33 @@
                 status: last.status, ok: last.ok
             });
         }
+        // This does not create any write request. It observes the same
+        // native UpdatePrompt completions that already followed message
+        // deletion in v0.3.1 and earlier.
+        async function waitForNativeSave(sinceAttempts, quietMs = 900, maxWaitMs = 10000) {
+            const start = Date.now();
+            let observed = false;
+            let lastSeen = start;
+            let lastAttempt = sinceAttempts;
+            while (Date.now() - start < maxWaitMs) {
+                if (attempts > lastAttempt) {
+                    observed = true;
+                    lastAttempt = attempts;
+                    lastSeen = Date.now();
+                }
+                if (observed && Date.now() - lastSeen >= quietMs) {
+                    return { observed: true, ok: Boolean(last?.ok),
+                        status: last?.status || 0, attempts: attempts - sinceAttempts };
+                }
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+            return { observed, ok: observed && Boolean(last?.ok),
+                status: observed ? last?.status || 0 : 0,
+                attempts: Math.max(0, attempts - sinceAttempts) };
+        }
         return Object.freeze({
             record,
+            waitForNativeSave,
             get latest() { return last; },
             get attempts() { return attempts; }
         });
