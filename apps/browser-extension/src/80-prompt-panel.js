@@ -214,6 +214,8 @@ const PromptPanel = (() => {
         make("label", { text: "压缩摘要提示词" }),
         role("summary-prompt", "textarea", { rows: "5" }),
         line(action("生成摘要（当前聊天）", "compress")),
+        make("p", { className: "hint", text: "生成没有固定等待时限。模型完成回复后，再点击读取摘要；两项操作相互独立。" }),
+        line(action("读取已完成摘要", "recover-summary"), action("停止插件监听", "stop-tracking")),
         make("div", { id: "inplace-review", hidden: true }, [
           make("label", { text: "摘要预览（已写入原聊天）" }),
           role("snapshot-preview", "textarea", { rows: "8", readonly: "readonly" }),
@@ -368,9 +370,11 @@ const PromptPanel = (() => {
           status(ok ? "已复制提示词，可粘贴至系统指令框" : "复制失败：请检查剪贴板权限");
         }
         if (action === "compress") {
-          status("正在当前会话生成摘要；生成后需再次确认删除旧消息");
+          status("已开始生成摘要。模型完成后请点击「读取已完成摘要」；不会自动删除任何历史消息");
           Compression.run();
         }
+        if (action === "recover-summary") await Compression.recover();
+        if (action === "stop-tracking") Compression.stopTracking();
         if (action === "commit-delete") {
           try { await InPlaceCompaction.commit(); }
           catch (error) { console.warn("[Sujiu AI Studio] in-place deletion halted", String(error?.message || error)); }
