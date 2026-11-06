@@ -53,7 +53,7 @@
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.3.0";
+    const SCRIPT_VERSION = "0.3.1";
 
     const state = {
         compressionInProgress: false,
