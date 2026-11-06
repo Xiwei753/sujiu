@@ -5,14 +5,14 @@
 
         function normalizeType(turn) {
             const container = turn.querySelector(".chat-turn-container");
-            if (container?.classList.contains("user")) return "user";
-            if (turn.classList.contains("thought-activity-host")) return "thought";
+            if (container?.classList?.contains("user")) return "user";
+            if (turn.classList?.contains("thought-activity-host")) return "thought";
             if (turn.querySelector("ms-thought-chunk, .thought-panel") &&
                 !turn.querySelector(".turn-content ms-text-chunk, .turn-content ms-code-block, .turn-content .cmark-node")) {
                 return "thought";
             }
-            if (container?.classList.contains("model") ||
-                container?.classList.contains("render") ||
+            if (container?.classList?.contains("model") ||
+                container?.classList?.contains("render") ||
                 turn.querySelector(".turn-content, ms-chat-turn-options, .virtual-scroll-container")) {
                 return "model";
             }
