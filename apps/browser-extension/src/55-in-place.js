@@ -30,9 +30,17 @@
             for (const turn of turns) {
                 const type = normalizeType(turn);
                 if (type === "unknown") throw new Error("发现未识别的消息类型，已停止删除");
-                if (type === "user") groups.push({ turns: [turn], hasModel: false });
-                else {
+                if (type === "user") {
+                    groups.push({ turns: [turn], hasModel: false, kind: "round" });
+                } else {
                     const group = groups[groups.length - 1];
+                    const hasMemory = type === "model" &&
+                        CompactionTask.isPinnedSummary(turn.textContent || "");
+                    const toolPrompt = group?.turns?.[0]?.textContent?.includes("[[SUJIU_SCOPE_V2:");
+                    if (hasMemory && (!group || (group.hasModel && !toolPrompt))) {
+                        groups.push({ turns: [turn], hasModel: true, kind: "memory" });
+                        continue;
+                    }
                     if (!group) throw new Error("历史消息的顺序异常");
                     group.turns.push(turn);
                     if (type === "model") group.hasModel = true;
@@ -46,13 +54,31 @@
             const id = Branching.getCurrentPromptId();
             if (!id || id === "new_chat") throw new Error("保存会话后才能原地压缩");
             if (!snapshot?.trim()) throw new Error("摘要为空，无法压缩");
+            // Previously generated memories are pinned. Never select
+            // their own model replies for deletion in a later compression.
+            const pinnedOlderRounds = [];
+            const pinnedMemoryTexts = [];
+            let roundIndex = -1;
+            for (const turn of split.older || []) {
+                if (turn.role === "user") roundIndex++;
+                if (turn.role === "model" && CompactionTask.isPinnedSummary(turn.text || "")) {
+                    pinnedMemoryTexts.push(String(turn.text).trim());
+                    if (roundIndex >= 0 && !pinnedOlderRounds.includes(roundIndex)) {
+                        pinnedOlderRounds.push(roundIndex);
+                    }
+                }
+            }
             pending = {
+                pinnedOlderRounds,
+                pinnedMemoryTexts,
                 promptId: id,
                 snapshot: snapshot.trim(),
                 olderRounds: split.olderRounds,
                 recentRounds: split.recentRounds,
                 totalRounds: split.totalRounds,
                 marker: task?.marker || null,
+                memoryMarker: task?.pinnedMarker || (task?.marker ?
+                    CompactionTask.memoryMarker(task.marker) : null),
                 legacy: Boolean(task?.legacy),
                 createdAt: Date.now()
             };
