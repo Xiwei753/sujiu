@@ -420,34 +420,6 @@
         return heading.trim();
     }
 
-    function buildDirectBranchCreateBody(capture, turnRecords = null) {
-        const sourceRoot = Array.isArray(capture?.root) ? capture.root : state.lastResolvedPromptRoot;
-        if (!Array.isArray(sourceRoot) || sourceRoot.length < 14) {
-            return null;
-        }
-        const modelConfig = Array.isArray(sourceRoot[3]) ? deepClone(sourceRoot[3]) : null;
-        if (!modelConfig) {
-            return null;
-        }
-        const threads = Array.isArray(sourceRoot[13]) ? sourceRoot[13] : [];
-        const secondaryThread = Array.isArray(threads[1]) ? deepClone(threads[1]) : [];
-        const primaryThread = Array.isArray(turnRecords) && turnRecords.length
-            ? turnRecords.map((turn, index) => buildMutationThreadEntry(turn, index))
-            : (Array.isArray(threads[0]) ? deepClone(threads[0]) : []);
-        if (!primaryThread.length) {
-            return null;
-        }
-        const baseTitle = getResolvedPromptTitle(sourceRoot) || "Compressed Chat";
-        const normalizedTitle = baseTitle.replace(/^branch of\s+/i, "").trim() || baseTitle;
-        const branchTitle = `Compression of ${normalizedTitle}`;
-        const createRoot = new Array(Math.max(14, sourceRoot.length)).fill(null);
-        createRoot[3] = modelConfig;
-        createRoot[4] = [branchTitle];
-        createRoot[12] = Array.isArray(sourceRoot[12]) ? deepClone(sourceRoot[12]) : [];
-        createRoot[13] = [primaryThread, secondaryThread];
-        return JSON.stringify([createRoot]);
-    }
-
     function describePromptHistory(payload) {
         if (!Array.isArray(payload)) {
             return { valid: false, type: typeof payload };
