@@ -16,7 +16,10 @@
                     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed)); }
                     catch {}
                 }
-                return { ...DEFAULT_SETTINGS, ...parsed };
+                // Ignore obsolete system-instruction autosync state. Prior
+                // prompt preset storage remains untouched for manual recovery.
+                const { autoInject: obsoleteAutoInject, ...settings } = parsed;
+                return { ...DEFAULT_SETTINGS, ...settings };
             }
             return { ...DEFAULT_SETTINGS };
         } catch (err) {
