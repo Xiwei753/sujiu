@@ -1,4 +1,12 @@
 const PromptPanel = (() => {
+    let root = null;
+    let panel = null;
+    function render() {
+      if (!root) return;
+      root.querySelector('[data-role="keep"]').value = String(userSettings.keepRounds || 8);
+      root.querySelector('[data-role="reduce-visual-effects"]').checked = PerformanceTuning.enabled;
+      root.querySelector('[data-role="summary-prompt"]').value = getCompressPrompt();
+    }
     function showCompactionReview(plan) {
       const container = root?.getElementById("inplace-review");
       if (!container) return;
@@ -121,7 +129,7 @@ const PromptPanel = (() => {
             render();
           } else {
             updateUserSettings({ keepRounds: keep });
-            status("摘要请求和独立历史清理均保留最近 " + keep + " 轮完整对话");
+            status("清理旧历史时保留最近 " + keep + " 轮完整对话；摘要仍包含全部历史");
           }
         }
         if (role === "summary-prompt") {
@@ -152,7 +160,7 @@ const PromptPanel = (() => {
         }
         if (action === "cancel-delete") InPlaceCompaction.cancel();
       });
-      // Open once after a fresh install so users can confirm injection
+      // Open once after a fresh install so users can confirm the tool panel
       // without having to find the small bottom-right launcher.
       try {
         const seenKey = "sujiu:aistudio:panel-opened:v1";
