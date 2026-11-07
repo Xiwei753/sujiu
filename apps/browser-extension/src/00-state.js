@@ -55,7 +55,7 @@
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.4.0";
+    const SCRIPT_VERSION = "0.4.1";
 
     const state = {
         compressionInProgress: false,
@@ -88,8 +88,7 @@
     const DEFAULT_SETTINGS = {
         compressPrompt: Config.PROMPTS.FULL,
         snapshotRegex: "",
-        keepRounds: 8,
-        autoInject: false
+        keepRounds: 8
     };
     let userSettings = loadUserSettings();
     refreshActivePromptFromSettings();
