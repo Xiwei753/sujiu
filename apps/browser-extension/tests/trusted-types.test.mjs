@@ -93,3 +93,13 @@ test("mounts prompt panel without TrustedHTML / innerHTML on the host page", () 
   assert.ok(host.shadowRoot.querySelector('[data-role="status"]'), "status node exists");
   assert.doesNotMatch(source, /\.innerHTML\s*=/);
 });
+
+
+test("plugin never injects or manages Google System Instructions", () => {
+  assert.doesNotMatch(source, /ms-system-instructions|ms-system-instruction-editor/i);
+  assert.doesNotMatch(source, /autoInject|auto-inject|applyNative|PromptProfiles|prompt-presets|system-prompt/);
+  assert.doesNotMatch(source, /[.]clipboard[.]writeText|data-action", "apply"/);
+  assert.match(source, /role\("summary-prompt", "textarea"/);
+  assert.match(source, /action\("直接清理旧历史", "cleanup-history"\)/);
+  assert.match(source, /role\("reduce-visual-effects", "input"/);
+});
