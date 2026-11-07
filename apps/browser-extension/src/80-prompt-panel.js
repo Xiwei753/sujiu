@@ -1,10 +1,22 @@
 const PromptPanel = (() => {
+    const STORAGE_V3 = "sujiu:aistudio:prompt-presets:v3";
     const STORAGE_V2 = "sujiu:aistudio:prompt-presets:v2";
+    const STORAGE_BACKUP = "sujiu:aistudio:prompt-presets:backup:v2";
     const STORAGE_V1 = "sujiu:aistudio:prompt-presets:v1";
     function load() {
       try {
-        const raw = localStorage.getItem(STORAGE_V2) || localStorage.getItem(STORAGE_V1);
-        return PromptProfiles.normalize(raw ? JSON.parse(raw) : null);
+        const current = localStorage.getItem(STORAGE_V3);
+        if (current) return PromptProfiles.normalize(JSON.parse(current));
+        const legacy = localStorage.getItem(STORAGE_V2) || localStorage.getItem(STORAGE_V1);
+        const converted = PromptProfiles.normalize(legacy ? JSON.parse(legacy) : null);
+        if (legacy) {
+          // Make migration restart-safe, including all previously disabled
+          // drafts. Keep the original v1/v2 storage untouched as a fallback.
+          if (!localStorage.getItem(STORAGE_BACKUP))
+            localStorage.setItem(STORAGE_BACKUP, legacy);
+          localStorage.setItem(STORAGE_V3, JSON.stringify(converted));
+        }
+        return converted;
       } catch {
         return PromptProfiles.normalize(null);
       }
@@ -15,7 +27,7 @@ const PromptPanel = (() => {
     let lastAutoApplied = "";
     function save() {
       try {
-        localStorage.setItem(STORAGE_V2, JSON.stringify(data));
+        localStorage.setItem(STORAGE_V3, JSON.stringify(data));
       } catch (error) {
         status("预设保存失败：" + String(error.message || error));
       }
@@ -94,16 +106,9 @@ const PromptPanel = (() => {
         return true;
       } catch { return false; }
     }
-    function renderFields() {
+    function renderSystemPrompt() {
       if (!root) return;
-      const profile = current();
-      const container = root.getElementById("fields");
-      for (const id of profile.order) {
-        const row = root.querySelector('[data-section="' + id + '"]');
-        row.querySelector('[data-enable="' + id + '"]').checked = profile.enabled[id] !== false;
-        row.querySelector('[data-field="' + id + '"]').value = profile.fields[id] || "";
-        container.appendChild(row);
-      }
+      root.querySelector('[data-role="system-prompt"]').value = current().text || "";
     }
     function render() {
       if (!root) return;
@@ -116,7 +121,7 @@ const PromptPanel = (() => {
         select.appendChild(option);
       }
       select.value = data.active;
-      renderFields();
+      renderSystemPrompt();
       root.querySelector('[data-role="keep"]').value = String(userSettings.keepRounds || 8);
       root.querySelector('[data-role="auto-inject"]').checked = Boolean(userSettings.autoInject);
       root.querySelector('[data-role="reduce-visual-effects"]').checked = PerformanceTuning.enabled;
@@ -151,7 +156,7 @@ const PromptPanel = (() => {
         save();
         lastAutoApplied = "";
         render();
-        status("已导入 " + Object.keys(data.presets).length + " 个预设");
+        status("已导入 " + Object.keys(data.presets).length + " 个预设，旧版多段内容已合并为系统提示词");
       } catch (error) {
         status("预设导入失败：" + String(error?.message || error));
       }
@@ -204,13 +209,14 @@ const PromptPanel = (() => {
         line(role("preset", "select", { "aria-label": "当前预设" }), action("新建", "new"), action("删除", "delete")),
         line(action("导入", "import"), action("导出", "export")),
         role("file", "input", { type: "file", accept: ".json,application/json", hidden: true }),
-        make("div", { id: "fields" }),
-        line(action("注入系统指令", "apply"), action("复制组合内容", "copy")),
+        make("label", { text: "系统提示词" }),
+        role("system-prompt", "textarea", { rows: "10", "aria-label": "系统提示词" }),
+        line(action("注入系统指令", "apply"), action("复制系统提示词", "copy")),
         make("label", { className: "check-line" }, [
           role("auto-inject", "input", { type: "checkbox" }),
-          document.createTextNode(" 自动同步提示词到系统指令框")
+          document.createTextNode(" 自动同步到 AI Studio 系统指令")
         ]),
-        make("p", { className: "hint", text: "按勾选和顺序合并所有提示词；自动同步仅在 AI Studio 的原生编辑框可访问时执行。" }),
+        make("p", { className: "hint", text: "只有这一段系统提示词会注入 AI Studio；不会反复添加到用户聊天记录。旧版多段预设会自动合并，禁用段落保留在预设导出数据中。" }),
         make("hr"),
         make("h3", { text: "性能" }),
         make("label", { className: "check-line" }, [
@@ -254,37 +260,6 @@ const PromptPanel = (() => {
       toggle.style.cursor = "pointer";
       root = shadow;
       panel = shadow.getElementById("pane");
-      const container = shadow.getElementById("fields");
-      for (const section of PromptProfiles.sections) {
-        const row = document.createElement("div");
-        row.dataset.section = section.id;
-        const head = document.createElement("div");
-        head.className = "section-header";
-        const label = document.createElement("label");
-        const enable = document.createElement("input");
-        enable.type = "checkbox";
-        enable.dataset.enable = section.id;
-        label.append(enable, document.createTextNode(" " + section.title));
-        const up = document.createElement("button");
-        up.textContent = "↑";
-        up.className = "small";
-        up.title = "上移" + section.title;
-        up.dataset.move = section.id;
-        up.dataset.delta = "-1";
-        const down = document.createElement("button");
-        down.textContent = "↓";
-        down.className = "small";
-        down.title = "下移" + section.title;
-        down.dataset.move = section.id;
-        down.dataset.delta = "1";
-        head.append(label, up, down);
-        const editor = document.createElement("textarea");
-        editor.dataset.field = section.id;
-        editor.rows = 3;
-        editor.setAttribute("aria-label", section.title);
-        row.append(head, editor);
-        container.appendChild(row);
-      }
       shadow.getElementById("toggle").addEventListener("click", () => {
         panel.hidden = !panel.hidden;
         shadow.getElementById("toggle").setAttribute("aria-expanded", String(!panel.hidden));
@@ -299,20 +274,13 @@ const PromptPanel = (() => {
         event.target.value = "";
       });
       shadow.addEventListener("input", event => {
-        const id = event.target?.dataset?.field;
-        if (id) {
-          current().fields[id] = event.target.value.slice(0, 100000);
+        if (event.target?.dataset?.role === "system-prompt") {
+          current().text = event.target.value.slice(0, PromptProfiles.maxTextLength);
           save(); lastAutoApplied = "";
         }
       });
       shadow.addEventListener("change", event => {
         const el = event.target;
-        const id = el?.dataset?.enable;
-        if (id) {
-          current().enabled[id] = el.checked;
-          save(); lastAutoApplied = "";
-          return;
-        }
         const role = el?.dataset?.role;
         if (role === "reduce-visual-effects") {
           const enabled = PerformanceTuning.setEnabled(el.checked);
@@ -343,12 +311,6 @@ const PromptPanel = (() => {
         }
       });
       shadow.addEventListener("click", async event => {
-        const moveId = event.target?.dataset?.move;
-        if (moveId) {
-          data.presets[data.active] = PromptProfiles.shift(current(), moveId, Number(event.target.dataset.delta));
-          save(); lastAutoApplied = ""; renderFields();
-          return;
-        }
         const action = event.target?.dataset?.action;
         if (!action) return;
         if (action === "new") {
@@ -375,14 +337,14 @@ const PromptPanel = (() => {
         if (action === "import") root.querySelector('[data-role="file"]').click();
         if (action === "copy" || action === "apply") {
           const text = combined();
-          if (!text) { status("至少需要一个已启用且有内容的提示词框"); return; }
+          if (!text.trim()) { status("请先填写系统提示词"); return; }
           if (action === "apply" && applyNative(text)) {
             lastAutoApplied = location.pathname + ":" + data.active + ":" + text;
             status("已尝试填入系统指令，请确认 AI Studio 是否保存");
             return;
           }
           const ok = await clipboard(text);
-          status(ok ? "已复制提示词，可粘贴至系统指令框" : "复制失败：请检查剪贴板权限");
+          status(ok ? "已复制系统提示词，可粘贴至 AI Studio 系统指令框" : "复制失败：请检查剪贴板权限");
         }
         if (action === "compress") {
           status("已开始生成摘要。模型完成后请点击「读取已完成摘要」；不会自动删除任何历史消息");
