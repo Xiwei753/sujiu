@@ -60,18 +60,11 @@ function setup() {
     createTextNode: text => ({ textContent: String(text) }),
     getElementById(id) { return this.body.getElementById(id); }
   };
-  const profile = { text: "" };
   const context = {
     document,
-    PromptProfiles: {
-      normalize: () => ({ active: "默认", presets: { 默认: profile } }),
-      compile: () => "",
-      maxPresets: 50,
-      maxTextLength: 550000
-    },
     localStorage: { getItem: () => null, setItem: () => {} },
     state: { compressionInProgress: false, branchInProgress: false },
-    userSettings: { keepRounds: 8, autoInject: false },
+    userSettings: { keepRounds: 8 },
     PerformanceTuning: { enabled: true, setEnabled(value) { this.enabled = Boolean(value); return this.enabled; } },
     getCompressPrompt: () => "Summary",
     setInterval: () => 1,
@@ -90,11 +83,13 @@ test("mounts prompt panel without TrustedHTML / innerHTML on the host page", () 
   assert.ok(pane, "prompt pane exists");
   assert.equal(pane.hidden, false, "first install opens the panel");
   assert.ok(host.shadowRoot.getElementById("toggle"), "floating toggle exists");
-  assert.ok(host.shadowRoot.querySelector('[data-role="system-prompt"]'), "single system prompt editor exists");
-  assert.equal(host.shadowRoot.querySelector('[data-field="character"]'), null, "legacy character editor is absent");
+  assert.equal(host.shadowRoot.querySelector('[data-role="system-prompt"]'), null, "system prompt editor was removed");
+  assert.equal(host.shadowRoot.querySelector('[data-role="auto-inject"]'), null, "automatic system instruction injection was removed");
+  assert.equal(host.shadowRoot.querySelector('[data-role="preset"]'), null, "preset selector was removed");
+  assert.ok(host.shadowRoot.querySelector('[data-role="reduce-visual-effects"]'), "performance toggle remains");
+  assert.ok(host.shadowRoot.querySelector('[data-role="keep"]'), "recent-round setting remains");
   assert.ok(host.shadowRoot.querySelector('[data-role="compress"]') === null);
   assert.ok(host.shadowRoot.querySelector('[data-role="summary-prompt"]'), "compression prompt input exists");
-  assert.ok(host.shadowRoot.querySelector('[data-role="preset"]'), "preset selector exists");
   assert.ok(host.shadowRoot.querySelector('[data-role="status"]'), "status node exists");
   assert.doesNotMatch(source, /\.innerHTML\s*=/);
 });
