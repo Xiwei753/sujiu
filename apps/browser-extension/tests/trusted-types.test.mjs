@@ -60,20 +60,14 @@ function setup() {
     createTextNode: text => ({ textContent: String(text) }),
     getElementById(id) { return this.body.getElementById(id); }
   };
-  const rawPreset = () => ({
-    fields: Object.fromEntries(["system","character","world","persona","author"].map(key => [key, ""])),
-    enabled: Object.fromEntries(["system","character","world","persona","author"].map(key => [key, true])),
-    order: ["system","character","world","persona","author"]
-  });
-  const profile = rawPreset();
+  const profile = { text: "" };
   const context = {
     document,
     PromptProfiles: {
-      sections: ["system","character","world","persona","author"].map(id => ({ id, title: id })),
       normalize: () => ({ active: "默认", presets: { 默认: profile } }),
       compile: () => "",
-      shift: () => profile,
-      maxPresets: 50
+      maxPresets: 50,
+      maxTextLength: 550000
     },
     localStorage: { getItem: () => null, setItem: () => {} },
     state: { compressionInProgress: false, branchInProgress: false },
@@ -96,7 +90,8 @@ test("mounts prompt panel without TrustedHTML / innerHTML on the host page", () 
   assert.ok(pane, "prompt pane exists");
   assert.equal(pane.hidden, false, "first install opens the panel");
   assert.ok(host.shadowRoot.getElementById("toggle"), "floating toggle exists");
-  assert.ok(host.shadowRoot.getElementById("fields"), "prompt fields container exists");
+  assert.ok(host.shadowRoot.querySelector('[data-role="system-prompt"]'), "single system prompt editor exists");
+  assert.equal(host.shadowRoot.querySelector('[data-field="character"]'), null, "legacy character editor is absent");
   assert.ok(host.shadowRoot.querySelector('[data-role="compress"]') === null);
   assert.ok(host.shadowRoot.querySelector('[data-role="summary-prompt"]'), "compression prompt input exists");
   assert.ok(host.shadowRoot.querySelector('[data-role="preset"]'), "preset selector exists");
