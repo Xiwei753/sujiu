@@ -1,35 +1,58 @@
 const PromptProfiles = (() => {
-    const sections = Object.freeze([
+    const LEGACY_SECTIONS = Object.freeze([
       { id: "system", title: "系统提示词" },
       { id: "character", title: "角色设定" },
       { id: "world", title: "世界设定" },
       { id: "persona", title: "用户人物卡" },
       { id: "author", title: "作者附注" }
     ]);
-    const ids = sections.map(section => section.id);
-    const idsSet = new Set(ids);
+    const LEGACY_IDS = LEGACY_SECTIONS.map(item => item.id);
     const RESERVED = new Set(["__proto__", "prototype", "constructor"]);
     const MAX_PRESETS = 50;
-    const MAX_FIELD_LENGTH = 100000;
+    // A v2 preset could hold five fields of 100,000 characters each.
+    // Do not truncate that content merely because it now has one editor.
+    const MAX_TEXT_LENGTH = 550000;
+    const MAX_LEGACY_FIELD_LENGTH = 100000;
+
     function blank() {
-      return {
-        fields: Object.fromEntries(ids.map(id => [id, ""])),
-        enabled: Object.fromEntries(ids.map(id => [id, true])),
-        order: ids.slice()
-      };
+      return { text: "" };
+    }
+    function convertLegacy(input) {
+      const source = input?.fields && typeof input.fields === "object" ? input.fields : input;
+      const rawOrder = Array.isArray(input?.order) ? input.order : LEGACY_IDS;
+      const order = [...new Set(rawOrder.filter(id => LEGACY_IDS.includes(id)))];
+      order.push(...LEGACY_IDS.filter(id => !order.includes(id)));
+      const sections = [], legacyDisabled = Object.create(null);
+      for (const id of order) {
+        const text = typeof source?.[id] === "string"
+          ? source[id].slice(0, MAX_LEGACY_FIELD_LENGTH) : "";
+        if (!text.trim()) continue;
+        if (input?.enabled?.[id] === false) {
+          // Keep inactive drafts in the exported preset, but never send
+          // them to Gemini as newly enabled system instructions.
+          legacyDisabled[id] = text;
+        } else {
+          const title = LEGACY_SECTIONS.find(item => item.id === id).title;
+          sections.push("[" + title + "]\n" + text.trim());
+        }
+      }
+      const result = { text: sections.join("\n\n").slice(0, MAX_TEXT_LENGTH) };
+      if (Object.keys(legacyDisabled).length) result.legacyDisabled = legacyDisabled;
+      return result;
     }
     function normalizedPreset(input) {
-      const preset = blank();
-      if (!input || typeof input !== "object" || Array.isArray(input)) return preset;
-      // Read legacy presets where text fields were stored directly on the preset.
-      const fields = input.fields && typeof input.fields === "object" ? input.fields : input;
-      for (const id of ids) {
-        if (typeof fields[id] === "string") preset.fields[id] = fields[id].slice(0, MAX_FIELD_LENGTH);
-        if (typeof input.enabled?.[id] === "boolean") preset.enabled[id] = input.enabled[id];
-      }
-      if (Array.isArray(input.order)) {
-        const order = [...new Set(input.order.filter(id => idsSet.has(id)))];
-        preset.order = [...order, ...ids.filter(id => !order.includes(id))];
+      if (typeof input === "string") return { text: input.slice(0, MAX_TEXT_LENGTH) };
+      if (!input || typeof input !== "object" || Array.isArray(input)) return blank();
+      if (typeof input.text !== "string") return convertLegacy(input);
+      const preset = { text: input.text.slice(0, MAX_TEXT_LENGTH) };
+      if (input.legacyDisabled && typeof input.legacyDisabled === "object" &&
+          !Array.isArray(input.legacyDisabled)) {
+        const disabled = Object.create(null);
+        for (const id of LEGACY_IDS) {
+          if (typeof input.legacyDisabled[id] === "string")
+            disabled[id] = input.legacyDisabled[id].slice(0, MAX_LEGACY_FIELD_LENGTH);
+        }
+        if (Object.keys(disabled).length) preset.legacyDisabled = disabled;
       }
       return preset;
     }
@@ -47,22 +70,13 @@ const PromptProfiles = (() => {
       if (!Object.keys(presets).length) presets["默认"] = blank();
       const active = typeof source?.active === "string" && Object.hasOwn(presets, source.active)
         ? source.active : Object.keys(presets)[0];
-      return { version: 2, active, presets };
+      return { version: 3, active, presets };
     }
     function compile(preset) {
-      const p = normalizedPreset(preset);
-      return p.order.filter(id => p.enabled[id] && p.fields[id].trim())
-        .map(id => "[" + sections.find(s => s.id === id).title + "]\n" + p.fields[id].trim())
-        .join("\n\n");
+      return normalizedPreset(preset).text;
     }
-    function shift(preset, id, delta) {
-      const p = normalizedPreset(preset);
-      const at = p.order.indexOf(id);
-      const next = at + delta;
-      if (at >= 0 && next >= 0 && next < p.order.length) {
-        [p.order[at], p.order[next]] = [p.order[next], p.order[at]];
-      }
-      return p;
-    }
-    return Object.freeze({ sections, blank, normalize, normalizedPreset, compile, shift, maxPresets: MAX_PRESETS });
+    return Object.freeze({
+      blank, normalize, normalizedPreset, compile,
+      maxPresets: MAX_PRESETS, maxTextLength: MAX_TEXT_LENGTH
+    });
   })();
