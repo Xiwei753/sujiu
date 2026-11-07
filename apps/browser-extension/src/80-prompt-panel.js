@@ -1,42 +1,4 @@
 const PromptPanel = (() => {
-    const STORAGE_V3 = "sujiu:aistudio:prompt-presets:v3";
-    const STORAGE_V2 = "sujiu:aistudio:prompt-presets:v2";
-    const STORAGE_BACKUP = "sujiu:aistudio:prompt-presets:backup:v2";
-    const STORAGE_V1 = "sujiu:aistudio:prompt-presets:v1";
-    function load() {
-      try {
-        const current = localStorage.getItem(STORAGE_V3);
-        if (current) return PromptProfiles.normalize(JSON.parse(current));
-        const legacy = localStorage.getItem(STORAGE_V2) || localStorage.getItem(STORAGE_V1);
-        const converted = PromptProfiles.normalize(legacy ? JSON.parse(legacy) : null);
-        if (legacy) {
-          // Make migration restart-safe, including all previously disabled
-          // drafts. Keep the original v1/v2 storage untouched as a fallback.
-          if (!localStorage.getItem(STORAGE_BACKUP))
-            localStorage.setItem(STORAGE_BACKUP, legacy);
-          localStorage.setItem(STORAGE_V3, JSON.stringify(converted));
-        }
-        return converted;
-      } catch {
-        return PromptProfiles.normalize(null);
-      }
-    }
-    let data = load();
-    let root = null;
-    let panel = null;
-    let lastAutoApplied = "";
-    function save() {
-      try {
-        localStorage.setItem(STORAGE_V3, JSON.stringify(data));
-      } catch (error) {
-        status("预设保存失败：" + String(error.message || error));
-      }
-    }
-    function current() {
-      if (!Object.hasOwn(data.presets, data.active)) data = PromptProfiles.normalize(data);
-      return data.presets[data.active];
-    }
-    const combined = () => PromptProfiles.compile(current());
     function showCompactionReview(plan) {
       const container = root?.getElementById("inplace-review");
       if (!container) return;
@@ -53,113 +15,6 @@ const PromptPanel = (() => {
     function status(message) {
       const el = root?.querySelector('[data-role="status"]');
       if (el) el.textContent = String(message);
-    }
-    function nativeField() {
-      const selectors = [
-        'ms-system-instructions textarea',
-        'ms-system-instruction-editor textarea',
-        'textarea[aria-label*="System instructions"]',
-        'textarea[aria-label*="System Instructions"]',
-        'textarea[aria-label*="系统指令"]',
-        '[aria-label="System instructions"] [contenteditable="true"]',
-        'ms-system-instructions [contenteditable="true"]'
-      ];
-      for (const doc of UI.getCandidateDocuments()) {
-        for (const selector of selectors) {
-          const el = doc.querySelector(selector);
-          if (el && !el.disabled && !el.readOnly) return el;
-        }
-      }
-      return null;
-    }
-    function applyNative(text) {
-      const el = nativeField();
-      if (!el || !text) return false;
-      if (el.tagName === "TEXTAREA") {
-        if (el.value === text) return true;
-        const proto = el.ownerDocument.defaultView?.HTMLTextAreaElement?.prototype || HTMLTextAreaElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-        if (!setter) return false;
-        setter.call(el, text);
-      } else if (el.isContentEditable) {
-        if (el.textContent === text) return true;
-        el.textContent = text;
-      } else return false;
-      el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
-      el.dispatchEvent(new Event("change", { bubbles: true }));
-      return true;
-    }
-    function autoInjectOnce() {
-      if (!userSettings.autoInject || state.compressionInProgress || state.branchInProgress) return;
-      const text = combined();
-      if (!text) return;
-      const token = location.pathname + ":" + data.active + ":" + text;
-      if (lastAutoApplied === token) return;
-      if (applyNative(text)) {
-        lastAutoApplied = token;
-        status("已尝试同步系统指令；请确认 AI Studio 已保存");
-      }
-    }
-    async function clipboard(text) {
-      try {
-        await navigator.clipboard.writeText(text);
-        return true;
-      } catch { return false; }
-    }
-    function renderSystemPrompt() {
-      if (!root) return;
-      root.querySelector('[data-role="system-prompt"]').value = current().text || "";
-    }
-    function render() {
-      if (!root) return;
-      const select = root.querySelector('[data-role="preset"]');
-      select.replaceChildren();
-      for (const name of Object.keys(data.presets)) {
-        const option = document.createElement("option");
-        option.value = name;
-        option.textContent = name;
-        select.appendChild(option);
-      }
-      select.value = data.active;
-      renderSystemPrompt();
-      root.querySelector('[data-role="keep"]').value = String(userSettings.keepRounds || 8);
-      root.querySelector('[data-role="auto-inject"]').checked = Boolean(userSettings.autoInject);
-      root.querySelector('[data-role="reduce-visual-effects"]').checked = PerformanceTuning.enabled;
-      root.querySelector('[data-role="summary-prompt"]').value = getCompressPrompt();
-    }
-    function exportPresets() {
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      try {
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = "sujiu-aistudio-presets.json";
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        status("预设已导出");
-      } finally {
-        setTimeout(() => URL.revokeObjectURL(url), 5000);
-      }
-    }
-    async function importPresets(file) {
-      if (!file || file.size > 1024 * 1024) {
-        status("导入失败：文件超过 1 MB 或未选择文件");
-        return;
-      }
-      try {
-        const raw = JSON.parse(await file.text());
-        if (!raw || !raw.presets || typeof raw.presets !== "object" || Array.isArray(raw.presets) ||
-            Object.keys(raw.presets).length === 0) throw new Error("预设结构不正确");
-        if (!confirm("导入将替换现有预设。建议先导出备份，是否继续？")) return;
-        data = PromptProfiles.normalize(raw);
-        save();
-        lastAutoApplied = "";
-        render();
-        status("已导入 " + Object.keys(data.presets).length + " 个预设，旧版多段内容已合并为系统提示词");
-      } catch (error) {
-        status("预设导入失败：" + String(error?.message || error));
-      }
     }
     function mount() {
       if (document.getElementById("sujiu-aistudio-host")) return;
@@ -205,19 +60,6 @@ const PromptPanel = (() => {
       const heading = make("h2", { text: "素酒 · AI Studio" });
       const pane = make("section", { id: "pane", hidden: true, "aria-label": "素酒 AI Studio 工具" }, [
         heading,
-        make("label", { text: "提示词预设" }),
-        line(role("preset", "select", { "aria-label": "当前预设" }), action("新建", "new"), action("删除", "delete")),
-        line(action("导入", "import"), action("导出", "export")),
-        role("file", "input", { type: "file", accept: ".json,application/json", hidden: true }),
-        make("label", { text: "系统提示词" }),
-        role("system-prompt", "textarea", { rows: "10", "aria-label": "系统提示词" }),
-        line(action("注入系统指令", "apply"), action("复制系统提示词", "copy")),
-        make("label", { className: "check-line" }, [
-          role("auto-inject", "input", { type: "checkbox" }),
-          document.createTextNode(" 自动同步到 AI Studio 系统指令")
-        ]),
-        make("p", { className: "hint", text: "只有这一段系统提示词会注入 AI Studio；不会反复添加到用户聊天记录。旧版多段预设会自动合并，禁用段落保留在预设导出数据中。" }),
-        make("hr"),
         make("h3", { text: "性能" }),
         make("label", { className: "check-line" }, [
           role("reduce-visual-effects", "input", { type: "checkbox" }),
@@ -265,31 +107,12 @@ const PromptPanel = (() => {
         shadow.getElementById("toggle").setAttribute("aria-expanded", String(!panel.hidden));
         if (!panel.hidden) render();
       });
-      shadow.querySelector('[data-role="preset"]').addEventListener("change", event => {
-        data.active = event.target.value;
-        save(); lastAutoApplied = ""; render();
-      });
-      shadow.querySelector('[data-role="file"]').addEventListener("change", event => {
-        void importPresets(event.target.files?.[0]);
-        event.target.value = "";
-      });
-      shadow.addEventListener("input", event => {
-        if (event.target?.dataset?.role === "system-prompt") {
-          current().text = event.target.value.slice(0, PromptProfiles.maxTextLength);
-          save(); lastAutoApplied = "";
-        }
-      });
       shadow.addEventListener("change", event => {
         const el = event.target;
         const role = el?.dataset?.role;
         if (role === "reduce-visual-effects") {
           const enabled = PerformanceTuning.setEnabled(el.checked);
           status(enabled ? "已减少页面模糊与平滑滚动，可随时关闭" : "已恢复网页原有视觉效果");
-        }
-        if (role === "auto-inject") {
-          updateUserSettings({ autoInject: el.checked });
-          lastAutoApplied = "";
-          autoInjectOnce();
         }
         if (role === "keep") {
           const keep = Number(el.value);
@@ -313,39 +136,6 @@ const PromptPanel = (() => {
       shadow.addEventListener("click", async event => {
         const action = event.target?.dataset?.action;
         if (!action) return;
-        if (action === "new") {
-          const name = prompt("新预设名称");
-          if (!name?.trim()) return;
-          const cleaned = name.trim().slice(0, 80);
-          if (["__proto__", "prototype", "constructor"].includes(cleaned) ||
-              Object.hasOwn(data.presets, cleaned) || Object.keys(data.presets).length >= PromptProfiles.maxPresets) {
-            status("预设名称不可用、已存在，或已达到 50 个上限");
-            return;
-          }
-          data.presets[cleaned] = PromptProfiles.normalizedPreset(current());
-          data.active = cleaned;
-          save(); lastAutoApplied = ""; render(); status("已创建预设");
-        }
-        if (action === "delete") {
-          if (Object.keys(data.presets).length <= 1) { status("至少保留一个预设"); return; }
-          if (!confirm("删除预设「" + data.active + "」？")) return;
-          delete data.presets[data.active];
-          data.active = Object.keys(data.presets)[0];
-          save(); lastAutoApplied = ""; render(); status("已删除预设");
-        }
-        if (action === "export") exportPresets();
-        if (action === "import") root.querySelector('[data-role="file"]').click();
-        if (action === "copy" || action === "apply") {
-          const text = combined();
-          if (!text.trim()) { status("请先填写系统提示词"); return; }
-          if (action === "apply" && applyNative(text)) {
-            lastAutoApplied = location.pathname + ":" + data.active + ":" + text;
-            status("已尝试填入系统指令，请确认 AI Studio 是否保存");
-            return;
-          }
-          const ok = await clipboard(text);
-          status(ok ? "已复制系统提示词，可粘贴至 AI Studio 系统指令框" : "复制失败：请检查剪贴板权限");
-        }
         if (action === "compress") {
           status("已开始生成摘要。模型完成后请点击「读取已完成摘要」；不会自动删除任何历史消息");
           Compression.run();
@@ -378,7 +168,6 @@ const PromptPanel = (() => {
       document.body.appendChild(host);
       console.info("[Sujiu AI Studio] prompt panel mounted");
       render();
-      setInterval(autoInjectOnce, 1800);
     }
     return { mount, status, showCompactionReview };
   })();
