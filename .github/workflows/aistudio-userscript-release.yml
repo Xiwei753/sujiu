@@ -1,0 +1,68 @@
+name: AI Studio userscript release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/browser-extension/sujiu-aistudio.user.js'
+      - '.github/workflows/aistudio-userscript-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aistudio-userscript-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Determine userscript version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's|^// @version[[:space:]]*||p' apps/browser-extension/sujiu-aistudio.user.js | head -n 1)"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid userscript version: $VERSION" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=aistudio-v$VERSION" >> "$GITHUB_OUTPUT"
+      - name: Publish versioned GitHub Release and userscript asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping."
+            exit 0
+          fi
+          cat > release-notes.md <<EOF
+          素酒 AI Studio 浏览器插件 v${VERSION}（独立于素酒本体版本）。
+
+          - 手动生成覆盖全部历史的长期摘要，保留近期原文用于剧情衔接
+          - 手动读取摘要或独立清理旧历史，保护最近 N 轮和已标记记忆
+          - 可选的页面性能优化
+          - 系统提示词由 AI Studio 原生 System Instructions 管理
+
+          **通过 URL 安装 / 自动更新（Tampermonkey）：**
+          https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
+
+          **本次发行版下载：**
+          https://github.com/Xiwei753/sujiu/releases/download/${TAG}/sujiu-aistudio.user.js
+
+          仍依赖 AI Studio 未公开的页面结构与接口，首次批量删除建议在测试会话验证。
+          EOF
+          gh release create "$TAG" \
+            'apps/browser-extension/sujiu-aistudio.user.js#sujiu-aistudio.user.js' \
+            --target "$GITHUB_SHA" \
+            --title "素酒 AI Studio 浏览器插件 v$VERSION" \
+            --notes-file release-notes.md \
+            --latest=false

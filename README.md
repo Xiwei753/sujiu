@@ -30,6 +30,10 @@ docs/
   UI_ARCHITECTURE.md
 ```
 
+## Browser extension (experimental)
+
+The AI Studio companion lives in [apps/browser-extension](apps/browser-extension/README.md). It provides manual full-history summarization, selective old-message cleanup, and optional performance tuning. It builds both an MV3 extension and a [Tampermonkey userscript](https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js) with stable automatic update URLs; versioned releases are tagged `aistudio-vX.Y.Z`. It leaves AI Studio's native System Instructions to Google and does not change the Rust runtime or native frontends. Its dependency on undocumented AI Studio endpoints requires manual browser testing.
+
 ## Rust AI runtime
 
 `sujiu-ai` already contains:
