@@ -4,7 +4,7 @@
 
 ## 功能
 
-- 内嵌 Shadow DOM 小工具面板：只保留压缩摘要提示词、上下文保留轮数、手动清理、性能开关。AI Studio 原生 System Instructions 由用户直接编辑。
+- 内嵌 Shadow DOM 小工具面板：只保留压缩摘要提示词、上下文保留轮数、手动清理、性能开关。右侧悬浮按钮可用鼠标/触屏拖动，位置保存在本站 localStorage，窄屏默认放在右上方以避开底部发送按钮；AI Studio 原生 System Instructions 由用户直接编辑。
 - 不读取或写入 System Instructions，不再维护系统提示词预设，也不监听普通用户发送时机执行注入；原有浏览器本地预设数据保留，不主动迁移或删除。
 - 手动全历史摘要：让模型读取当前聊天的**全部已完成历史轮次**（包括最近 N 轮）及摘要指令，生成截至最新剧情的长期记忆；保留 N 轮仅用于之后的独立手动清理，最近 N 轮原文始终保留。
 - 保留轮数由客户端按完整“用户消息 → 模型回复”划分，默认 8 轮。摘要发送不删减原生请求内容；如无法核对私有 RPC 的轮次结构，则拒绝自动摘要，普通聊天原样运行。
@@ -23,7 +23,7 @@
 3. **篡改猴 URL 安装（推荐）：** 在篡改猴选择「从 URL 安装」，粘贴 [主分支 Raw 直链](https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js) 并确认安装。也可以直接访问该链接。脚本的 `@updateURL` 和 `@downloadURL` 均指向此稳定地址，后续由篡改猴自动检查新版本。已经从功能分支安装过旧版的用户，请替换而不是重复安装。
    - **固定版本归档：** [GitHub Releases](https://github.com/Xiwei753/sujiu/releases) 使用 `aistudio-vX.Y.Z` 标签提供每个版本的 `sujiu-aistudio.user.js` 附件。日常安装建议用主分支 Raw 地址。
 4. **Chrome / Edge 新版必须检查用户脚本权限：** 浏览器扩展管理页 → Tampermonkey →「详情」→ 开启「允许用户脚本（Allow User Scripts）」。这个开关关闭时，脚本可以显示为已导入、已启用，但不会在网页执行。参考 [Tampermonkey FAQ](https://www.tampermonkey.net/faq.php?ext=dhdg&q=Q209&version=5.1.0)。
-5. 打开 https://aistudio.google.com/prompts/new_chat 并强制刷新；也兼容旧的 /app/prompts/* 路径。首次安装后工具面板默认展开，此后通过右下角「素酒工具」开关。
+5. 打开 https://aistudio.google.com/prompts/new_chat 并强制刷新；也兼容旧的 /app/prompts/* 路径。手机端「素酒工具」按钮默认位于页面右上方，按住拖动即可换位置、松手自动保存，刷新页面仍保留；轻点按钮展开或收起工具面板。新安装的手机页面默认收起面板，桌面初装仍自动展开。
 6. 「生成摘要」和「读取已完成摘要」可独立使用；「直接清理旧历史」不要求新摘要或永久记忆标记。按最近保留轮数计算删除数量，确认后原生逐条删除，Google 页面自行保存。建议重要聊天先确认摘要完整，首次用测试聊天验收。
 
 ### 面板未出现时的最小诊断
@@ -58,6 +58,10 @@ v0.1.2 起 `@match` 覆盖 `https://aistudio.google.com/*` 全站路径、`@sand
 - tests/：纯逻辑自动化测试。
 
 这些文件仍处于同一个打包后的 IIFE 作用域，暂时沿用上游的内部结构，避免在首轮移植时同时重写未公开 RPC 协议。模块边界首先按职责划开，后续可以逐步收敛为显式依赖接口。
+
+## 手机悬浮按钮位置修复（v0.4.2）
+
+此前固定在页面右下角的按钮会遮挡 AI Studio 手机端的发送按钮。现在可直接长按/触摸拖动或用鼠标拖动「素酒工具」按钮。松手后按视口相对位置写入 `sujiu:aistudio:launcher-position:v1`，下次打开自动恢复；页面缩放或旋转时重新计算位置并限制在可视范围。拖动不会意外触发展开；普通轻点仍然有效。手机新安装默认将按钮放在右上侧并收起面板。面板采用独立固定定位，根据按钮位置选择上下方展开，并限制在可视区域。
 
 ## AI Studio Trusted Types 兼容性（v0.1.3）
 

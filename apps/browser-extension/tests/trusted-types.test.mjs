@@ -16,6 +16,8 @@ class StrictNode {
     this.value = "";
     this.checked = false;
     this.id = "";
+    this.listeners = Object.create(null);
+    this.parentNode = null;
   }
   set innerHTML(_value) { throw new TypeError("This document requires TrustedHTML assignment"); }
   setAttribute(name, value) {
@@ -24,12 +26,39 @@ class StrictNode {
     if (name.startsWith("data-")) this.dataset[name.slice(5).replace(/-([a-z])/g, (_, letter) => letter.toUpperCase())] = String(value);
   }
   getAttribute(name) { return this.attributes[name] ?? null; }
-  append(...children) { this.children.push(...children); }
+  append(...children) {
+    for (const child of children) {
+      this.children.push(child);
+      if (child && typeof child === "object") child.parentNode = this;
+    }
+  }
   appendChild(node) { this.append(node); return node; }
-  replaceChildren(...children) { this.children = children; }
-  addEventListener() {}
+  replaceChildren(...children) { this.children = []; this.append(...children); }
+  addEventListener(name, handler) { (this.listeners[name] ||= []).push(handler); }
+  emit(name, event = {}) {
+    for (const handler of this.listeners[name] || [])
+      handler({ button: 0, pointerId: 1, clientX: 0, clientY: 0,
+                target: this, preventDefault() {}, ...event });
+  }
+  getBoundingClientRect() {
+    if (this.id === "toggle") {
+      const host = this.parentNode?.host;
+      const left = Number.parseFloat(host?.style.left) || 0;
+      const top = Number.parseFloat(host?.style.top) || 0;
+      return { left, top, width: 88, height: 36, right: left + 88, bottom: top + 36 };
+    }
+    if (this.id === "pane") {
+      const w = Math.min(405, this.parentNode?.host?.viewport?.width - 24 || 405);
+      const h = Math.min(520, (this.parentNode?.host?.viewport?.height || 768) * 0.82);
+      const left = Number.parseFloat(this.style.left) || 0;
+      const top = Number.parseFloat(this.style.top) || 0;
+      return { left, top, width: w, height: h, right: left + w, bottom: top + h };
+    }
+    return { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+  }
   attachShadow() {
     this.shadowRoot = new StrictNode("shadow");
+    this.shadowRoot.host = this;
     return this.shadowRoot;
   }
   querySelector(selector) {
@@ -52,7 +81,13 @@ class StrictNode {
   }
 }
 
-function setup() {
+function setup({ width = 1024, height = 768, store = new Map() } = {}) {
+  const window = {
+    innerWidth: width, innerHeight: height,
+    listeners: Object.create(null),
+    addEventListener(name, handler) { (this.listeners[name] ||= []).push(handler); },
+    emit(name) { for (const handler of this.listeners[name] || []) handler(); }
+  };
   const document = {
     body: new StrictNode("body"),
     readyState: "complete",
@@ -62,7 +97,11 @@ function setup() {
   };
   const context = {
     document,
-    localStorage: { getItem: () => null, setItem: () => {} },
+    window,
+    localStorage: {
+      getItem: key => store.get(key) ?? null,
+      setItem: (key, value) => store.set(key, String(value))
+    },
     state: { compressionInProgress: false, branchInProgress: false },
     userSettings: { keepRounds: 8 },
     PerformanceTuning: { enabled: true, setEnabled(value) { this.enabled = Boolean(value); return this.enabled; } },
@@ -71,7 +110,9 @@ function setup() {
     console: { info: () => {} }
   };
   vm.runInNewContext(source + "\nPromptPanel.mount();", context);
-  return { document };
+  const host = document.getElementById("sujiu-aistudio-host");
+  host.viewport = { width, height };
+  return { document, host, window, store };
 }
 
 test("mounts prompt panel without TrustedHTML / innerHTML on the host page", () => {
@@ -102,4 +143,63 @@ test("plugin never injects or manages Google System Instructions", () => {
   assert.match(source, /role\("summary-prompt", "textarea"/);
   assert.match(source, /action\("直接清理旧历史", "cleanup-history"\)/);
   assert.match(source, /role\("reduce-visual-effects", "input"/);
+});
+
+
+test("mobile launcher defaults near the top, away from the send button", () => {
+  const { host } = setup({ width: 390, height: 844 });
+  const toggle = host.shadowRoot.getElementById("toggle");
+  const rect = toggle.getBoundingClientRect();
+  assert.ok(rect.top <= 120, "launcher is near the top of the mobile viewport");
+  assert.ok(rect.right <= 390 && rect.left >= 0, "launcher stays inside the viewport");
+  assert.equal(host.shadowRoot.getElementById("pane").hidden, true, "new mobile installs start collapsed");
+  assert.equal(toggle.style.touchAction, "none", "drag handles touch without scrolling the page");
+});
+
+test("dragging launcher persists its position, suppresses click and survives reload", () => {
+  const store = new Map();
+  const first = setup({ width: 390, height: 844, store });
+  const toggle = first.host.shadowRoot.getElementById("toggle");
+  const initial = toggle.getBoundingClientRect();
+  const targetX = initial.left - 230, targetY = initial.top + 170;
+  toggle.emit("pointerdown", { clientX: initial.left + 20, clientY: initial.top + 12 });
+  toggle.emit("pointermove", { clientX: initial.left + 20 - 230, clientY: initial.top + 12 + 170 });
+  toggle.emit("pointerup", { clientX: initial.left + 20 - 230, clientY: initial.top + 12 + 170 });
+  const rect = toggle.getBoundingClientRect();
+  assert.ok(Math.abs(rect.left - targetX) < 1 && Math.abs(rect.top - targetY) < 1);
+  assert.ok(store.has("sujiu:aistudio:launcher-position:v1"), "persisted location exists");
+  toggle.emit("click");
+  assert.equal(first.host.shadowRoot.getElementById("pane").hidden, true, "drag does not open panel");
+
+  const second = setup({ width: 390, height: 844, store });
+  const restored = second.host.shadowRoot.getElementById("toggle").getBoundingClientRect();
+  assert.ok(Math.abs(restored.left - rect.left) < 1);
+  assert.ok(Math.abs(restored.top - rect.top) < 1);
+});
+
+test("short taps open the panel and its overlay remains in view", () => {
+  const { host } = setup({ width: 390, height: 844 });
+  const toggle = host.shadowRoot.getElementById("toggle");
+  const pane = host.shadowRoot.getElementById("pane");
+  toggle.emit("pointerdown", { clientX: 340, clientY: 90 });
+  toggle.emit("pointerup", { clientX: 340, clientY: 90 });
+  toggle.emit("click");
+  assert.equal(pane.hidden, false);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  const rect = pane.getBoundingClientRect();
+  assert.ok(rect.left >= 12 && rect.right <= 390 - 12);
+  assert.ok(rect.top >= 12 && rect.bottom <= 844 - 12);
+  toggle.emit("click");
+  assert.equal(pane.hidden, true);
+});
+
+test("saved launcher position is clamped when the viewport shrinks", () => {
+  const store = new Map([["sujiu:aistudio:launcher-position:v1", JSON.stringify({ x: 1, y: 1 })]]);
+  const { host, window } = setup({ width: 390, height: 844, store });
+  const toggle = host.shadowRoot.getElementById("toggle");
+  window.innerWidth = 320; window.innerHeight = 480;
+  window.emit("resize");
+  const rect = toggle.getBoundingClientRect();
+  assert.ok(rect.left >= 12 && rect.right <= 320 - 12);
+  assert.ok(rect.top >= 12 && rect.bottom <= 480 - 12);
 });

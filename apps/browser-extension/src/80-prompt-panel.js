@@ -60,7 +60,7 @@ const PromptPanel = (() => {
         element.append(...children);
         return element;
       };
-      const style = make("style", { text: "\n          *{box-sizing:border-box} button,input,select,textarea{font:inherit}\n          button{cursor:pointer;border:1px solid #64748b66;border-radius:8px;padding:6px 8px;background:#ffffff12;color:inherit}\n          button:hover{background:#94a3b833}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0d9488}\n          #toggle{background:#156f67;color:white;border:0;box-shadow:0 3px 16px #0005}\n          #pane{width:min(405px,calc(100vw - 24px));max-height:min(82vh,850px);margin-bottom:9px;overflow:auto;color:#f1f5f9;background:#1b2029;border:1px solid #64748b55;border-radius:14px;padding:15px;box-shadow:0 6px 40px #0008;font:13px/1.5 system-ui,sans-serif}\n          #pane[hidden]{display:none}h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;margin:16px 0 7px}.line{display:flex;align-items:center;gap:6px;margin:6px 0}.line>*{min-width:0}\n          select,input[type=number],textarea{width:100%;background:#0f172a;color:#f8fafc;border:1px solid #64748b99;border-radius:8px;padding:7px}\n          textarea{display:block;resize:vertical;min-height:62px;margin:5px 0 10px}\n          label{font-size:12px;color:#cbd5e1}\n          #status{color:#99f6e4;min-height:1.5em;font-size:12px;margin-top:10px}\n          .hint{color:#94a3b8;font-size:11px;margin:7px 0}\n          .check-line{display:flex;gap:8px;align-items:center}.check-line input{width:auto}\n          hr{border:0;border-top:1px solid #64748b55;margin:14px 0}\n          #inplace-review[hidden]{display:none}\n        " });
+      const style = make("style", { text: "\n          *{box-sizing:border-box} button,input,select,textarea{font:inherit}\n          button{cursor:pointer;border:1px solid #64748b66;border-radius:8px;padding:6px 8px;background:#ffffff12;color:inherit}\n          button:hover{background:#94a3b833}button:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid #0d9488}\n          #toggle{background:#156f67;color:white;border:0;box-shadow:0 3px 16px #0005}\n          #pane{position:fixed;width:min(405px,calc(100vw - 24px));max-height:min(82vh,calc(100dvh - 24px),850px);overflow:auto;color:#f1f5f9;background:#1b2029;border:1px solid #64748b55;border-radius:14px;padding:15px;box-shadow:0 6px 40px #0008;font:13px/1.5 system-ui,sans-serif}\n          #pane[hidden]{display:none}h2{font-size:15px;margin:0 0 10px}h3{font-size:13px;margin:16px 0 7px}.line{display:flex;align-items:center;gap:6px;margin:6px 0}.line>*{min-width:0}\n          select,input[type=number],textarea{width:100%;background:#0f172a;color:#f8fafc;border:1px solid #64748b99;border-radius:8px;padding:7px}\n          textarea{display:block;resize:vertical;min-height:62px;margin:5px 0 10px}\n          label{font-size:12px;color:#cbd5e1}\n          #status{color:#99f6e4;min-height:1.5em;font-size:12px;margin-top:10px}\n          .hint{color:#94a3b8;font-size:11px;margin:7px 0}\n          .check-line{display:flex;gap:8px;align-items:center}.check-line input{width:auto}\n          hr{border:0;border-top:1px solid #64748b55;margin:14px 0}\n          #inplace-review[hidden]{display:none}\n        " });
       const line = (...children) => make("div", { className: "line" }, children);
       const action = (label, name) => make("button", { type: "button", "data-action": name, text: label });
       const role = (name, tag = "input", attributes = {}) =>
@@ -96,6 +96,7 @@ const PromptPanel = (() => {
         "aria-expanded": "false", "aria-controls": "pane", text: "素酒工具" });
       shadow.append(style, pane, toggle);
       // Inline style fallback if the host blocks injecting a <style> element.
+      pane.style.position = "fixed";
       pane.style.width = "min(405px, calc(100vw - 24px))";
       pane.style.maxHeight = "min(82vh, 850px)";
       pane.style.overflow = "auto";
@@ -107,14 +108,124 @@ const PromptPanel = (() => {
       toggle.style.color = "white";
       toggle.style.padding = "8px 12px";
       toggle.style.borderRadius = "9px";
-      toggle.style.cursor = "pointer";
+      toggle.style.cursor = "grab";
+      toggle.style.touchAction = "none";
+      toggle.title = "点击展开；按住并拖动可移动按钮";
       root = shadow;
       panel = shadow.getElementById("pane");
-      shadow.getElementById("toggle").addEventListener("click", () => {
-        panel.hidden = !panel.hidden;
-        shadow.getElementById("toggle").setAttribute("aria-expanded", String(!panel.hidden));
-        if (!panel.hidden) render();
+      const launcher = shadow.getElementById("toggle");
+      const positionKey = "sujiu:aistudio:launcher-position:v1";
+      const edge = 12;
+      let pointer = null;
+      let suppressClickUntil = 0;
+
+      function viewportSize() {
+        const view = typeof window !== "undefined" ? window : null;
+        return {
+          width: Math.max(1, view?.innerWidth || document.documentElement?.clientWidth || 1024),
+          height: Math.max(1, view?.innerHeight || document.documentElement?.clientHeight || 768)
+        };
+      }
+      function clamp(value, min, max) {
+        return Math.min(Math.max(value, min), Math.max(min, max));
+      }
+      function launcherSize() {
+        const rect = launcher.getBoundingClientRect?.();
+        return { width: rect?.width || 88, height: rect?.height || 36 };
+      }
+      function positionPanel() {
+        if (panel.hidden) return;
+        const view = viewportSize();
+        const rect = launcher.getBoundingClientRect?.() || { left: 0, top: 0, right: 88, bottom: 36 };
+        const paneRect = panel.getBoundingClientRect?.();
+        const width = Math.min(paneRect?.width || 405, view.width - edge * 2);
+        const height = Math.min(paneRect?.height || view.height * .82, view.height - edge * 2);
+        const x = clamp(rect.right - width, edge, view.width - width - edge);
+        const desiredY = rect.top > view.height / 2 ? rect.top - height - 8 : rect.bottom + 8;
+        panel.style.left = x + "px";
+        panel.style.top = clamp(desiredY, edge, view.height - height - edge) + "px";
+      }
+      function placeLauncher(x, y) {
+        const view = viewportSize();
+        const size = launcherSize();
+        const left = clamp(x, edge, view.width - size.width - edge);
+        const top = clamp(y, edge, view.height - size.height - edge);
+        host.style.left = left + "px";
+        host.style.top = top + "px";
+        host.style.right = "auto";
+        host.style.bottom = "auto";
+        positionPanel();
+        return { left, top };
+      }
+      function saveLauncherPosition() {
+        const view = viewportSize();
+        const size = launcherSize();
+        const rect = launcher.getBoundingClientRect?.();
+        if (!rect) return;
+        const x = clamp(rect.left / Math.max(1, view.width - size.width), 0, 1);
+        const y = clamp(rect.top / Math.max(1, view.height - size.height), 0, 1);
+        try { localStorage.setItem(positionKey, JSON.stringify({ x, y })); } catch {}
+      }
+      function restoreLauncherPosition() {
+        const view = viewportSize();
+        const size = launcherSize();
+        let saved = null;
+        try {
+          const parsed = JSON.parse(localStorage.getItem(positionKey) || "null");
+          if (Number.isFinite(parsed?.x) && Number.isFinite(parsed?.y) &&
+              parsed.x >= 0 && parsed.x <= 1 && parsed.y >= 0 && parsed.y <= 1) saved = parsed;
+        } catch {}
+        if (saved) {
+          placeLauncher(saved.x * Math.max(1, view.width - size.width),
+                        saved.y * Math.max(1, view.height - size.height));
+        } else if (view.width <= 640) {
+          // Keep the mobile launcher away from AI Studio's bottom send button.
+          placeLauncher(view.width - size.width - edge, 88);
+        } else {
+          placeLauncher(view.width - size.width - 18, view.height - size.height - 18);
+        }
+      }
+      launcher.addEventListener("pointerdown", event => {
+        if (event.button !== undefined && event.button !== 0) return;
+        const rect = launcher.getBoundingClientRect?.();
+        if (!rect) return;
+        pointer = { id: event.pointerId, x: event.clientX, y: event.clientY,
+                    left: rect.left, top: rect.top, moved: false };
+        try { launcher.setPointerCapture?.(event.pointerId); } catch {}
       });
+      launcher.addEventListener("pointermove", event => {
+        if (!pointer || event.pointerId !== pointer.id) return;
+        const dx = event.clientX - pointer.x;
+        const dy = event.clientY - pointer.y;
+        if (!pointer.moved && Math.hypot(dx, dy) < 6) return;
+        if (!pointer.moved) {
+          pointer.moved = true;
+          panel.hidden = true;
+          launcher.setAttribute("aria-expanded", "false");
+        }
+        placeLauncher(pointer.left + dx, pointer.top + dy);
+        event.preventDefault?.();
+      });
+      function finishDrag(event) {
+        if (!pointer || event.pointerId !== pointer.id) return;
+        if (pointer.moved) {
+          saveLauncherPosition();
+          suppressClickUntil = Date.now() + 400;
+        }
+        try { launcher.releasePointerCapture?.(event.pointerId); } catch {}
+        pointer = null;
+      }
+      launcher.addEventListener("pointerup", finishDrag);
+      launcher.addEventListener("pointercancel", finishDrag);
+      launcher.addEventListener("click", () => {
+        if (Date.now() < suppressClickUntil) return;
+        panel.hidden = !panel.hidden;
+        launcher.setAttribute("aria-expanded", String(!panel.hidden));
+        if (!panel.hidden) { render(); positionPanel(); }
+      });
+      if (typeof window !== "undefined") {
+        window.addEventListener("resize", () => restoreLauncherPosition());
+      }
       shadow.addEventListener("change", event => {
         const el = event.target;
         const role = el?.dataset?.role;
@@ -165,16 +276,17 @@ const PromptPanel = (() => {
       try {
         const seenKey = "sujiu:aistudio:panel-opened:v1";
         if (!localStorage.getItem(seenKey)) {
-          panel.hidden = false;
-          shadow.getElementById("toggle").setAttribute("aria-expanded", "true");
+          panel.hidden = viewportSize().width <= 640;
+          shadow.getElementById("toggle").setAttribute("aria-expanded", String(!panel.hidden));
           localStorage.setItem(seenKey, "1");
         }
       } catch {
-        panel.hidden = false;
-        shadow.getElementById("toggle").setAttribute("aria-expanded", "true");
+        panel.hidden = viewportSize().width <= 640;
+        shadow.getElementById("toggle").setAttribute("aria-expanded", String(!panel.hidden));
       }
       document.body.appendChild(host);
-      console.info("[Sujiu AI Studio] prompt panel mounted");
+      restoreLauncherPosition();
+      console.info("[Sujiu AI Studio] tool panel mounted");
       render();
     }
     return { mount, status, showCompactionReview };
