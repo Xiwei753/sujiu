@@ -90,6 +90,11 @@ function setup({ width = 1024, height = 768, store = new Map() } = {}) {
   };
   const document = {
     body: new StrictNode("body"),
+    listeners: Object.create(null),
+    addEventListener(name, handler) { (this.listeners[name] ||= []).push(handler); },
+    emit(name, event = {}) {
+      for (const handler of this.listeners[name] || []) handler(event);
+    },
     readyState: "complete",
     createElement: tag => new StrictNode(tag),
     createTextNode: text => ({ textContent: String(text) }),
@@ -202,4 +207,61 @@ test("saved launcher position is clamped when the viewport shrinks", () => {
   const rect = toggle.getBoundingClientRect();
   assert.ok(rect.left >= 12 && rect.right <= 320 - 12);
   assert.ok(rect.top >= 12 && rect.bottom <= 480 - 12);
+});
+
+
+test("mobile panel has a close action that remains available even if launcher is covered", () => {
+  const { host } = setup({ width: 390, height: 844 });
+  const shadow = host.shadowRoot;
+  const toggle = shadow.getElementById("toggle");
+  const pane = shadow.getElementById("pane");
+  toggle.emit("click");
+  assert.equal(pane.hidden, false, "panel opened");
+  const close = shadow.querySelector('[data-action="close-panel"]');
+  assert.ok(close, "panel header contains a close button");
+  shadow.emit("click", { target: close });
+  assert.equal(pane.hidden, true, "close button collapses panel");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(toggle.style.position, "relative", "launcher is in an explicit stacking layer");
+  assert.ok(Number(toggle.style.zIndex) > Number(pane.style.zIndex),
+    "launcher remains visually above the panel");
+});
+
+test("tapping outside the panel dismisses it; tapping inside does not", () => {
+  const { host, document } = setup({ width: 390, height: 844 });
+  const shadow = host.shadowRoot;
+  const toggle = shadow.getElementById("toggle");
+  const pane = shadow.getElementById("pane");
+  toggle.emit("click");
+  document.emit("pointerdown", {
+    target: pane,
+    composedPath: () => [pane, shadow, host, document.body, document]
+  });
+  assert.equal(pane.hidden, false, "tap inside doesn't dismiss");
+  document.emit("pointerdown", {
+    target: document.body,
+    composedPath: () => [document.body, document]
+  });
+  assert.equal(pane.hidden, true, "tap outside dismisses panel");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+});
+
+test("Escape key dismisses panel even when its content has focus", () => {
+  const { host, document } = setup({ width: 390, height: 844 });
+  const toggle = host.shadowRoot.getElementById("toggle");
+  const pane = host.shadowRoot.getElementById("pane");
+  toggle.emit("click");
+  document.emit("keydown", { key: "Escape" });
+  assert.equal(pane.hidden, true);
+});
+
+test("the mobile panel is height-limited and has a sticky close header", () => {
+  const { host } = setup({ width: 390, height: 600 });
+  const pane = host.shadowRoot.getElementById("pane");
+  const toggle = host.shadowRoot.getElementById("toggle");
+  toggle.emit("click");
+  assert.match(pane.style.maxHeight, /72dvh/);
+  assert.match(source, /\.panel-header\{position:sticky;/);
+  assert.match(source, /#pane\[hidden\]\{display:none\}/);
+  assert.ok(pane.style.overflow === "auto");
 });

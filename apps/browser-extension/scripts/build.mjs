@@ -6,7 +6,7 @@ const fs = await import("node:fs/promises");
   const bundle = [
     '(function () {',
     '"use strict";',
-    'const bootstrapStatus = { version: "0.4.2", phase: "loaded", loadedAt: new Date().toISOString() };',
+    'const bootstrapStatus = { version: "0.4.3", phase: "loaded", loadedAt: new Date().toISOString() };',
     'window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;',
     'console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);',
     'try {',
@@ -39,7 +39,7 @@ const fs = await import("node:fs/promises");
   const manifest = {
     manifest_version:3,
     name:"素酒 · AI Studio 工具",
-    version:"0.4.2",
+    version:"0.4.3",
     description:"AI Studio 全历史摘要、手动清理与性能优化",
     content_scripts:[{matches:["https://aistudio.google.com/*"],js:["main.js"],run_at:"document_start",world:"MAIN"}]
   };
@@ -48,7 +48,7 @@ const fs = await import("node:fs/promises");
     "// ==UserScript==",
     "// @name         Sujiu AI Studio Tools",
     "// @namespace    https://github.com/Xiwei753/sujiu",
-    "// @version      0.4.2",
+    "// @version      0.4.3",
     "// @updateURL    https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js",
     "// @downloadURL  https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js",
     "// @description  AI Studio manual context compaction and history cleanup",
