@@ -2,6 +2,8 @@
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
 // @version      0.4.1
+// @updateURL    https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
+// @downloadURL  https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @description  AI Studio manual context compaction and history cleanup
 // @match        https://aistudio.google.com/*
 // @noframes
