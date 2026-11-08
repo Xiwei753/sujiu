@@ -10,13 +10,18 @@
 - 保留轮数由客户端按完整“用户消息 → 模型回复”划分，默认 8 轮。摘要发送不删减原生请求内容；如无法核对私有 RPC 的轮次结构，则拒绝自动摘要，普通聊天原样运行。
 - 「生成摘要」「读取已完成摘要」「直接清理旧历史」互相独立；清理时按本地保留轮数选择旧历史，保护已标记的记忆和最近 N 轮，用户确认后通过原生菜单删除。只支持手动操作，不新建会话。
 
+## 发布与分发
+
+每次主分支的 `sujiu-aistudio.user.js` 有更新时，`.github/workflows/aistudio-userscript-release.yml` 会读取脚本的 `@version` 并创建 `aistudio-v<版本号>` 标签及 GitHub Release，上传可直接安装的脚本附件。素酒本体与浏览器插件分别使用自己的版本号。发布由 GitHub Actions 的 `contents: write` 权限执行，重复触发同一版本不会重建已有 Release。
+
 ## 安装与验证
 
 需要 Node.js 20+。在 apps/browser-extension 目录运行：
 
 1. npm run check
 2. Chrome / Edge 打开 chrome://extensions，启用开发者模式，加载 dist/extension 目录。
-3. **油猴最简安装：** 直接打开 [最新版 sujiu-aistudio.user.js](https://raw.githubusercontent.com/Xiwei753/sujiu/feat/aistudio-browser-extension/apps/browser-extension/sujiu-aistudio.user.js) 导入 Tampermonkey，或复制其完整内容粘贴到一个新脚本；不需要拼接 src/ 目录。已有旧版请先停用，避免重复注入。构建产物 `dist/sujiu-aistudio.user.js` 与该直接安装文件由同一脚本生成。
+3. **篡改猴 URL 安装（推荐）：** 在篡改猴选择「从 URL 安装」，粘贴 [主分支 Raw 直链](https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js) 并确认安装。也可以直接访问该链接。脚本的 `@updateURL` 和 `@downloadURL` 均指向此稳定地址，后续由篡改猴自动检查新版本。已经从功能分支安装过旧版的用户，请替换而不是重复安装。
+   - **固定版本归档：** [GitHub Releases](https://github.com/Xiwei753/sujiu/releases) 使用 `aistudio-vX.Y.Z` 标签提供每个版本的 `sujiu-aistudio.user.js` 附件。日常安装建议用主分支 Raw 地址。
 4. **Chrome / Edge 新版必须检查用户脚本权限：** 浏览器扩展管理页 → Tampermonkey →「详情」→ 开启「允许用户脚本（Allow User Scripts）」。这个开关关闭时，脚本可以显示为已导入、已启用，但不会在网页执行。参考 [Tampermonkey FAQ](https://www.tampermonkey.net/faq.php?ext=dhdg&q=Q209&version=5.1.0)。
 5. 打开 https://aistudio.google.com/prompts/new_chat 并强制刷新；也兼容旧的 /app/prompts/* 路径。首次安装后工具面板默认展开，此后通过右下角「素酒工具」开关。
 6. 「生成摘要」和「读取已完成摘要」可独立使用；「直接清理旧历史」不要求新摘要或永久记忆标记。按最近保留轮数计算删除数量，确认后原生逐条删除，Google 页面自行保存。建议重要聊天先确认摘要完整，首次用测试聊天验收。
