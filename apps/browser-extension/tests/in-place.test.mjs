@@ -204,7 +204,9 @@ test("standalone pinned memories survive future compression without protecting u
   assert.deepEqual(Array.from(plan.pinnedOlderRounds), []);
   assert.deepEqual(Array.from(plan.pinnedMemoryTexts), [pinned + " old archive"]);
   const selection = x.compactor.preflightDom(plan);
-  assert.deepEqual(Array.from(selection.targetIds), ["m1", "u1", "m2", "u2"]);
+  assert.deepEqual(Array.from(selection.targetIds), ["m2", "u2"]);
+  assert.ok(selection.protectedIds.includes("u1"), "neighboring user turn stays protected against cascading deletion");
+  assert.ok(selection.protectedIds.includes("m1"));
   assert.ok(selection.protectedIds.includes("memory-old"));
   assert.ok(!selection.targetIds.includes("memory-old"));
 });
@@ -384,6 +386,6 @@ test("a summary lacking a standalone thought delete menu keeps the thought", () 
   const plan = x.compactor.planManualCleanup(1);
   const preview = x.compactor.preflightDom(plan);
   assert.deepEqual(Array.from(preview.targetIds), ["m1","u1"]);
-  assert.ok(preview.protectedIds.includes("think") === false, "thought was skipped, not scheduled for deletion");
+  assert.ok(preview.protectedIds.includes("think"), "unremovable thought stays protected");
   assert.equal(preview.skippedThoughts, 1);
 });
