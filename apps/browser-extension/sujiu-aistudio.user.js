@@ -890,6 +890,12 @@ const RoundSplitter = Object.freeze({
         JSON.stringify(turn.entry?.[0] ?? "");
       return /\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/i.test(content);
     },
+    isCompressionPrompt(turn) {
+      if (turn?.role !== "user") return false;
+      const content = typeof turn.text === "string" ? turn.text :
+        JSON.stringify(turn.entry?.[0] ?? "");
+      return /\[\[SUJIU_SCOPE_V2:[a-z0-9-]{8,80}\]\]/i.test(content);
+    },
     partition(turns, keepRounds = 8) {
       if (!Array.isArray(turns) || !Number.isSafeInteger(keepRounds) || keepRounds < 1) {
         throw new Error("Invalid conversation history or keepRounds");
@@ -901,7 +907,11 @@ const RoundSplitter = Object.freeze({
         if (!current.some(turn => turn.role === "model")) {
           throw new Error("Conversation contains an incomplete response");
         }
-        units.push({ kind: "round", turns: current });
+        // Tool-generated summary exchanges are archived history, not
+        // normal roleplay turns. They must never consume any of the N recent
+        // ordinary dialogue rounds kept during a later manual cleanup.
+        units.push({ kind: RoundSplitter.isCompressionPrompt(current[0]) ? "memory" : "round",
+                     turns: current });
         current = null;
       }
       for (const turn of turns) {
@@ -1669,30 +1679,14 @@ const RoundSplitter = Object.freeze({
             if (!snapshot?.trim()) throw new Error("摘要为空，无法压缩");
             // Previously generated memories are pinned. Never select
             // their own model replies for deletion in a later compression.
+            // Archive classification is verified against the live DOM during
+            // preflight. A serialized user index is not a safe deletion index
+            // when previous compression exchanges are excluded from N rounds.
             const pinnedOlderRounds = [];
-            const pinnedMemoryTexts = [];
-            let roundIndex = -1;
-            let currentUser = "";
-            let currentHasModel = false;
-            for (const turn of split.older || []) {
-                if (turn.role === "user") {
-                    roundIndex++;
-                    currentUser = String(turn.text || "");
-                    currentHasModel = false;
-                } else if (turn.role === "model") {
-                    const isPinned = CompactionTask.isPinnedSummary(turn.text || "");
-                    if (isPinned) {
-                        pinnedMemoryTexts.push(String(turn.text).trim());
-                        const isStandalone = currentHasModel &&
-                            !currentUser.includes("[[SUJIU_SCOPE_V2:");
-                        if (!isStandalone && roundIndex >= 0 &&
-                            !pinnedOlderRounds.includes(roundIndex)) {
-                            pinnedOlderRounds.push(roundIndex);
-                        }
-                    }
-                    currentHasModel = true;
-                }
-            }
+            const pinnedMemoryTexts = (split.older || [])
+                .filter(turn => turn.role === "model" &&
+                    CompactionTask.isPinnedSummary(String(turn.text || "")))
+                .map(turn => String(turn.text).trim());
             pending = {
                 pinnedOlderRounds,
                 pinnedMemoryTexts,
@@ -1766,7 +1760,7 @@ const RoundSplitter = Object.freeze({
             assertSupportedEntries(capture.entries, extractResolvedTurns(capture.entries));
             const turns = extractResolvedTurns(capture.entries);
             const users = turns.filter(turn => turn.role === "user");
-            if (users.length !== plan.totalRounds + 1) {
+            if (users.length < plan.totalRounds + 1) {
                 throw new Error("会话轮数与生成摘要前不一致，请刷新后重新生成摘要");
             }
             const latest = findSavedSummary(turns, plan.promptId);
@@ -1787,10 +1781,12 @@ const RoundSplitter = Object.freeze({
             const turns = [...document.querySelectorAll("ms-chat-turn")];
             const groups = collectGroups(turns);
             const regular = groups.filter(group => group.kind !== "memory");
-            const expected = plan.totalRounds + (plan.manual ? 0 : 1);
-            if (regular.length !== expected) {
+            const dialogueIndices = regular.flatMap((group, index) =>
+                isArchiveGroup(group) ? [] : [index]);
+            const actual = plan.manual ? regular.length : dialogueIndices.length;
+            if (actual !== plan.totalRounds) {
                 throw new Error("网页历史轮次已改变（检测到 " +
-                    regular.length + "，预期 " + expected + "），请重新操作");
+                    actual + "，预期 " + plan.totalRounds + "），请重新操作");
             }
             if (plan.manual && (turns.length !== plan.domIds.length ||
                 turns.some((turn, index) => !turn.id || turn.id !== plan.domIds[index]))) {
@@ -1836,7 +1832,10 @@ const RoundSplitter = Object.freeze({
             const targetTurns = [];
             const ignoredOldThoughts = new Set();
             const olderIndices = plan.manual ? plan.olderGroupIndices :
-                Array.from({ length: plan.olderRounds }, (_, i) => i);
+                dialogueIndices.slice(0, Math.max(0, dialogueIndices.length - plan.recentRounds));
+            if (olderIndices.length !== plan.olderRounds) {
+                throw new Error("普通对话与压缩记录的轮次边界不一致，已停止删除");
+            }
             for (const i of olderIndices) {
                 if (pinned.has(i)) continue;
                 for (const turn of [...regular[i].turns].reverse()) {
