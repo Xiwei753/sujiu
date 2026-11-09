@@ -92,3 +92,25 @@ const test = (await import("node:test")).default;
     assert.equal(result.pinnedMemories, 1);
     assert.equal(result.recent[0].text, "user 1");
   });
+
+test("legacy XML state_snapshot is pinned across a subsequent compression", () => {
+    const source = make(3);
+    source.splice(2, 0,
+      {role:"user",text:"Summarize the earlier role-play conversation. Return only: <state_snapshot>"},
+      {role:"model",text:"<state_snapshot>Historical memory</state_snapshot>"});
+    const result = splitter.partition(source, 1);
+    assert.equal(result.totalRounds, 3);
+    assert.equal(result.pinnedMemories, 1);
+    assert.equal(result.olderRounds, 2);
+    assert.ok(result.older.some(turn => turn.text?.includes("<state_snapshot>Historical memory")));
+  });
+
+  test("legacy Chinese heading format remains a pinned archived exchange", () => {
+    const source = make(3);
+    source.splice(2, 0,
+      {role:"user",text:"请为这段长期对话制作按剧情时间线整理的精炼记忆"},
+      {role:"model",text:"【稳定设定】主角已转学。\\n【已发生的关键事件】认识了新同学。"});
+    const result = splitter.partition(source, 1);
+    assert.equal(result.totalRounds, 3);
+    assert.equal(result.pinnedMemories, 1);
+  });
