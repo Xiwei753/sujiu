@@ -439,3 +439,45 @@ test("repeated compression excludes earlier archive requests when counting prote
   for(const id of ["old-tool","old-archive","u2","m2","u3","m3","new-tool","new-archive"])
     assert.ok(preview.protectedIds.includes(id),id+" must remain");
 });
+
+test("legacy XML snapshot and its English prompt survive later manual cleanup", () => {
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("legacy-prompt","user"), mockTurn("legacy-archive","model"),
+    mockTurn("u2","user"), mockTurn("m2","model"),
+    mockTurn("u3","user"), mockTurn("m3","model")
+  ];
+  turns[2].textContent = "Summarize the earlier role-play conversation. Return only: <state_snapshot>";
+  turns[3].textContent = "<state_snapshot>Old events and relationships</state_snapshot>";
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  assert.equal(plan.olderRounds, 2);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","m2","u2"]);
+  for (const id of ["legacy-prompt","legacy-archive","u3","m3"]) {
+    assert.ok(preview.protectedIds.includes(id), id + " must stay");
+  }
+  assert.equal(preview.protectedSummaryCount, 1);
+});
+
+test("orphaned XML summary and its predecessor stay protected during another compression", () => {
+  const marker = "[[SUJIU_SCOPE_V2:12345678-1111]]";
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("old-memory","model"),
+    mockTurn("u2","user"), mockTurn("m2","model"),
+    mockTurn("latest-task","user"),mockTurn("latest-memory","model")
+  ];
+  turns[2].textContent = "<state_snapshot>Earliest events</state_snapshot>";
+  turns[5].textContent = marker;
+  turns[6].textContent = "[[SUJIU_MEMORY_V1:12345678-1111]] Updated story";
+  const x=context(turns);
+  const plan=x.compactor.stage(turns[6].textContent,{
+    older:[], totalRounds:2, olderRounds:1, recentRounds:1
+  },{marker});
+  const preview=x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), []);
+  for (const id of ["u1","m1","old-memory","u2","m2","latest-task","latest-memory"]) {
+    assert.ok(preview.protectedIds.includes(id),id+" must survive");
+  }
+});

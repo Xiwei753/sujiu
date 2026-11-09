@@ -10,21 +10,33 @@ const RoundSplitter = Object.freeze({
       if (turn?.role !== "model") return false;
       const content = this.textOf(turn);
       if (/\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/i.test(content)) return true;
+      // Compatibility with early Sujiu summaries and their XML wrapper.
+      // A positive match pins the result; uncertain replies are never
+      // automatically relabeled merely because they look long.
+      if (/(?:<|&lt;)\/?state_snapshot(?:>|&gt;)/i.test(content)) return true;
       const headings = ["【历史范围与时间锚点】","【稳定设定与约束】",
         "【人物与关系】","【关键事件时间线】","【重要状态变化】",
-        "【本段历史截点】","【连续性校验】","【未解决线索与悬而未决的信息】"];
+        "【本段历史截点】","【连续性校验】","【未解决线索与悬而未决的信息】",
+        "【稳定设定】","【已发生的关键事件】",
+        "【截至压缩截点的状态】","【时间线衔接】"];
       return headings.filter(heading => content.includes(heading)).length >= 2 ||
-        /^(?:历史摘要|长期记忆|压缩记忆|剧情摘要)\s*[:：]/i.test(content.trim());
+        /^(?:历史摘要|长期记忆|压缩记忆|剧情摘要|history summary|memory summary|conversation summary|story summary|context summary)\s*[:：]/i.test(content.trim());
     },
     isCompressionPrompt(turn) {
       if (turn?.role !== "user") return false;
       const content = this.textOf(turn);
       const excerpt = content.slice(0, 800);
       return /\[\[SUJIU_SCOPE_V2:[a-z0-9-]{8,80}\]\]/i.test(content) ||
+        /(?:<|&lt;)state_snapshot(?:>|&gt;)/i.test(content) ||
+        content.includes("Summarize the earlier role-play conversation") ||
+        content.includes("请为这段长期对话制作按剧情时间线整理的精炼记忆") ||
+        content.includes("请只根据本次请求中实际提供的历史记录") ||
         content.includes("你是负责长期会话连续性的记忆整理员") ||
         (content.includes("历史范围与时间锚点") && content.includes("关键事件时间线")) ||
         (/(?:摘要|总结|梳理|压缩|归纳|概括)/.test(excerpt) &&
-         /(?:前文|历史|剧情|对话|聊天|情节|记忆|人物关系|时间线|之前发生|已有内容)/.test(excerpt));
+         /(?:前文|历史|剧情|对话|聊天|情节|记忆|人物关系|时间线|之前发生|已有内容)/.test(excerpt)) ||
+        (/(?:summari[sz]e|summary|recap|condense|compress(?:ion)?|memory snapshot)/i.test(excerpt) &&
+         /(?:earlier|previous|prior|conversation|role.?play|history|chat|story|dialogue|context)/i.test(excerpt));
     },
     partition(turns, keepRounds = 8) {
       if (!Array.isArray(turns) || !Number.isSafeInteger(keepRounds) || keepRounds < 1) {
