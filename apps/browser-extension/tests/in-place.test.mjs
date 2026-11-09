@@ -201,8 +201,8 @@ test("standalone pinned memories survive future compression without protecting u
     mockTurn("u3","user"), mockTurn("m3","model"),
     mockTurn("tool","user"), mockTurn("new-memory","model")
   ];
-  turns[6].textContent = "[[SUJIU_SCOPE_V2:87654321-abcd]]";
-  turns[7].textContent = "[[SUJIU_MEMORY_V1:87654321-abcd]] New memory";
+  turns[7].textContent = "[[SUJIU_SCOPE_V2:87654321-abcd]]";
+  turns[8].textContent = "[[SUJIU_MEMORY_V1:87654321-abcd]] New memory";
   turns[2].textContent = pinned + " old archive";
   const x = context(turns);
   const plan = x.compactor.stage("New model summary", {
