@@ -73,8 +73,7 @@
                     groups.push({ turns: [turn], hasModel: false, kind: "round" });
                 } else {
                     const group = groups[groups.length - 1];
-                    const hasMemory = type === "model" &&
-                        CompactionTask.isPinnedSummary(turn.textContent || "");
+                    const hasMemory = type === "model" && isArchiveReply(turn);
                     const toolPrompt = group?.turns?.[0]?.textContent?.includes("[[SUJIU_SCOPE_V2:");
                     if (hasMemory && (!group || (group.hasModel && !toolPrompt))) {
                         groups.push({ turns: [turn], hasModel: true, kind: "memory" });
@@ -225,10 +224,29 @@
                 ...(plan.pinnedOlderRounds || []),
                 ...inferredArchiveIndices
             ]);
+            // If an old prompt has already been removed, its summary becomes
+            // a standalone MODEL message. The immediately preceding exchange
+            // might still be linked to it by Google's native delete action.
+            // Preserve that neighbor rather than risk a cascading deletion.
+            for (let index = 1; index < groups.length; index++) {
+                if (groups[index].kind !== "memory") continue;
+                const previous = groups[index - 1];
+                const previousIndex = regular.indexOf(previous);
+                if (previousIndex >= 0) pinned.add(previousIndex);
+            }
             for (const index of plan.pinnedOlderRounds || []) {
                 if (index < 0 || index >= regular.length ||
                     !isArchiveGroup(regular[index])) {
                     throw new Error("历史压缩记忆与网页消息位置不一致，拒绝删除");
+                }
+            }
+            if (plan.marker && plan.memoryMarker) {
+                const latest = regular[regular.length - 1];
+                if (!latest || !isArchiveRequest(latest.turns[0]) ||
+                    !String(latest.turns[0].textContent || "").includes(plan.marker) ||
+                    !latest.turns.some(turn => getRole(turn) === "model" &&
+                        String(turn.textContent || "").includes(plan.memoryMarker))) {
+                    throw new Error("最新摘要的永久记忆标识缺失，已拒绝任何删除");
                 }
             }
 
