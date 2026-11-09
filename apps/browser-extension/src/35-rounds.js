@@ -2,17 +2,29 @@ const RoundSplitter = Object.freeze({
     // Pinned compaction memories can remain as standalone model messages
     // after their temporary tool prompts are removed. They are never counted
     // as conversational user/model rounds.
+    textOf(turn) {
+      return typeof turn?.text === "string" ? turn.text :
+        JSON.stringify(turn?.entry ?? "");
+    },
     isMemory(turn) {
       if (turn?.role !== "model") return false;
-      const content = typeof turn.text === "string" ? turn.text :
-        JSON.stringify(turn.entry?.[0] ?? "");
-      return /\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/i.test(content);
+      const content = this.textOf(turn);
+      if (/\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/i.test(content)) return true;
+      const headings = ["【历史范围与时间锚点】","【稳定设定与约束】",
+        "【人物与关系】","【关键事件时间线】","【重要状态变化】",
+        "【本段历史截点】","【连续性校验】","【未解决线索与悬而未决的信息】"];
+      return headings.filter(heading => content.includes(heading)).length >= 2 ||
+        /^(?:历史摘要|长期记忆|压缩记忆|剧情摘要)\s*[:：]/i.test(content.trim());
     },
     isCompressionPrompt(turn) {
       if (turn?.role !== "user") return false;
-      const content = typeof turn.text === "string" ? turn.text :
-        JSON.stringify(turn.entry?.[0] ?? "");
-      return /\[\[SUJIU_SCOPE_V2:[a-z0-9-]{8,80}\]\]/i.test(content);
+      const content = this.textOf(turn);
+      const excerpt = content.slice(0, 800);
+      return /\[\[SUJIU_SCOPE_V2:[a-z0-9-]{8,80}\]\]/i.test(content) ||
+        content.includes("你是负责长期会话连续性的记忆整理员") ||
+        (content.includes("历史范围与时间锚点") && content.includes("关键事件时间线")) ||
+        (/(?:摘要|总结|梳理|压缩|归纳|概括)/.test(excerpt) &&
+         /(?:前文|历史|剧情|对话|聊天|情节|记忆|人物关系|时间线|之前发生|已有内容)/.test(excerpt));
     },
     partition(turns, keepRounds = 8) {
       if (!Array.isArray(turns) || !Number.isSafeInteger(keepRounds) || keepRounds < 1) {
@@ -28,7 +40,8 @@ const RoundSplitter = Object.freeze({
         // Tool-generated summary exchanges are archived history, not
         // normal roleplay turns. They must never consume any of the N recent
         // ordinary dialogue rounds kept during a later manual cleanup.
-        units.push({ kind: RoundSplitter.isCompressionPrompt(current[0]) ? "memory" : "round",
+        units.push({ kind: (RoundSplitter.isCompressionPrompt(current[0]) ||
+          current.some(turn => RoundSplitter.isMemory(turn))) ? "memory" : "round",
                      turns: current });
         current = null;
       }
