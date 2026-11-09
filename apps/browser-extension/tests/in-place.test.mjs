@@ -389,3 +389,22 @@ test("a summary lacking a standalone thought delete menu keeps the thought", () 
   assert.ok(preview.protectedIds.includes("think"), "unremovable thought stays protected");
   assert.equal(preview.skippedThoughts, 1);
 });
+
+
+test("manual cleanup can delete only independent archive thoughts without deleting any ordinary history", () => {
+  const turns = [
+    mockTurn("task","user"), mockTurn("think","thought"), mockTurn("memory","model"),
+    mockTurn("recent","user"), mockTurn("reply","model")
+  ];
+  turns[0].textContent = "Summarize [[SUJIU_SCOPE_V2:12345678-aaaa]]";
+  turns[2].textContent = "[[SUJIU_MEMORY_V1:12345678-aaaa]] Summary kept";
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  assert.equal(plan.olderRounds, 0);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["think"]);
+  assert.ok(preview.protectedIds.includes("task"));
+  assert.ok(preview.protectedIds.includes("memory"));
+  assert.ok(preview.protectedIds.includes("recent"));
+  assert.ok(preview.protectedIds.includes("reply"));
+});
