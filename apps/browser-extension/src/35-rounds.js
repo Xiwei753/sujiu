@@ -28,7 +28,7 @@ const RoundSplitter = Object.freeze({
         // Tool-generated summary exchanges are archived history, not
         // normal roleplay turns. They must never consume any of the N recent
         // ordinary dialogue rounds kept during a later manual cleanup.
-        units.push({ kind: this.isCompressionPrompt(current[0]) ? "memory" : "round",
+        units.push({ kind: RoundSplitter.isCompressionPrompt(current[0]) ? "memory" : "round",
                      turns: current });
         current = null;
       }
