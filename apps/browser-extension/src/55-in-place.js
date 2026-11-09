@@ -154,11 +154,15 @@
                 isArchiveGroup(group) ? [index] : []);
             const chatIndices = regular.flatMap((group, index) =>
                 isArchiveGroup(group) ? [] : [index]);
-            if (chatIndices.length <= keepRounds) {
+            const hasOldArchiveThoughts = archiveIndices.some(index =>
+                regular[index].turns.some(turn =>
+                    normalizeType(turn) === "thought" && hasIndependentDeleteMenu(turn)));
+            if (chatIndices.length <= keepRounds && !hasOldArchiveThoughts) {
                 throw new Error("当前只有 " + chatIndices.length +
-                    " 轮普通对话，没有超出保留范围的历史");
+                    " 轮普通对话，没有超出保留范围的历史，也没有可独立清理的压缩思考块");
             }
-            const olderGroupIndices = chatIndices.slice(0, -keepRounds);
+            const olderGroupIndices = chatIndices.slice(
+                0, Math.max(0, chatIndices.length - keepRounds));
             const pinnedOlderRounds = archiveIndices;
             const plan = {
                 manual: true,
