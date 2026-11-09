@@ -8,6 +8,12 @@ const RoundSplitter = Object.freeze({
         JSON.stringify(turn.entry?.[0] ?? "");
       return /\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/i.test(content);
     },
+    isCompressionPrompt(turn) {
+      if (turn?.role !== "user") return false;
+      const content = typeof turn.text === "string" ? turn.text :
+        JSON.stringify(turn.entry?.[0] ?? "");
+      return /\[\[SUJIU_SCOPE_V2:[a-z0-9-]{8,80}\]\]/i.test(content);
+    },
     partition(turns, keepRounds = 8) {
       if (!Array.isArray(turns) || !Number.isSafeInteger(keepRounds) || keepRounds < 1) {
         throw new Error("Invalid conversation history or keepRounds");
@@ -19,7 +25,11 @@ const RoundSplitter = Object.freeze({
         if (!current.some(turn => turn.role === "model")) {
           throw new Error("Conversation contains an incomplete response");
         }
-        units.push({ kind: "round", turns: current });
+        // Tool-generated summary exchanges are archived history, not
+        // normal roleplay turns. They must never consume any of the N recent
+        // ordinary dialogue rounds kept during a later manual cleanup.
+        units.push({ kind: this.isCompressionPrompt(current[0]) ? "memory" : "round",
+                     turns: current });
         current = null;
       }
       for (const turn of turns) {
