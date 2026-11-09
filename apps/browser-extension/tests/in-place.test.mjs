@@ -41,10 +41,13 @@ test("keeps the newest exchange and snapshot while selecting old thoughts for de
     mockTurn("u2", "user"), mockTurn("m2", "model"),
     mockTurn("summary-prompt", "user"), mockTurn("summary-model", "model")
   ];
+  const marker = "[[SUJIU_SCOPE_V2:12345678-0000]]";
+  turns[5].textContent = marker;
+  turns[6].textContent = "[[SUJIU_MEMORY_V1:12345678-0000]] Remember these events";
   const x = context(turns);
   const stage = x.compactor.stage("Remember these events", {
     totalRounds: 2, olderRounds: 1, recentRounds: 1
-  });
+  }, { marker });
   assert.equal(x.preview.snapshot, "Remember these events");
   const selection = x.compactor.preflightDom(stage);
   assert.deepEqual(Array.from(selection.targetIds), ["m1", "t1", "u1"]);
@@ -109,15 +112,17 @@ test("previously compressed summary rounds are pinned and never enter the deleti
     mockTurn("u4", "user"), mockTurn("m4", "model"),
     mockTurn("ut", "user"), mockTurn("mt", "model")
   ];
+  turns[8].textContent = "[[SUJIU_SCOPE_V2:87654321-abcd]]";
+  turns[9].textContent = "[[SUJIU_MEMORY_V1:87654321-abcd]] New memory";
   turns[3].textContent = "[[SUJIU_MEMORY_V1:12345678-1234]] Archived memory";
   const x = context(turns);
   const plan = x.compactor.stage("[[SUJIU_MEMORY_V1:87654321-abc]] New memory", {
-    older, totalRounds: 4, olderRounds: 3, recentRounds: 1
-  });
-  assert.deepEqual(Array.from(plan.pinnedOlderRounds), [1]);
+    older, totalRounds: 3, olderRounds: 2, recentRounds: 1
+  }, { marker: "[[SUJIU_SCOPE_V2:87654321-abcd]]" });
+  assert.deepEqual(Array.from(plan.pinnedOlderRounds), []);
   const selection = x.compactor.preflightDom(plan);
   assert.deepEqual(Array.from(selection.targetIds), ["m1", "u1", "m3", "u3"]);
-  assert.equal(selection.pinnedCount, 1);
+  assert.equal(selection.protectedSummaryCount, 2);
   assert.equal(selection.deletedUserCount, 2);
 });
 
@@ -132,7 +137,7 @@ test("native deletion autosaves without a separate Save click or cloud polling",
   assert.match(source, /waitForNativeSave\(saveBaseline, lastDeletionStartedAt\)/);
 });
 
-test("temporary tool prompt is selected but its marked model summary is protected", () => {
+test("temporary tool prompt is retained when deleting it could cascade to the marked summary", () => {
   const turn = (id, type, content) => {
     const t = mockTurn(id, type);
     t.textContent = content;
@@ -154,10 +159,11 @@ test("temporary tool prompt is selected but its marked model summary is protecte
   }, { marker });
   assert.equal(plan.memoryMarker, pinned);
   const preview = x.compactor.preflightDom(plan);
-  assert.deepEqual(Array.from(preview.targetIds), ["m1", "u1", "thought", "tool"]);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1", "u1", "thought"]);
+  assert.ok(preview.protectedIds.includes("tool"), "never risk deleting a paired model reply via its user prompt");
   assert.ok(preview.protectedIds.includes("memory"));
   assert.ok(preview.protectedIds.includes("u2"));
-  assert.equal(preview.deletedUserCount, 2);
+  assert.equal(preview.deletedUserCount, 1);
 });
 
 test("an embedded thought without an independent menu stays protected", () => {
@@ -195,15 +201,19 @@ test("standalone pinned memories survive future compression without protecting u
     mockTurn("u3","user"), mockTurn("m3","model"),
     mockTurn("tool","user"), mockTurn("new-memory","model")
   ];
+  turns[7].textContent = "[[SUJIU_SCOPE_V2:87654321-abcd]]";
+  turns[8].textContent = "[[SUJIU_MEMORY_V1:87654321-abcd]] New memory";
   turns[2].textContent = pinned + " old archive";
   const x = context(turns);
   const plan = x.compactor.stage("New model summary", {
     older, totalRounds:3, olderRounds:2, recentRounds:1
-  });
+  }, { marker:"[[SUJIU_SCOPE_V2:87654321-abcd]]" });
   assert.deepEqual(Array.from(plan.pinnedOlderRounds), []);
   assert.deepEqual(Array.from(plan.pinnedMemoryTexts), [pinned + " old archive"]);
   const selection = x.compactor.preflightDom(plan);
-  assert.deepEqual(Array.from(selection.targetIds), ["m1", "u1", "m2", "u2"]);
+  assert.deepEqual(Array.from(selection.targetIds), ["m2", "u2"]);
+  assert.ok(selection.protectedIds.includes("u1"), "neighboring user turn stays protected against cascading deletion");
+  assert.ok(selection.protectedIds.includes("m1"));
   assert.ok(selection.protectedIds.includes("memory-old"));
   assert.ok(!selection.targetIds.includes("memory-old"));
 });
@@ -285,4 +295,147 @@ test("marked summary/tool exchange does not consume one of the protected recent 
   assert.ok(selection.protectedIds.includes("archive"));
   assert.ok(selection.protectedIds.includes("u2"));
   assert.ok(selection.protectedIds.includes("u3"));
+});
+
+
+test("manual cleanup protects an older tool summary even without a memory marker", () => {
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("old-task","user"), mockTurn("old-thought","thought"), mockTurn("old-result","model"),
+    mockTurn("u2","user"), mockTurn("m2","model"),
+    mockTurn("u3","user"), mockTurn("m3","model")
+  ];
+  turns[2].textContent = "Summarize history [[SUJIU_SCOPE_V2:12345678-abcd]]";
+  turns[4].textContent = "Old summary without a marker";
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  assert.deepEqual(Array.from(plan.olderGroupIndices), [0, 2]);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","m2","u2","old-thought"]);
+  assert.ok(preview.protectedIds.includes("old-result"), "old summary reply is retained");
+  assert.ok(preview.protectedIds.includes("old-task"), "old summary command is kept to avoid cascading delete");
+  assert.equal(preview.protectedSummaryCount, 1);
+});
+
+test("unmarked structured summary is retained even if its user command looks ordinary", () => {
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("old-ask","user"), mockTurn("old-summary","model"),
+    mockTurn("u2","user"), mockTurn("m2","model")
+  ];
+  turns[2].textContent = "帮我概括一下吧";
+  turns[3].textContent = "【历史范围与时间锚点】\n前情\n【关键事件时间线】\n初遇和结盟";
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1"]);
+  assert.ok(preview.protectedIds.includes("old-summary"));
+  assert.ok(preview.protectedIds.includes("old-ask"));
+  assert.equal(plan.olderRounds, 1);
+});
+
+test("old marked compression keeps its model reply and prompt; only independent thinking may be removed", () => {
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("task","user"), mockTurn("think","thought"), mockTurn("memory","model"),
+    mockTurn("u2","user"), mockTurn("m2","model")
+  ];
+  turns[2].textContent = "[[SUJIU_SCOPE_V2:12345678-1111]] Summarize";
+  turns[4].textContent = "[[SUJIU_MEMORY_V1:12345678-1111]] Narrative memory";
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","think"]);
+  for (const id of ["task","memory"]) assert.ok(preview.protectedIds.includes(id));
+  assert.equal(preview.protectedSummaryCount, 1);
+});
+
+test("a new compression keeps old unmarked summaries and the newest result", () => {
+  const marker = "[[SUJIU_SCOPE_V2:12345678-2222]]";
+  const latestMemory = "[[SUJIU_MEMORY_V1:12345678-2222]]";
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("old-task","user"), mockTurn("old-summary","model"),
+    mockTurn("u2","user"), mockTurn("m2","model"),
+    mockTurn("recent","user"), mockTurn("recent-model","model"),
+    mockTurn("new-task","user"), mockTurn("new-thought","thought"), mockTurn("new-summary","model")
+  ];
+  turns[2].textContent = "历史整理 [[SUJIU_SCOPE_V2:12345678-1111]]";
+  turns[3].textContent = "Old content without memory marker";
+  turns[8].textContent = marker;
+  turns[10].textContent = latestMemory + " Latest scene";
+  const x = context(turns);
+  const plan = x.compactor.stage(latestMemory + " Latest scene", {
+    older: [{role:"user",text:"u1"}, {role:"model",text:"m1"},
+            {role:"user",text:turns[2].textContent}, {role:"model",text:turns[3].textContent},
+            {role:"user",text:"u2"}, {role:"model",text:"m2"}],
+    totalRounds:3, olderRounds:2, recentRounds:1
+  }, { marker });
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","m2","u2","new-thought"]);
+  assert.ok(preview.protectedIds.includes("old-summary"));
+  assert.ok(preview.protectedIds.includes("new-summary"));
+  assert.ok(preview.protectedIds.includes("old-task"));
+  assert.ok(preview.protectedIds.includes("new-task"));
+});
+
+test("a summary lacking a standalone thought delete menu keeps the thought", () => {
+  const marker = "[[SUJIU_SCOPE_V2:12345678-1111]]";
+  const turns = [
+    mockTurn("u1","user"),mockTurn("m1","model"),
+    mockTurn("task","user"),mockTurn("think","thought"),mockTurn("memory","model"),
+    mockTurn("u2","user"),mockTurn("m2","model")
+  ];
+  turns[2].textContent = marker;
+  turns[4].textContent = "[[SUJIU_MEMORY_V1:12345678-1111]] content";
+  turns[3].querySelector = () => null;
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1"]);
+  assert.ok(preview.protectedIds.includes("think"), "unremovable thought stays protected");
+  assert.equal(preview.skippedThoughts, 1);
+});
+
+
+test("manual cleanup can delete only independent archive thoughts without deleting any ordinary history", () => {
+  const turns = [
+    mockTurn("task","user"), mockTurn("think","thought"), mockTurn("memory","model"),
+    mockTurn("recent","user"), mockTurn("reply","model")
+  ];
+  turns[0].textContent = "Summarize [[SUJIU_SCOPE_V2:12345678-aaaa]]";
+  turns[2].textContent = "[[SUJIU_MEMORY_V1:12345678-aaaa]] Summary kept";
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  assert.equal(plan.olderRounds, 0);
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["think"]);
+  assert.ok(preview.protectedIds.includes("task"));
+  assert.ok(preview.protectedIds.includes("memory"));
+  assert.ok(preview.protectedIds.includes("recent"));
+  assert.ok(preview.protectedIds.includes("reply"));
+});
+
+
+test("repeated compression excludes earlier archive requests when counting protected recent rounds", () => {
+  const last = "[[SUJIU_SCOPE_V2:12345678-9999]]";
+  const turns = [
+    mockTurn("u1","user"), mockTurn("m1","model"),
+    mockTurn("old-tool","user"),mockTurn("old-archive","model"),
+    mockTurn("u2","user"),mockTurn("m2","model"),
+    mockTurn("u3","user"),mockTurn("m3","model"),
+    mockTurn("new-tool","user"),mockTurn("new-archive","model")
+  ];
+  turns[2].textContent="[[SUJIU_SCOPE_V2:12345678-aaaa]]";
+  turns[3].textContent="[[SUJIU_MEMORY_V1:12345678-aaaa]] First memory";
+  turns[8].textContent=last;
+  turns[9].textContent="[[SUJIU_MEMORY_V1:12345678-9999]] Second memory";
+  const x=context(turns);
+  const plan=x.compactor.stage(turns[9].textContent,{
+    totalRounds:3, olderRounds:1, recentRounds:2
+  },{marker:last});
+  const preview=x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds),["m1","u1"]);
+  for(const id of ["old-tool","old-archive","u2","m2","u3","m3","new-tool","new-archive"])
+    assert.ok(preview.protectedIds.includes(id),id+" must remain");
 });

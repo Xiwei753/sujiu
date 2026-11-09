@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.4.3
+// @version      0.4.4
 // @updateURL    https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @downloadURL  https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @description  AI Studio manual context compaction and history cleanup
@@ -13,7 +13,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.4.3", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.4.4", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -75,7 +75,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.4.3";
+    const SCRIPT_VERSION = "0.4.4";
 
     const state = {
         compressionInProgress: false,
@@ -884,11 +884,29 @@ const RoundSplitter = Object.freeze({
     // Pinned compaction memories can remain as standalone model messages
     // after their temporary tool prompts are removed. They are never counted
     // as conversational user/model rounds.
+    textOf(turn) {
+      return typeof turn?.text === "string" ? turn.text :
+        JSON.stringify(turn?.entry ?? "");
+    },
     isMemory(turn) {
       if (turn?.role !== "model") return false;
-      const content = typeof turn.text === "string" ? turn.text :
-        JSON.stringify(turn.entry?.[0] ?? "");
-      return /\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/i.test(content);
+      const content = this.textOf(turn);
+      if (/\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/i.test(content)) return true;
+      const headings = ["【历史范围与时间锚点】","【稳定设定与约束】",
+        "【人物与关系】","【关键事件时间线】","【重要状态变化】",
+        "【本段历史截点】","【连续性校验】","【未解决线索与悬而未决的信息】"];
+      return headings.filter(heading => content.includes(heading)).length >= 2 ||
+        /^(?:历史摘要|长期记忆|压缩记忆|剧情摘要)\s*[:：]/i.test(content.trim());
+    },
+    isCompressionPrompt(turn) {
+      if (turn?.role !== "user") return false;
+      const content = this.textOf(turn);
+      const excerpt = content.slice(0, 800);
+      return /\[\[SUJIU_SCOPE_V2:[a-z0-9-]{8,80}\]\]/i.test(content) ||
+        content.includes("你是负责长期会话连续性的记忆整理员") ||
+        (content.includes("历史范围与时间锚点") && content.includes("关键事件时间线")) ||
+        (/(?:摘要|总结|梳理|压缩|归纳|概括)/.test(excerpt) &&
+         /(?:前文|历史|剧情|对话|聊天|情节|记忆|人物关系|时间线|之前发生|已有内容)/.test(excerpt));
     },
     partition(turns, keepRounds = 8) {
       if (!Array.isArray(turns) || !Number.isSafeInteger(keepRounds) || keepRounds < 1) {
@@ -901,7 +919,12 @@ const RoundSplitter = Object.freeze({
         if (!current.some(turn => turn.role === "model")) {
           throw new Error("Conversation contains an incomplete response");
         }
-        units.push({ kind: "round", turns: current });
+        // Tool-generated summary exchanges are archived history, not
+        // normal roleplay turns. They must never consume any of the N recent
+        // ordinary dialogue rounds kept during a later manual cleanup.
+        units.push({ kind: (RoundSplitter.isCompressionPrompt(current[0]) ||
+          current.some(turn => RoundSplitter.isMemory(turn))) ? "memory" : "round",
+                     turns: current });
         current = null;
       }
       for (const turn of turns) {
@@ -1595,6 +1618,48 @@ const RoundSplitter = Object.freeze({
             return "unknown";
         }
 
+        // Fail closed when an older archive has lost its exact memory marker.
+        // Older plugin versions and model responses may not have a working
+        // [[SUJIU_MEMORY_V1:...]] label, but the reply is still user history.
+        function isArchiveReply(turn) {
+            if (normalizeType(turn) !== "model") return false;
+            const text = String(turn.textContent || "");
+            if (CompactionTask.isPinnedSummary(text)) return true;
+            const headings = [
+                "【历史范围与时间锚点】", "【稳定设定与约束】",
+                "【人物与关系】", "【关键事件时间线】",
+                "【重要状态变化】", "【本段历史截点】",
+                "【连续性校验】", "【未解决线索与悬而未决的信息】"
+            ];
+            const count = headings.filter(heading => text.includes(heading)).length;
+            return count >= 2 || /^(?:历史摘要|长期记忆|压缩记忆|剧情摘要)\s*[:：]/i.test(text.trim());
+        }
+
+        function isArchiveRequest(turn) {
+            if (normalizeType(turn) !== "user") return false;
+            const text = String(turn.textContent || "");
+            const excerpt = text.slice(0, 800);
+            return /\[\[SUJIU_SCOPE_V2:/i.test(text) ||
+                // Legacy and user-authored summary instructions can lack a marker.
+                text.includes("你是负责长期会话连续性的记忆整理员") ||
+                (text.includes("历史范围与时间锚点") &&
+                 text.includes("关键事件时间线")) ||
+                (/(?:摘要|总结|梳理|压缩|归纳|概括)/.test(excerpt) &&
+                 /(?:前文|历史|剧情|对话|聊天|情节|记忆|人物关系|时间线|之前发生|已有内容)/.test(excerpt));
+        }
+
+        function isArchiveGroup(group) {
+            return group?.kind === "round" &&
+                (isArchiveRequest(group.turns[0]) ||
+                 group.turns.some(isArchiveReply));
+        }
+
+        function hasIndependentDeleteMenu(turn) {
+            return Boolean(turn.querySelector(
+                "ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"
+            ));
+        }
+
         // Use every rendered native turn, including thought blocks. An
         // incomplete / virtualized DOM is never safe for destructive changes.
         function collectGroups(turns) {
@@ -1606,8 +1671,7 @@ const RoundSplitter = Object.freeze({
                     groups.push({ turns: [turn], hasModel: false, kind: "round" });
                 } else {
                     const group = groups[groups.length - 1];
-                    const hasMemory = type === "model" &&
-                        CompactionTask.isPinnedSummary(turn.textContent || "");
+                    const hasMemory = type === "model" && isArchiveReply(turn);
                     const toolPrompt = group?.turns?.[0]?.textContent?.includes("[[SUJIU_SCOPE_V2:");
                     if (hasMemory && (!group || (group.hasModel && !toolPrompt))) {
                         groups.push({ turns: [turn], hasModel: true, kind: "memory" });
@@ -1628,30 +1692,14 @@ const RoundSplitter = Object.freeze({
             if (!snapshot?.trim()) throw new Error("摘要为空，无法压缩");
             // Previously generated memories are pinned. Never select
             // their own model replies for deletion in a later compression.
+            // Archive classification is verified against the live DOM during
+            // preflight. A serialized user index is not a safe deletion index
+            // when previous compression exchanges are excluded from N rounds.
             const pinnedOlderRounds = [];
-            const pinnedMemoryTexts = [];
-            let roundIndex = -1;
-            let currentUser = "";
-            let currentHasModel = false;
-            for (const turn of split.older || []) {
-                if (turn.role === "user") {
-                    roundIndex++;
-                    currentUser = String(turn.text || "");
-                    currentHasModel = false;
-                } else if (turn.role === "model") {
-                    const isPinned = CompactionTask.isPinnedSummary(turn.text || "");
-                    if (isPinned) {
-                        pinnedMemoryTexts.push(String(turn.text).trim());
-                        const isStandalone = currentHasModel &&
-                            !currentUser.includes("[[SUJIU_SCOPE_V2:");
-                        if (!isStandalone && roundIndex >= 0 &&
-                            !pinnedOlderRounds.includes(roundIndex)) {
-                            pinnedOlderRounds.push(roundIndex);
-                        }
-                    }
-                    currentHasModel = true;
-                }
-            }
+            const pinnedMemoryTexts = (split.older || [])
+                .filter(turn => turn.role === "model" &&
+                    CompactionTask.isPinnedSummary(String(turn.text || "")))
+                .map(turn => String(turn.text).trim());
             pending = {
                 pinnedOlderRounds,
                 pinnedMemoryTexts,
@@ -1681,25 +1729,23 @@ const RoundSplitter = Object.freeze({
             const turns = [...document.querySelectorAll("ms-chat-turn")];
             const groups = collectGroups(turns);
             const regular = groups.filter(group => group.kind !== "memory");
-            // A tool-generated summary is a memory record, not one of the
-            // user's recent N conversational rounds.
-            const isToolRound = group => {
-                const user = group.turns[0];
-                return normalizeType(user) === "user" &&
-                    (user.textContent || "").includes("[[SUJIU_SCOPE_V2:") &&
-                    group.turns.some(turn => normalizeType(turn) === "model" &&
-                        CompactionTask.isPinnedSummary(turn.textContent || ""));
-            };
+            // Historical compression requests and their replies never count
+            // towards the user's recent N normal dialogue rounds. This holds
+            // even if the model forgot to emit the memory marker.
+            const archiveIndices = regular.flatMap((group, index) =>
+                isArchiveGroup(group) ? [index] : []);
             const chatIndices = regular.flatMap((group, index) =>
-                isToolRound(group) ? [] : [index]);
-            if (chatIndices.length <= keepRounds) {
+                isArchiveGroup(group) ? [] : [index]);
+            const hasOldArchiveThoughts = archiveIndices.some(index =>
+                regular[index].turns.some(turn =>
+                    normalizeType(turn) === "thought" && hasIndependentDeleteMenu(turn)));
+            if (chatIndices.length <= keepRounds && !hasOldArchiveThoughts) {
                 throw new Error("当前只有 " + chatIndices.length +
-                    " 轮普通对话，没有超出保留范围的历史");
+                    " 轮普通对话，没有超出保留范围的历史，也没有可独立清理的压缩思考块");
             }
-            const olderGroupIndices = chatIndices.slice(0, -keepRounds);
-            const pinnedOlderRounds = olderGroupIndices.filter(index =>
-                regular[index].turns.some(turn => normalizeType(turn) === "model" &&
-                    CompactionTask.isPinnedSummary(turn.textContent || "")));
+            const olderGroupIndices = chatIndices.slice(
+                0, Math.max(0, chatIndices.length - keepRounds));
+            const pinnedOlderRounds = archiveIndices;
             const plan = {
                 manual: true,
                 promptId, snapshot: "", marker: null, memoryMarker: null,
@@ -1727,7 +1773,7 @@ const RoundSplitter = Object.freeze({
             assertSupportedEntries(capture.entries, extractResolvedTurns(capture.entries));
             const turns = extractResolvedTurns(capture.entries);
             const users = turns.filter(turn => turn.role === "user");
-            if (users.length !== plan.totalRounds + 1) {
+            if (users.length < plan.totalRounds + 1) {
                 throw new Error("会话轮数与生成摘要前不一致，请刷新后重新生成摘要");
             }
             const latest = findSavedSummary(turns, plan.promptId);
@@ -1748,33 +1794,61 @@ const RoundSplitter = Object.freeze({
             const turns = [...document.querySelectorAll("ms-chat-turn")];
             const groups = collectGroups(turns);
             const regular = groups.filter(group => group.kind !== "memory");
-            const expected = plan.totalRounds + (plan.manual ? 0 : 1);
-            if (regular.length !== expected) {
+            const dialogueIndices = regular.flatMap((group, index) =>
+                isArchiveGroup(group) ? [] : [index]);
+            const actual = plan.manual ? regular.length : dialogueIndices.length;
+            if (actual !== plan.totalRounds) {
                 throw new Error("网页历史轮次已改变（检测到 " +
-                    regular.length + "，预期 " + expected + "），请重新操作");
+                    actual + "，预期 " + plan.totalRounds + "），请重新操作");
             }
             if (plan.manual && (turns.length !== plan.domIds.length ||
                 turns.some((turn, index) => !turn.id || turn.id !== plan.domIds[index]))) {
                 throw new Error("网页聊天节点在准备期间发生变化，请重新点击清理");
             }
-            const pinned = new Set(plan.pinnedOlderRounds || []);
             const getRole = turn => normalizeType(turn);
-            for (const index of pinned) {
+            const inferredArchiveIndices = regular.flatMap((group, index) =>
+                isArchiveGroup(group) ? [index] : []);
+            const pinned = new Set([
+                ...(plan.pinnedOlderRounds || []),
+                ...inferredArchiveIndices
+            ]);
+            // If an old prompt has already been removed, its summary becomes
+            // a standalone MODEL message. The immediately preceding exchange
+            // might still be linked to it by Google's native delete action.
+            // Preserve that neighbor rather than risk a cascading deletion.
+            for (let index = 1; index < groups.length; index++) {
+                if (groups[index].kind !== "memory") continue;
+                const previous = groups[index - 1];
+                const previousIndex = regular.indexOf(previous);
+                if (previousIndex >= 0) pinned.add(previousIndex);
+            }
+            for (const index of plan.pinnedOlderRounds || []) {
                 if (index < 0 || index >= regular.length ||
-                    (plan.manual && !plan.olderGroupIndices.includes(index)) ||
-                    !regular[index]?.turns?.some(turn =>
-                        getRole(turn) === "model" &&
-                        CompactionTask.isPinnedSummary(turn.textContent || ""))) {
+                    !isArchiveGroup(regular[index])) {
                     throw new Error("历史压缩记忆与网页消息位置不一致，拒绝删除");
                 }
             }
+            if (plan.marker && plan.memoryMarker) {
+                const latest = regular[regular.length - 1];
+                if (!latest || !isArchiveRequest(latest.turns[0]) ||
+                    !String(latest.turns[0].textContent || "").includes(plan.marker) ||
+                    !latest.turns.some(turn => getRole(turn) === "model" &&
+                        String(turn.textContent || "").includes(plan.memoryMarker))) {
+                    throw new Error("最新摘要的永久记忆标识缺失，已拒绝任何删除");
+                }
+            }
 
-            // Regular old exchanges can be removed; completed summary rounds
-            // are pinned in their entirety, so their visible memory survives.
+            // The visible summary is more important than cleaning its prompt.
+            // Native AI Studio deletion of a USER turn may cascade to the
+            // paired MODEL reply. Therefore never auto-delete a summary's
+            // user prompt until independent deletion semantics are verified.
             const targetTurns = [];
             const ignoredOldThoughts = new Set();
             const olderIndices = plan.manual ? plan.olderGroupIndices :
-                Array.from({ length: plan.olderRounds }, (_, i) => i);
+                dialogueIndices.slice(0, Math.max(0, dialogueIndices.length - plan.recentRounds));
+            if (olderIndices.length !== plan.olderRounds) {
+                throw new Error("普通对话与压缩记录的轮次边界不一致，已停止删除");
+            }
             for (const i of olderIndices) {
                 if (pinned.has(i)) continue;
                 for (const turn of [...regular[i].turns].reverse()) {
@@ -1790,32 +1864,25 @@ const RoundSplitter = Object.freeze({
                 }
             }
 
-            // The newest summary is pinned by a separate marker on the MODEL
-            // reply. The tool's temporary USER instruction and independent
-            // thought cards are eligible for cleanup; never target its reply.
-            const lastGroup = regular[regular.length - 1];
+            // All archive replies are protected, including old ones without
+            // markers and the current summary. Only independently deletable
+            // thought blocks are eligible for cleanup. Never delete the
+            // compression user prompt: some Google versions remove the reply
+            // along with it, irreversibly destroying the archive.
             let skippedThoughts = 0;
-            if (plan.marker && plan.memoryMarker) {
-                const user = lastGroup.turns[0];
-                const memoryNodes = lastGroup.turns.filter(turn =>
-                    getRole(turn) === "model" &&
-                    (turn.textContent || "").includes(plan.memoryMarker));
-                if (getRole(user) !== "user" ||
-                    !(user.textContent || "").includes(plan.marker) ||
-                    !memoryNodes.length) {
-                    throw new Error("当前压缩摘要没有可见的永久标识，拒绝清理工具消息");
+            for (const group of groups) {
+                if (!isArchiveGroup(group)) continue;
+                if (!group.turns.some(turn => getRole(turn) === "model")) {
+                    throw new Error("检测到缺少可见回复的历史压缩记录，停止清理");
                 }
-                // Thought cards embedded inside a model response cannot be
-                // removed independently without risking the summary itself.
-                for (const turn of lastGroup.turns.slice(1)) {
+                for (const turn of group.turns) {
                     if (getRole(turn) !== "thought") continue;
-                    if (turn.querySelector("ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol")) {
+                    if (hasIndependentDeleteMenu(turn)) {
                         targetTurns.push(turn);
                     } else {
                         skippedThoughts++;
                     }
                 }
-                targetTurns.push(user);
             }
 
             const targetIds = targetTurns.map(turn => turn.id);
@@ -1834,11 +1901,13 @@ const RoundSplitter = Object.freeze({
                 throw new Error("待删除消息缺少独立的原生删除操作，拒绝执行");
             }
             const deletedUserCount = targetTurns.filter(turn => getRole(turn) === "user").length;
-            const deletedOldRounds = plan.olderRounds - pinned.size;
+            const deletedOldRounds = olderIndices.filter(i => !pinned.has(i)).length;
             return {
                 targetIds,
                 protectedIds: protectedTurns.map(turn => turn.id),
                 deletedUserCount, deletedOldRounds, pinnedCount: pinned.size,
+                protectedSummaryCount: inferredArchiveIndices.length +
+                    groups.filter(group => group.kind === "memory").length,
                 skippedThoughts, groups: groups.length, items: targetIds.length
             };
         }
@@ -1908,13 +1977,18 @@ const RoundSplitter = Object.freeze({
             const preview = preflightDom(plan);
             const prompt = (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
                 preview.deletedOldRounds + " 轮旧历史" +
-                (preview.pinnedCount ? "（已保护 " + preview.pinnedCount + " 条旧压缩记忆）" : "") +
-                (plan.memoryMarker ? "，并清理本次工具指令及可独立删除的思考块" : "") +
-                "。保留最近 " + plan.recentRounds + " 轮与已标记摘要。" +
-                (plan.manual ? "本次不依赖新摘要；未标记的旧摘要可能按普通历史删除。" : "") +
+                "，保护 " + preview.protectedSummaryCount + " 条已识别的压缩摘要" +
+                "，清理可独立删除的压缩思维链。" +
+                "为避免 Google 联动删除摘要，压缩指令暂时保留。" +
+                "最近 " + plan.recentRounds + " 轮普通对话会保留。" +
+                "无法识别的历史摘要仍需人工核对。" +
                 (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                     " 个无法独立删除的思考块会保留。" : "") +
                 "删除操作使用 AI Studio 原生消息菜单，Google 会自行自动保存。全部删除后统一等待保存响应。该操作不可撤销，继续？";
+            if (!preview.items) {
+                PromptPanel.status("没有可安全删除的旧对话或独立思考块。压缩摘要和对应指令均已保护。");
+                return;
+            }
             if (!confirm(prompt)) return;
             deleting = true;
             state.branchInProgress = true;
