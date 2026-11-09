@@ -80,3 +80,15 @@ const test = (await import("node:test")).default;
     assert.equal(result.pinnedMemories, 1);
     assert.equal(result.recent[0].text, "user 2");
   });
+
+  test("unmarked legacy summary and custom request stay outside ordinary N-round accounting", () => {
+    const source = make(3);
+    source.splice(2, 0,
+      {role:"user",text:"请总结之前的剧情，方便继续"},
+      {role:"model",text:"【历史范围与时间锚点】前情【关键事件时间线】初遇"});
+    const result = splitter.partition(source, 2);
+    assert.equal(result.totalRounds, 3);
+    assert.equal(result.olderRounds, 1);
+    assert.equal(result.pinnedMemories, 1);
+    assert.equal(result.recent[0].text, "user 1");
+  });
