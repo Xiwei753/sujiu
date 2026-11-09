@@ -43,11 +43,14 @@
         function isArchiveRequest(turn) {
             if (normalizeType(turn) !== "user") return false;
             const text = String(turn.textContent || "");
+            const excerpt = text.slice(0, 800);
             return /\[\[SUJIU_SCOPE_V2:/i.test(text) ||
-                // Legacy default compaction instructions have no marker.
-                (text.includes("你是负责长期会话连续性的记忆整理员") ||
-                 (text.includes("历史范围与时间锚点") &&
-                  text.includes("关键事件时间线")));
+                // Legacy and user-authored summary instructions can lack a marker.
+                text.includes("你是负责长期会话连续性的记忆整理员") ||
+                (text.includes("历史范围与时间锚点") &&
+                 text.includes("关键事件时间线")) ||
+                (/(?:摘要|总结|梳理|压缩|归纳|概括)/.test(excerpt) &&
+                 /(?:前文|历史|剧情|对话|聊天|情节|记忆|人物关系|时间线|之前发生|已有内容)/.test(excerpt));
         }
 
         function isArchiveGroup(group) {
