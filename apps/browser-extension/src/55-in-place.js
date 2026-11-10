@@ -663,7 +663,7 @@
                     if (Branching.getCurrentPromptId() !== plan.promptId) {
                         throw new Error("清理过程中会话已经切换");
                     }
-                    lastDeletionStartedAt = Date.now();
+                    const attemptStartedAt = Date.now();
                     let result;
                     try {
                         result = await deleteOne(id, Boolean(plan.thoughtOnly));
@@ -671,8 +671,10 @@
                         result = { deleted: false,
                             reason: String(error?.message || error) };
                     }
-                    if (result?.deleted) processed++;
-                    else {
+                    if (result?.deleted) {
+                        processed++;
+                        lastDeletionStartedAt = attemptStartedAt;
+                    } else {
                         skipped++;
                         log.ui("Skipping undeletable native turn", id,
                             result?.reason || "unknown");
