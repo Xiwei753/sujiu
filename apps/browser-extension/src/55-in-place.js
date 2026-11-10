@@ -79,7 +79,7 @@
             return match ? match[1].toLowerCase() : null;
         }
 
-        function temporaryTasksWithReplies(turns) {
+        function temporaryTasks(turns) {
             const tasks = [];
             for (let index = 0; index < turns.length; index++) {
                 const turn = turns[index];
@@ -99,7 +99,7 @@
                         break;
                     }
                 }
-                if (reply) tasks.push({ prompt: turn, reply });
+                tasks.push({ prompt: turn, reply });
             }
             return tasks;
         }
@@ -276,7 +276,7 @@
             const hasOldArchiveThoughts = archiveIndices.some(index =>
                 regular[index].turns.some(turn =>
                     normalizeType(turn) === "thought" && hasIndependentDeleteMenu(turn)));
-            const hasTemporaryTasks = temporaryTasksWithReplies(turns).some(item =>
+            const hasTemporaryTasks = temporaryTasks(turns).some(item =>
                 hasIndependentDeleteMenu(item.prompt));
             if (chatIndices.length <= keepRounds &&
                 !hasOldArchiveThoughts && !hasTemporaryTasks) {
@@ -373,7 +373,7 @@
                     if (hasIndependentDeleteMenu(turn)) deletable.push(turn);
                     else skippedThoughts++;
                 }
-                const temporary = temporaryTasksWithReplies(turns);
+                const temporary = temporaryTasks(turns);
                 const disposablePrompts = temporary
                     .filter(item => hasIndependentDeleteMenu(item.prompt))
                     .map(item => item.prompt);
@@ -499,7 +499,7 @@
                 }
             }
 
-            const temporary = temporaryTasksWithReplies(turns);
+            const temporary = temporaryTasks(turns);
             const disposablePrompts = temporary
                 .filter(item => hasIndependentDeleteMenu(item.prompt))
                 .map(item => item.prompt);
@@ -574,12 +574,6 @@
             }
             if (type === "user" && isArchiveRequest(turn) && !isTask) {
                 return { deleted: false, reason: "人工摘要请求保持原样" };
-            }
-            if (isTask && !temporaryTasksWithReplies(
-                [...document.querySelectorAll("ms-chat-turn")]
-            ).some(item => item.prompt.id === id &&
-                document.getElementById(item.reply.id)?.isConnected)) {
-                return { deleted: false, reason: "没有找到仍然存在的对应模型摘要" };
             }
             const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
                 turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
