@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 const source = await readFile(new URL("../src/55-in-place.js", import.meta.url), "utf8");
+const roundsSource = await readFile(new URL("../src/35-rounds.js", import.meta.url), "utf8");
 function mockTurn(id, type) {
   return {
     id,
@@ -20,7 +21,12 @@ function context(turns) {
   const ctx = {
     document: { querySelectorAll: selector => selector === "ms-chat-turn" ? turns : [] },
     Branching: { getCurrentPromptId() { return "chat-test"; } },
-    CompactionTask: { isPinnedSummary: text => /\[\[SUJIU_MEMORY_V1:/.test(text), memoryMarker: marker => marker.replace("SCOPE_V2", "MEMORY_V1") },
+    CompactionTask: {
+      isPinnedSummary: text => /\[\[SUJIU_MEMORY_V1:/.test(text),
+      memoryMarker: marker => marker.replace("SCOPE_V2", "MEMORY_V1"),
+      getMemoryMarkers: text => [...String(text).matchAll(/\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/gi)]
+        .map(match => match[0])
+    },
     SaveMonitor: { attempts: 0, latest: null },
     PromptPanel: { showCompactionReview(p) { preview = p; }, status() {} },
     state: { branchInProgress: false },
@@ -32,6 +38,7 @@ function context(turns) {
     setTimeout,
     Promise
   };
+  ctx.RoundSplitter = vm.runInNewContext(roundsSource + "\nRoundSplitter", {});
   const compactor = vm.runInNewContext(source + "\nInPlaceCompaction", ctx);
   return { compactor, get preview() { return preview; }, get confirmationCalls() { return confirmationCalls; } };
 }
@@ -480,4 +487,81 @@ test("orphaned XML summary and its predecessor stay protected during another com
   for (const id of ["u1","m1","old-memory","u2","m2","latest-task","latest-memory"]) {
     assert.ok(preview.protectedIds.includes(id),id+" must survive");
   }
+});
+
+test("three compression generations are preserved by a cloud-verified inventory", () => {
+  const turns = [
+    mockTurn("old-u", "user"), mockTurn("old-m", "model"),
+    mockTurn("task-a", "user"), mockTurn("memory-a", "model"),
+    mockTurn("middle-u", "user"), mockTurn("middle-m", "model"),
+    mockTurn("task-b", "user"), mockTurn("memory-b", "model"),
+    mockTurn("recent-u", "user"), mockTurn("recent-m", "model"),
+    mockTurn("task-c", "user"), mockTurn("memory-c", "model")
+  ];
+  for (const [i, suffix] of ["aaaa", "bbbb", "cccc"].entries()) {
+    turns[[2, 6, 10][i]].textContent = "[[SUJIU_SCOPE_V2:12345678-" + suffix + "]]";
+    turns[[3, 7, 11][i]].textContent = "[[SUJIU_MEMORY_V1:12345678-" + suffix + "]] Memory " + suffix;
+  }
+  const x = context(turns);
+  const plan = x.compactor.planManualCleanup(1);
+  const inventory = x.compactor.archiveInventory(turns,
+    turn => turn.getAttribute("data-turn-type"), turn => turn.textContent);
+  assert.equal(inventory.markers.size, 3);
+  const selection = x.compactor.preflightDom(plan, inventory);
+  for (const id of ["task-a", "memory-a", "task-b", "memory-b", "task-c", "memory-c"]) {
+    assert.ok(selection.protectedIds.includes(id), id + " remains pinned");
+  }
+  assert.equal(selection.protectedSummaryCount, 3);
+  assert.deepEqual(Array.from(selection.targetIds), ["old-m","old-u","middle-m","middle-u"]);
+});
+
+test("missing one cloud-saved archive blocks manual cleanup before any deletion", () => {
+  const turns = [
+    mockTurn("old-u", "user"), mockTurn("old-m", "model"),
+    mockTurn("task-a", "user"), mockTurn("memory-a", "model"),
+    mockTurn("recent-u", "user"), mockTurn("recent-m", "model")
+  ];
+  turns[2].textContent = "[[SUJIU_SCOPE_V2:12345678-aaaa]]";
+  turns[3].textContent = "[[SUJIU_MEMORY_V1:12345678-aaaa]] Old summary";
+  const x = context(turns);
+  const expected = x.compactor.archiveInventory([
+    ...turns,
+    {role:"model", text:"[[SUJIU_MEMORY_V1:12345678-bbbb]] Hidden old summary"}
+  ], turn => turn.role || turn.getAttribute("data-turn-type"),
+    turn => turn.text || turn.textContent);
+  assert.equal(expected.markers.size, 2);
+  assert.throws(() => x.compactor.preflightDom(x.compactor.planManualCleanup(1), expected),
+    /云端与网页的历史压缩摘要不一致/);
+});
+
+test("a marker quoted in a user message cannot fake a protected model result", () => {
+  const x = context([]);
+  const user = {role:"user",text:"[[SUJIU_MEMORY_V1:12345678-aaaa]]"};
+  const a = x.compactor.archiveInventory([user], turn=>turn.role,turn=>turn.text);
+  assert.equal(a.markers.size, 0);
+  const model = {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-aaaa]]"};
+  const b = x.compactor.archiveInventory([user,model],turn=>turn.role,turn=>turn.text);
+  assert.equal(b.markers.size, 1);
+});
+
+test("old unmarked archive records must also match the cloud inventory", () => {
+  const x = context([]);
+  const cloud = x.compactor.archiveInventory([
+    {role:"user",text:"Summarize earlier conversation"},
+    {role:"model",text:"【稳定设定】A\n【已发生的关键事件】B"}
+  ], turn=>turn.role, turn=>turn.text);
+  const page = x.compactor.archiveInventory([
+    {role:"user",text:"Summarize earlier conversation"},
+    {role:"model",text:"unmarked plain reply"}
+  ], turn=>turn.role, turn=>turn.text);
+  assert.throws(()=>x.compactor.verifyArchiveInventory(cloud,page),
+    /云端与网页的历史压缩摘要不一致/);
+});
+
+test("autosave completion must be followed by cloud archive verification", () => {
+  const code = source.slice(source.indexOf("async function commit("),source.indexOf("function cancel()"));
+  assert.match(code,/const savedInventory = await readSavedArchiveInventory\(plan.promptId\)/);
+  assert.match(code,/preflightDom\(plan, savedInventory\)/);
+  assert.match(code,/const afterInventory = await readSavedArchiveInventory\(plan.promptId\)/);
+  assert.match(code,/verifyArchiveInventory\(savedInventory, afterInventory\)/);
 });
