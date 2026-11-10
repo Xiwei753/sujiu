@@ -276,7 +276,7 @@ test("manual cleanup path skips generated-summary verification, but still requir
   const code = source.slice(source.indexOf("async function commit("), source.indexOf("function cancel()"));
   assert.match(code, /if \(!plan\.manual\) await verifyPersistedSummary\(plan\)/);
   assert.match(code, /if \(!confirm\(prompt\)\) return/);
-  assert.match(code, /const preview = preflightDom\(plan\)/);
+  assert.match(code, /const preview = preflightDom\(plan, savedInventory\)/);
   assert.match(source, /async function manualCleanup\(\)/);
 });
 
