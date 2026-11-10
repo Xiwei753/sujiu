@@ -87,7 +87,7 @@ const PromptPanel = (() => {
         line(action("读取已完成摘要", "recover-summary"), action("停止插件监听", "stop-tracking")),
         line(action("直接清理旧历史", "cleanup-history")),
         line(action("清理全部思维链", "cleanup-thoughts")),
-        make("p", { className: "hint", text: "清理全部思维链将删除当前会话中所有可独立删除的 Thinking 块，包括最近的轮次；普通对话、联网搜索记录和所有压缩摘要均保留。" }),
+        make("p", { className: "hint", text: "清理全部思维链会删除独立 Thinking 块以及素酒自动发送的临时摘要指令；模型生成的摘要正文、普通对话和联网搜索记录均保留。无法删除的单条消息会跳过。" }),
         make("p", { className: "hint", text: "清理历史可以单独使用：按保留轮数删除较早的完整对话，已标记压缩记忆会保留。无需先生成或读取摘要；清理前会显示数量让你确认。" }),
         make("div", { id: "inplace-review", hidden: true }, [
           make("label", { text: "摘要预览（已写入原聊天）" }),

@@ -70,6 +70,40 @@
                  group.turns.some(isArchiveReply));
         }
 
+        // The USER scope marker is a disposable plugin-generated task.
+        // Only the MODEL memory marker denotes a persistent summary.
+        function temporaryTaskId(turn) {
+            if (normalizeType(turn) !== "user") return null;
+            const match = String(turn.textContent || "").match(
+                /\[\[SUJIU_SCOPE_V2:([a-z0-9-]{8,80})\]\]/i);
+            return match ? match[1].toLowerCase() : null;
+        }
+
+        function temporaryTasks(turns) {
+            const tasks = [];
+            for (let index = 0; index < turns.length; index++) {
+                const turn = turns[index];
+                const id = temporaryTaskId(turn);
+                if (!id) continue;
+                let reply = null;
+                for (let next = index + 1; next < turns.length; next++) {
+                    const candidate = turns[next];
+                    const type = normalizeType(candidate);
+                    if (type === "user") break;
+                    if (type !== "model") continue;
+                    const text = String(candidate.textContent || "");
+                    if (text.toLowerCase().includes(
+                        "[[sujiu_memory_v1:" + id + "]]") ||
+                        isArchiveReply(candidate)) {
+                        reply = candidate;
+                        break;
+                    }
+                }
+                tasks.push({ prompt: turn, reply });
+            }
+            return tasks;
+        }
+
         // Stable memory markers live in Google-saved message text. We cannot
         // assume AI Studio persists custom private message metadata. Build a
         // full archive inventory from the saved transcript, not just the
@@ -103,9 +137,11 @@
             const allMarkersMatch = expected.markers.size === actual.markers.size &&
                 [...expected.markers].every(([marker, count]) =>
                     actual.markers.get(marker) === count);
+            // SUJIU_SCOPE_V2 user requests are deliberately disposable.
+            // Only model summaries (marked or recognized legacy replies)
+            // must remain after cleanup.
             if (!allMarkersMatch ||
-                expected.legacyReplies !== actual.legacyReplies ||
-                expected.compressionRequests !== actual.compressionRequests) {
+                expected.legacyReplies !== actual.legacyReplies) {
                 throw new Error("Google 保存的历史压缩摘要记录与此前读取结果不一致");
             }
         }
@@ -132,6 +168,9 @@
                     .filter(entry => !isThoughtOnlyTurn({
                         role: entry[8], entry
                     }))
+                    .filter(entry => !(entry[8] === "user" &&
+                        /\[\[SUJIU_SCOPE_V2:[a-z0-9-]{8,80}\]\]/i.test(
+                            String(extractResolvedEntryText(entry) || ""))))
                     .map(entry => {
                         const text = extractResolvedEntryText(entry);
                         // Preserve unrecognized tool messages and error
@@ -237,7 +276,10 @@
             const hasOldArchiveThoughts = archiveIndices.some(index =>
                 regular[index].turns.some(turn =>
                     normalizeType(turn) === "thought" && hasIndependentDeleteMenu(turn)));
-            if (chatIndices.length <= keepRounds && !hasOldArchiveThoughts) {
+            const hasTemporaryTasks = temporaryTasks(turns).some(item =>
+                hasIndependentDeleteMenu(item.prompt));
+            if (chatIndices.length <= keepRounds &&
+                !hasOldArchiveThoughts && !hasTemporaryTasks) {
                 throw new Error("当前只有 " + chatIndices.length +
                     " 轮普通对话，没有超出保留范围的历史，也没有可独立清理的压缩思考块");
             }
@@ -331,6 +373,13 @@
                     if (hasIndependentDeleteMenu(turn)) deletable.push(turn);
                     else skippedThoughts++;
                 }
+                const temporary = temporaryTasks(turns);
+                const disposablePrompts = temporary
+                    .filter(item => hasIndependentDeleteMenu(item.prompt))
+                    .map(item => item.prompt);
+                // Remove thinking first; then the script's temporary USER
+                // request. The paired MODEL summary is never a deletion target.
+                deletable.push(...disposablePrompts);
                 const targetIds = deletable.map(turn => turn.id);
                 if (targetIds.some(id => !id) ||
                     new Set(targetIds).size !== targetIds.length) {
@@ -348,8 +397,11 @@
                             .reduce((total, count) => total + count, 0) +
                             visible.legacyReplies;
                     })(),
-                    skippedThoughts, items: targetIds.length,
-                    deletedOldRounds: 0, deletedUserCount: 0
+                    skippedThoughts,
+                    skippedPrompts: temporary.length - disposablePrompts.length,
+                    items: targetIds.length,
+                    deletedOldRounds: 0,
+                    deletedUserCount: disposablePrompts.length
                 };
             }
 
@@ -428,11 +480,9 @@
                 }
             }
 
-            // All archive replies are protected, including old ones without
-            // markers and the current summary. Only independently deletable
-            // thought blocks are eligible for cleanup. Never delete the
-            // compression user prompt: some Google versions remove the reply
-            // along with it, irreversibly destroying the archive.
+            // Archive MODEL replies are permanent. The corresponding
+            // SUJIU_SCOPE_V2 USER requests are temporary and are removable
+            // with their independent thinking nodes.
             let skippedThoughts = 0;
             for (const group of groups) {
                 if (!isArchiveGroup(group)) continue;
@@ -449,6 +499,12 @@
                 }
             }
 
+            const temporary = temporaryTasks(turns);
+            const disposablePrompts = temporary
+                .filter(item => hasIndependentDeleteMenu(item.prompt))
+                .map(item => item.prompt);
+            // Remove thinking first, then temporary auto-generated prompts.
+            targetTurns.push(...disposablePrompts);
             const targetIds = targetTurns.map(turn => turn.id);
             if (targetIds.some(id => !id) || new Set(targetIds).size !== targetIds.length) {
                 throw new Error("待删除消息缺少稳定 ID，拒绝执行");
@@ -472,7 +528,9 @@
                 deletedUserCount, deletedOldRounds, pinnedCount: pinned.size,
                 protectedSummaryCount: inferredArchiveIndices.length +
                     groups.filter(group => group.kind === "memory").length,
-                skippedThoughts, groups: groups.length, items: targetIds.length
+                skippedThoughts,
+                skippedPrompts: temporary.length - disposablePrompts.length,
+                groups: groups.length, items: targetIds.length
             };
         }
 
@@ -501,43 +559,44 @@
 
         async function deleteOne(id, thoughtOnly = false) {
             const turn = document.getElementById(id);
-            if (!turn || !turn.isConnected) return;
-            // Inspect the live turn immediately before opening Google's
-            // destructive native menu. A stale ID must never target a reply.
-            if (thoughtOnly && normalizeType(turn) !== "thought") {
-                throw new Error("待删除的思维链已经变成其他消息类型，已停止");
+            if (!turn || !turn.isConnected) {
+                return { deleted: false, reason: "目标消息已不在页面" };
             }
-            // Never allow an explicitly marked memory or its tool prompt
-            // through the regular deletion path, even if the DOM changed
-            // since planning.
-            if (!thoughtOnly && /\[\[SUJIU_(?:MEMORY_V1|SCOPE_V2):/i.test(
-                String(turn.textContent || ""))) {
-                throw new Error("目标带有素酒永久记忆标识，已跳过删除");
+            const type = normalizeType(turn);
+            const isTask = Boolean(temporaryTaskId(turn));
+            if (thoughtOnly && type !== "thought" && !isTask) {
+                return { deleted: false, reason: "目标已变为其他消息类型" };
+            }
+            // Only the model's result is permanent. Reject old summaries
+            // even if the current DOM no longer groups them with their task.
+            if (type === "model" && isArchiveReply(turn)) {
+                return { deleted: false, reason: "模型摘要受保护" };
+            }
+            if (type === "user" && isArchiveRequest(turn) && !isTask) {
+                return { deleted: false, reason: "人工摘要请求保持原样" };
             }
             const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
                 turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
                 turn.querySelector("ms-chat-turn-options button");
             if (!button) {
-                if (normalizeType(turn) === "thought") {
-                    throw new Error("思考块 " + id + " 尚未随回复被删除，也没有独立的原生删除菜单");
-                }
-                throw new Error("消息 " + id + " 缺少原生操作菜单");
+                return { deleted: false, reason: "没有独立删除菜单" };
             }
             button.click();
             const item = await findNativeDeleteItem();
-            if (!item) throw new Error("找不到 Google 原生删除选项，已停止");
+            if (!item) {
+                return { deleted: false, reason: "原生菜单没有删除选项" };
+            }
             item.focus?.();
             item.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
             item.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
             item.dispatchEvent(new PointerEvent("pointerup", { bubbles: true, cancelable: true }));
             item.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, cancelable: true }));
             item.click();
-            // A further confirmation dialog is deliberately not bypassed.
             for (let i = 0; i < 100; i++) {
-                if (!document.getElementById(id)) return;
+                if (!document.getElementById(id)) return { deleted: true };
                 await sleep(100);
             }
-            throw new Error("消息 " + id + " 删除后未从页面消失，已停止");
+            return { deleted: false, reason: "原生删除后消息尚未消失" };
         }
 
         async function commit(selectedPlan = null) {
@@ -573,16 +632,15 @@
             const preview = preflightDom(plan);
             const prompt = plan.thoughtOnly
                 ? "清理全部思维链：准备删除 " + preview.items +
-                    " 个独立思维链消息。普通对话、联网搜索与工具记录、模型回复、" +
+                    " 条思维链或素酒临时摘要指令。普通对话、联网搜索与工具记录、模型回复、" +
                     preview.protectedSummaryCount + " 条压缩摘要与压缩指令都会保留。" +
                     (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                         " 个没有独立删除菜单的思考块将跳过。" : "") +
-                    "会核对 Google 云端保存结果；原生删除不可撤销，继续？"
+                    "仅模型生成的摘要永久保留；原生删除不可撤销，继续？"
                 : (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
                 preview.deletedOldRounds + " 轮旧历史" +
                 "，保护 " + preview.protectedSummaryCount + " 条已识别的压缩摘要" +
-                "，清理可独立删除的压缩思维链。" +
-                "为避免 Google 联动删除摘要，压缩指令暂时保留。" +
+                "，清理压缩思维链及素酒自动生成的临时摘要指令。" +
                 "最近 " + plan.recentRounds + " 轮普通对话会保留。" +
                 "无法识别的历史摘要仍需人工核对。" +
                 (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
@@ -600,13 +658,27 @@
             let lastDeletionStartedAt = 0;
             try {
                 const protectedSet = new Set(preview.protectedIds);
+                let skipped = 0;
                 for (const id of preview.targetIds) {
                     if (Branching.getCurrentPromptId() !== plan.promptId) {
                         throw new Error("清理过程中会话已经切换");
                     }
-                    lastDeletionStartedAt = Date.now();
-                    await deleteOne(id, Boolean(plan.thoughtOnly));
-                    processed++;
+                    const attemptStartedAt = Date.now();
+                    let result;
+                    try {
+                        result = await deleteOne(id, Boolean(plan.thoughtOnly));
+                    } catch (error) {
+                        result = { deleted: false,
+                            reason: String(error?.message || error) };
+                    }
+                    if (result?.deleted) {
+                        processed++;
+                        lastDeletionStartedAt = attemptStartedAt;
+                    } else {
+                        skipped++;
+                        log.ui("Skipping undeletable native turn", id,
+                            result?.reason || "unknown");
+                    }
                     // An Angular cascading delete may remove the summary
                     // alongside its temporary user prompt. Stop immediately
                     // if that happens, instead of deleting the rest blindly.
@@ -616,12 +688,26 @@
                                 protectedId + "，已立即停止。请刷新并核对摘要");
                         }
                     }
-                    PromptPanel.status("批量清理中 " + processed + "/" + preview.items +
-                        "，原生页面将自行处理自动保存");
+                    PromptPanel.status("批量清理中：" + processed + " 条已删除，" +
+                        skipped + " 条跳过，共 " + preview.items + " 条目标");
                 }
                 // The old per-turn path never invoked Save explicitly.
                 // AI Studio's native delete action triggers UpdatePrompt
                 // automatically. Observe one quiet period after the batch.
+                if (!processed) {
+                    PromptPanel.status("没有成功删除的消息，跳过 " + skipped +
+                        " 项；所有模型摘要均已保留。");
+                    return;
+                }
+                // Once the staged synthetic USER prompt has been removed,
+                // its review plan is no longer actionable. Clear only that
+                // stale plan; the MODEL archive remains in the conversation.
+                if (pending?.marker && ![...document.querySelectorAll("ms-chat-turn")]
+                    .some(turn => normalizeType(turn) === "user" &&
+                        String(turn.textContent || "").includes(pending.marker))) {
+                    pending = null;
+                    PromptPanel.showCompactionReview(null);
+                }
                 PromptPanel.status("批量删除完成，等待 Google 原生自动保存请求结束……");
                 const autosave = await SaveMonitor.waitForNativeSave(saveBaseline, lastDeletionStartedAt);
                 if (!autosave.observed) {
@@ -663,6 +749,7 @@
                     " 次原生 UpdatePrompt 响应，最后状态 " + autosave.status +
                     "。这表示保存请求有成功响应，刷新后可核对实际云端历史。" +
                     (preview.skippedThoughts ? "部分无法独立删除的思考块已保留。" : "") +
+                    (skipped ? " 已跳过 " + skipped + " 条不可删除的目标。" : "") +
                     verificationNotice);
             } catch (error) {
                 PromptPanel.status("批量清理处理了 " + processed + "/" + preview.items +
