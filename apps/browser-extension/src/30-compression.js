@@ -103,6 +103,12 @@
             }
             const detail = event?.detail;
             if (!isTargetRequest(detail?.url, "GENERATE")) return;
+            if (Number(detail?.status) >= 400) {
+                PromptPanel.status("Google 摘要请求返回错误 " +
+                    detail.status + "，插件操作状态已重置；可重新发起");
+                Compression.finalizeRun();
+                return;
+            }
             if (!detail?.bodyText) {
                 log.net("GenerateContent response missing bodyText");
                 Compression.finalizeRun();
@@ -114,7 +120,15 @@
                 Compression.finalizeRun();
                 return;
             }
-            const snapshot = extractStateSnapshot(data);
+            let snapshot;
+            try {
+                snapshot = extractStateSnapshot(data);
+            } catch (error) {
+                PromptPanel.status("读取摘要响应失败，插件操作状态已重置：" +
+                    String(error?.message || error));
+                Compression.finalizeRun();
+                return;
+            }
             if (!snapshot) {
                 log.net("No snapshot found in compression response");
                 Compression.finalizeRun();
