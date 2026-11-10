@@ -919,3 +919,24 @@ test("native per-target failures are skipped; subsequent task and thinking are d
   assert.equal(x.state.branchInProgress,false);
 });
 
+test("orphaned plugin request after a failed generation is still disposable", () => {
+  const turns = [
+    mockTurn("ordinary-user","user"),mockTurn("ordinary-reply","model"),
+    mockTurn("failed-task","user"),mockTurn("failed-thinking","thought")
+  ];
+  turns[2].textContent = "[[SUJIU_SCOPE_V2:12345678-eeee]]";
+  const x = context(turns);
+  const selection = x.compactor.preflightDom(x.compactor.planThoughtCleanup());
+  assert.deepEqual(Array.from(selection.targetIds), ["failed-thinking","failed-task"]);
+  assert.ok(selection.protectedIds.includes("ordinary-user"));
+  assert.ok(selection.protectedIds.includes("ordinary-reply"));
+});
+
+test("last deletion save timestamp ignores targets skipped after preflight", () => {
+  const sourceLoop = source.slice(source.indexOf("for (const id of preview.targetIds)"),
+    source.indexOf("SaveMonitor.waitForNativeSave("));
+  assert.match(sourceLoop,/const attemptStartedAt = Date.now\(\)/);
+  assert.match(sourceLoop,/if \(result\?\.deleted\) \{[\s\S]*?lastDeletionStartedAt = attemptStartedAt/);
+  assert.doesNotMatch(sourceLoop,/lastDeletionStartedAt = Date.now\(\)/);
+});
+
