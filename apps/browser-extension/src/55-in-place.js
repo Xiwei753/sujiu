@@ -699,6 +699,15 @@
                         " 项；所有模型摘要均已保留。");
                     return;
                 }
+                // Once the staged synthetic USER prompt has been removed,
+                // its review plan is no longer actionable. Clear only that
+                // stale plan; the MODEL archive remains in the conversation.
+                if (pending?.marker && ![...document.querySelectorAll("ms-chat-turn")]
+                    .some(turn => normalizeType(turn) === "user" &&
+                        String(turn.textContent || "").includes(pending.marker))) {
+                    pending = null;
+                    PromptPanel.showCompactionReview(null);
+                }
                 PromptPanel.status("批量删除完成，等待 Google 原生自动保存请求结束……");
                 const autosave = await SaveMonitor.waitForNativeSave(saveBaseline, lastDeletionStartedAt);
                 if (!autosave.observed) {
