@@ -95,7 +95,17 @@
             // No request reconstruction: preserve Google's exact native
             // payload, including every recent conversation turn.
             if (shouldLogGenerate) await logRequestPayload(request);
-            const response = await originalFetch(input, init);
+            let response;
+            try {
+                response = await originalFetch(input, init);
+            } catch (error) {
+                if (shouldLogGenerate && state.compressionInProgress) {
+                    Compression.finalizeRun();
+                    PromptPanel.status("Google 请求失败，摘要操作状态已释放：" +
+                        String(error?.message || error));
+                }
+                throw error;
+            }
 
             if (shouldLogGenerate || shouldCaptureResolve) {
                 void logResponsePayload(request.url, response.clone());
@@ -244,6 +254,17 @@
                 }
                 return originalSend.apply(this, arguments);
             };
+
+            for (const eventName of ["error", "abort", "timeout"]) {
+                realXHR.addEventListener(eventName, () => {
+                    if (monitored &&
+                        isTargetRequest(resolveUrl(requestUrl), "GENERATE") &&
+                        state.compressionInProgress) {
+                        Compression.finalizeRun();
+                        PromptPanel.status("Google 摘要请求中断，插件操作状态已释放");
+                    }
+                });
+            }
 
             realXHR.addEventListener("readystatechange", function () {
                 if (realXHR.readyState !== 4 || !monitored) {
