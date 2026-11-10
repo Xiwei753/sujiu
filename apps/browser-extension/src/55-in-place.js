@@ -493,9 +493,14 @@
             return null;
         }
 
-        async function deleteOne(id) {
+        async function deleteOne(id, thoughtOnly = false) {
             const turn = document.getElementById(id);
             if (!turn || !turn.isConnected) return;
+            // Inspect the live turn immediately before opening Google's
+            // destructive native menu. A stale ID must never target a reply.
+            if (thoughtOnly && normalizeType(turn) !== "thought") {
+                throw new Error("待删除的思维链已经变成其他消息类型，已停止");
+            }
             const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
                 turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
                 turn.querySelector("ms-chat-turn-options button");
@@ -574,7 +579,7 @@
                         throw new Error("清理过程中会话已经切换");
                     }
                     lastDeletionStartedAt = Date.now();
-                    await deleteOne(id);
+                    await deleteOne(id, Boolean(plan.thoughtOnly));
                     processed++;
                     // An Angular cascading delete may remove the summary
                     // alongside its temporary user prompt. Stop immediately
