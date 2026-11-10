@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.4.5
+// @version      0.4.6
 // @updateURL    https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @downloadURL  https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @description  AI Studio manual context compaction and history cleanup
@@ -13,7 +13,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.4.5", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.4.6", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -75,7 +75,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.4.5";
+    const SCRIPT_VERSION = "0.4.6";
 
     const state = {
         compressionInProgress: false,
@@ -1677,6 +1677,59 @@ const RoundSplitter = Object.freeze({
                  group.turns.some(isArchiveReply));
         }
 
+        // Stable memory markers live in Google-saved message text. We cannot
+        // assume AI Studio persists custom private message metadata. Build a
+        // full archive inventory from the saved transcript, not just the
+        // newest compression task kept in localStorage.
+        function archiveInventory(turns, roleOf, textOf) {
+            const markers = new Map();
+            let legacyReplies = 0;
+            let compressionRequests = 0;
+            for (const turn of turns) {
+                const role = roleOf(turn);
+                const text = String(textOf(turn) || "");
+                if (role === "user") {
+                    if (RoundSplitter.isCompressionPrompt({ role, text })) {
+                        compressionRequests++;
+                    }
+                } else if (role === "model") {
+                    const ids = new Set(CompactionTask.getMemoryMarkers(text)
+                        .map(marker => marker.toLowerCase()));
+                    for (const marker of ids) {
+                        markers.set(marker, (markers.get(marker) || 0) + 1);
+                    }
+                    if (!ids.size && RoundSplitter.isMemory({ role, text })) {
+                        legacyReplies++;
+                    }
+                }
+            }
+            return { markers, legacyReplies, compressionRequests };
+        }
+
+        function verifyArchiveInventory(expected, actual) {
+            const allMarkersMatch = expected.markers.size === actual.markers.size &&
+                [...expected.markers].every(([marker, count]) =>
+                    actual.markers.get(marker) === count);
+            if (!allMarkersMatch ||
+                expected.legacyReplies !== actual.legacyReplies ||
+                expected.compressionRequests !== actual.compressionRequests) {
+                throw new Error("Google 云端与网页的历史压缩摘要不一致，已停止删除以保护所有旧摘要");
+            }
+        }
+
+        async function readSavedArchiveInventory(promptId) {
+            const capture = await fetchResolvedPromptThread(promptId);
+            if (!capture?.entries?.length) {
+                throw new Error("无法读取 Google 云端完整历史，拒绝清理");
+            }
+            const turns = extractResolvedTurns(capture.entries);
+            assertSupportedEntries(capture.entries, turns);
+            return archiveInventory(turns,
+                turn => turn.role === "model" && isThoughtOnlyTurn(turn) ?
+                    "thought" : turn.role,
+                turn => turn.text);
+        }
+
         function hasIndependentDeleteMenu(turn) {
             return Boolean(turn.querySelector(
                 "ms-chat-turn-options button, ms-chat-turn-options span.ms-button-icon-symbol"
@@ -1813,9 +1866,14 @@ const RoundSplitter = Object.freeze({
             return { capture, turns };
         }
 
-        function preflightDom(plan) {
+        function preflightDom(plan, savedInventory = null) {
             const turns = [...document.querySelectorAll("ms-chat-turn")];
             const groups = collectGroups(turns);
+            if (savedInventory) {
+                const visibleInventory = archiveInventory(turns,
+                    normalizeType, turn => turn.textContent);
+                verifyArchiveInventory(savedInventory, visibleInventory);
+            }
             const regular = groups.filter(group => group.kind !== "memory");
             const dialogueIndices = regular.flatMap((group, index) =>
                 isArchiveGroup(group) ? [] : [index]);
@@ -1997,7 +2055,11 @@ const RoundSplitter = Object.freeze({
             // Preflight still verifies the staged summary and protected
             // boundary; only post-deletion server polling is removed.
             if (!plan.manual) await verifyPersistedSummary(plan);
-            const preview = preflightDom(plan);
+            // Both summary-based cleanup and "direct" manual cleanup must
+            // cross-check every saved memory. A missing archived turn can be
+            // invisible to ordinary round-count checks.
+            const savedInventory = await readSavedArchiveInventory(plan.promptId);
+            const preview = preflightDom(plan, savedInventory);
             const prompt = (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
                 preview.deletedOldRounds + " 轮旧历史" +
                 "，保护 " + preview.protectedSummaryCount + " 条已识别的压缩摘要" +
@@ -2054,6 +2116,11 @@ const RoundSplitter = Object.freeze({
                         "，请检查网络和页面状态，暂勿刷新。");
                     return;
                 }
+                // A successful UpdatePrompt response alone does not prove
+                // that Google retained all historical memory records.
+                // Re-read the saved conversation after the native autosave.
+                const afterInventory = await readSavedArchiveInventory(plan.promptId);
+                verifyArchiveInventory(savedInventory, afterInventory);
                 if (!selectedPlan) {
                     pending = null;
                     PromptPanel.showCompactionReview(null);
@@ -2082,7 +2149,8 @@ const RoundSplitter = Object.freeze({
 
         return Object.freeze({
             stage, commit, manualCleanup, planManualCleanup, cancel,
-            collectGroups, preflightDom, get pending() { return pending; }
+            collectGroups, preflightDom, archiveInventory, verifyArchiveInventory,
+            get pending() { return pending; }
         });
     })();
 
