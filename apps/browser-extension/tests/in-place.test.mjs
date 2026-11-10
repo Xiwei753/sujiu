@@ -565,3 +565,107 @@ test("autosave completion must be followed by cloud archive verification", () =>
   assert.match(code,/const afterInventory = await readSavedArchiveInventory\(plan.promptId\)/);
   assert.match(code,/verifyArchiveInventory\(savedInventory, afterInventory\)/);
 });
+
+test("standalone cleanup removes only old thought blocks and thought blocks from archived summaries", () => {
+  const turns = [
+    mockTurn("old-user","user"),mockTurn("old-thought","thought"),mockTurn("old-reply","model"),
+    mockTurn("summary-task","user"),mockTurn("summary-thought","thought"),mockTurn("summary-reply","model"),
+    mockTurn("recent-user1","user"),mockTurn("recent-thought1","thought"),mockTurn("recent-reply1","model"),
+    mockTurn("recent-user2","user"),mockTurn("recent-thought2","thought"),mockTurn("recent-reply2","model")
+  ];
+  turns[3].textContent = "Summarize [[SUJIU_SCOPE_V2:12345678-aaaa]]";
+  turns[5].textContent = "[[SUJIU_MEMORY_V1:12345678-aaaa]] First archive";
+  const x = context(turns);
+  const plan = x.compactor.planThoughtCleanup(2);
+  assert.equal(plan.thoughtOnly, true);
+  assert.deepEqual(Array.from(plan.olderGroupIndices), [0]);
+  const selection = x.compactor.preflightDom(plan);
+  assert.equal(selection.thoughtOnly, true);
+  assert.deepEqual(Array.from(selection.targetIds), ["old-thought","summary-thought"]);
+  assert.equal(selection.deletedUserCount, 0);
+  assert.equal(selection.deletedOldRounds, 0);
+  assert.equal(selection.protectedSummaryCount, 1);
+  for (const id of ["old-user","old-reply","summary-task","summary-reply",
+    "recent-user1","recent-thought1","recent-reply1",
+    "recent-user2","recent-thought2","recent-reply2"]) {
+    assert.ok(selection.protectedIds.includes(id), id + " must survive");
+  }
+});
+
+test("standalone cleanup skips old thoughts without independent native delete menu", () => {
+  const turns = [
+    mockTurn("old-user","user"),mockTurn("old-thought","thought"),mockTurn("old-reply","model"),
+    mockTurn("new-user","user"),mockTurn("new-reply","model")
+  ];
+  turns[1].querySelector = () => null;
+  const x = context(turns);
+  const selection = x.compactor.preflightDom(x.compactor.planThoughtCleanup(1));
+  assert.deepEqual(Array.from(selection.targetIds), []);
+  assert.equal(selection.skippedThoughts, 1);
+  assert.ok(selection.protectedIds.includes("old-reply"));
+});
+
+test("standalone cleanup rejects a changed or virtualized live DOM", () => {
+  const turns = [
+    mockTurn("u0","user"),mockTurn("t0","thought"),mockTurn("m0","model"),
+    mockTurn("u1","user"),mockTurn("m1","model")
+  ];
+  const x = context(turns);
+  const plan = x.compactor.planThoughtCleanup(1);
+  turns.splice(1, 1);
+  assert.throws(() => x.compactor.preflightDom(plan), /网页聊天节点在准备期间发生变化/);
+});
+
+test("standalone cleanup refuses to delete when the cloud archive inventory misses an old summary", () => {
+  const turns = [
+    mockTurn("task","user"), mockTurn("archive-thought","thought"),
+    mockTurn("archive","model"),mockTurn("recent-user","user"),mockTurn("recent-model","model")
+  ];
+  turns[0].textContent = "[[SUJIU_SCOPE_V2:12345678-aaaa]] Summarize";
+  turns[2].textContent = "[[SUJIU_MEMORY_V1:12345678-aaaa]] Old summary";
+  const x = context(turns);
+  const cloud = x.compactor.archiveInventory([
+    ...turns,
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-bbbb]] Missing"}
+  ], turn => turn.role || turn.getAttribute("data-turn-type"), turn => turn.text || turn.textContent);
+  assert.throws(
+    () => x.compactor.preflightDom(x.compactor.planThoughtCleanup(1),cloud),
+    /云端与网页的历史压缩摘要不一致/
+  );
+});
+
+test("post-delete normal user/model replies must remain exactly intact, including unmarked history", () => {
+  const x = context([]);
+  const before = {
+    protectedMessages: [
+      ["user","Once upon a time"],["model","Ordinary response"],
+      ["user","Summarize"],["model","Old unmarked summary"]
+    ]
+  };
+  const afterThought = {
+    protectedMessages: before.protectedMessages.map(item => [...item])
+  };
+  assert.doesNotThrow(() => x.compactor.verifyProtectedMessages(before,afterThought));
+  const afterLostReply = {
+    protectedMessages: [
+      ["user","Once upon a time"],["user","Summarize"],["model","Old unmarked summary"]
+    ]
+  };
+  assert.throws(() => x.compactor.verifyProtectedMessages(before,afterLostReply),
+    /普通对话或摘要发生变化/);
+});
+
+test("thought-only commit checks preserved cloud replies after native autosave", () => {
+  const code = source.slice(source.indexOf("async function commit("),source.indexOf("function cancel()"));
+  assert.match(code,/const savedInventory = await readSavedArchiveInventory\(plan.promptId\)/);
+  assert.match(code,/const afterInventory = await readSavedArchiveInventory\(plan.promptId\)/);
+  assert.match(code,/if \(plan.thoughtOnly\) \{\s*verifyProtectedMessages\(savedInventory, afterInventory\)/);
+  assert.match(code,/const preview = preflightDom\(plan, savedInventory\)/);
+});
+
+test("native delete rechecks a thought node before clicking the destructive menu", () => {
+  const code = source.slice(source.indexOf("async function deleteOne("),source.indexOf("async function commit("));
+  assert.match(code,/if \(thoughtOnly && normalizeType\(turn\) !== "thought"\)/);
+  assert.match(source,/await deleteOne\(id, Boolean\(plan.thoughtOnly\)\)/);
+});
+

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.4.6
+// @version      0.4.7
 // @updateURL    https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @downloadURL  https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @description  AI Studio manual context compaction and history cleanup
@@ -13,7 +13,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.4.6", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.4.7", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -75,7 +75,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.4.6";
+    const SCRIPT_VERSION = "0.4.7";
 
     const state = {
         compressionInProgress: false,
@@ -1724,10 +1724,23 @@ const RoundSplitter = Object.freeze({
             }
             const turns = extractResolvedTurns(capture.entries);
             assertSupportedEntries(capture.entries, turns);
-            return archiveInventory(turns,
+            const inventory = archiveInventory(turns,
                 turn => turn.role === "model" && isThoughtOnlyTurn(turn) ?
                     "thought" : turn.role,
                 turn => turn.text);
+            // A thought-only cleanup must not silently lose a normal reply
+            // that happens to lack a Sujiu-specific memory marker.
+            inventory.protectedMessages = turns
+                .filter(turn => !isThoughtOnlyTurn(turn))
+                .map(turn => [turn.role, String(turn.text || "")]);
+            return inventory;
+        }
+
+        function verifyProtectedMessages(before, after) {
+            if (JSON.stringify(before.protectedMessages) !==
+                JSON.stringify(after.protectedMessages)) {
+                throw new Error("Google 云端普通对话或摘要发生变化，已停止；请检查历史记录");
+            }
         }
 
         function hasIndependentDeleteMenu(turn) {
@@ -1843,6 +1856,39 @@ const RoundSplitter = Object.freeze({
             return commit(plan);
         }
 
+        // Independent cleanup leaves all user messages, model replies and
+        // compaction archives in place. Only thought turns preceding the
+        // configured protected recent dialogue window may be targeted, plus
+        // independently deletable thought turns in archive exchanges.
+        function planThoughtCleanup(keepRounds = Number(userSettings.keepRounds) || 8) {
+            const promptId = Branching.getCurrentPromptId();
+            if (!promptId || promptId === "new_chat") {
+                throw new Error("请先保存当前聊天");
+            }
+            if (!Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) {
+                throw new Error("保留轮数必须是 1 到 100 的整数");
+            }
+            const turns = [...document.querySelectorAll("ms-chat-turn")];
+            const groups = collectGroups(turns);
+            const regular = groups.filter(group => group.kind !== "memory");
+            const dialogueIndices = regular.flatMap((group, index) =>
+                isArchiveGroup(group) ? [] : [index]);
+            const olderGroupIndices = dialogueIndices.slice(
+                0, Math.max(0, dialogueIndices.length - keepRounds));
+            return {
+                thoughtOnly: true, manual: true, promptId,
+                totalRounds: regular.length,
+                olderRounds: olderGroupIndices.length, olderGroupIndices,
+                recentRounds: keepRounds, pinnedOlderRounds: [],
+                domIds: turns.map(turn => turn.id)
+            };
+        }
+
+        async function cleanupThoughts() {
+            if (deleting) return;
+            return commit(planThoughtCleanup());
+        }
+
         async function verifyPersistedSummary(plan) {
             const capture = await fetchResolvedPromptThread(plan.promptId);
             if (!capture?.entries?.length) throw new Error("未能读取最新会话，停止删除");
@@ -1917,6 +1963,44 @@ const RoundSplitter = Object.freeze({
                         String(turn.textContent || "").includes(plan.memoryMarker))) {
                     throw new Error("最新摘要的永久记忆标识缺失，已拒绝任何删除");
                 }
+            }
+
+            if (plan.thoughtOnly) {
+                const archiveGroups = groups.filter(group =>
+                    group.kind === "memory" || isArchiveGroup(group));
+                const allowed = new Set([
+                    ...archiveGroups,
+                    ...(plan.olderGroupIndices || []).map(index => regular[index])
+                ]);
+                const targetTurns = [];
+                let skippedThoughts = 0;
+                for (const group of groups) {
+                    if (!allowed.has(group)) continue;
+                    for (const turn of group.turns) {
+                        if (getRole(turn) !== "thought") continue;
+                        if (hasIndependentDeleteMenu(turn)) targetTurns.push(turn);
+                        else skippedThoughts++;
+                    }
+                }
+                const targetIds = targetTurns.map(turn => turn.id);
+                if (targetIds.some(id => !id) ||
+                    new Set(targetIds).size !== targetIds.length) {
+                    throw new Error("待清理的思维链缺少稳定 ID，已停止");
+                }
+                const targetSet = new Set(targetIds);
+                const protectedTurns = turns.filter(turn => !targetSet.has(turn.id));
+                if (protectedTurns.some(turn => !turn.id) ||
+                    targetTurns.some(turn => getRole(turn) !== "thought")) {
+                    throw new Error("思维链与受保护消息存在冲突，已停止");
+                }
+                return {
+                    thoughtOnly: true, targetIds,
+                    protectedIds: protectedTurns.map(turn => turn.id),
+                    deletedUserCount: 0, deletedOldRounds: 0,
+                    protectedSummaryCount: inferredArchiveIndices.length +
+                        groups.filter(group => group.kind === "memory").length,
+                    skippedThoughts, groups: groups.length, items: targetIds.length
+                };
             }
 
             // The visible summary is more important than cleaning its prompt.
@@ -2016,9 +2100,14 @@ const RoundSplitter = Object.freeze({
             return null;
         }
 
-        async function deleteOne(id) {
+        async function deleteOne(id, thoughtOnly = false) {
             const turn = document.getElementById(id);
             if (!turn || !turn.isConnected) return;
+            // Inspect the live turn immediately before opening Google's
+            // destructive native menu. A stale ID must never target a reply.
+            if (thoughtOnly && normalizeType(turn) !== "thought") {
+                throw new Error("待删除的思维链已经变成其他消息类型，已停止");
+            }
             const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
                 turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
                 turn.querySelector("ms-chat-turn-options button");
@@ -2060,7 +2149,15 @@ const RoundSplitter = Object.freeze({
             // invisible to ordinary round-count checks.
             const savedInventory = await readSavedArchiveInventory(plan.promptId);
             const preview = preflightDom(plan, savedInventory);
-            const prompt = (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
+            const prompt = plan.thoughtOnly
+                ? "独立清理旧思维链：准备删除 " + preview.items +
+                    " 个独立思维链消息。全部普通对话、模型回复、" +
+                    preview.protectedSummaryCount + " 条压缩摘要与压缩指令都会保留。" +
+                    "最近 " + plan.recentRounds + " 轮普通对话附带的思维链也会保留。" +
+                    (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
+                        " 个没有独立删除菜单的思考块将跳过。" : "") +
+                    "会核对 Google 云端保存结果；原生删除不可撤销，继续？"
+                : (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
                 preview.deletedOldRounds + " 轮旧历史" +
                 "，保护 " + preview.protectedSummaryCount + " 条已识别的压缩摘要" +
                 "，清理可独立删除的压缩思维链。" +
@@ -2071,7 +2168,9 @@ const RoundSplitter = Object.freeze({
                     " 个无法独立删除的思考块会保留。" : "") +
                 "删除操作使用 AI Studio 原生消息菜单，Google 会自行自动保存。全部删除后统一等待保存响应。该操作不可撤销，继续？";
             if (!preview.items) {
-                PromptPanel.status("没有可安全删除的旧对话或独立思考块。压缩摘要和对应指令均已保护。");
+                PromptPanel.status(plan.thoughtOnly ?
+                    "没有可独立删除的旧思维链。所有普通消息和压缩摘要保持原样。" :
+                    "没有可安全删除的旧对话或独立思考块。压缩摘要和对应指令均已保护。");
                 return;
             }
             if (!confirm(prompt)) return;
@@ -2087,7 +2186,7 @@ const RoundSplitter = Object.freeze({
                         throw new Error("清理过程中会话已经切换");
                     }
                     lastDeletionStartedAt = Date.now();
-                    await deleteOne(id);
+                    await deleteOne(id, Boolean(plan.thoughtOnly));
                     processed++;
                     // An Angular cascading delete may remove the summary
                     // alongside its temporary user prompt. Stop immediately
@@ -2121,6 +2220,9 @@ const RoundSplitter = Object.freeze({
                 // Re-read the saved conversation after the native autosave.
                 const afterInventory = await readSavedArchiveInventory(plan.promptId);
                 verifyArchiveInventory(savedInventory, afterInventory);
+                if (plan.thoughtOnly) {
+                    verifyProtectedMessages(savedInventory, afterInventory);
+                }
                 if (!selectedPlan) {
                     pending = null;
                     PromptPanel.showCompactionReview(null);
@@ -2148,8 +2250,10 @@ const RoundSplitter = Object.freeze({
         }
 
         return Object.freeze({
-            stage, commit, manualCleanup, planManualCleanup, cancel,
-            collectGroups, preflightDom, archiveInventory, verifyArchiveInventory,
+            stage, commit, manualCleanup, planManualCleanup,
+            cleanupThoughts, planThoughtCleanup, cancel,
+            collectGroups, preflightDom, archiveInventory,
+            verifyArchiveInventory, verifyProtectedMessages,
             get pending() { return pending; }
         });
     })();
@@ -2640,6 +2744,8 @@ const PromptPanel = (() => {
         make("p", { className: "hint", text: "生成没有固定等待时限。模型完成回复后，再点击读取摘要；两项操作相互独立。" }),
         line(action("读取已完成摘要", "recover-summary"), action("停止插件监听", "stop-tracking")),
         line(action("直接清理旧历史", "cleanup-history")),
+        line(action("清理旧思维链", "cleanup-thoughts")),
+        make("p", { className: "hint", text: "清理旧思维链仅删除较早轮次及压缩记录中可独立删除的思考块，最近保留轮数内的思考块、普通回复和所有压缩摘要均保持不变。" }),
         make("p", { className: "hint", text: "清理历史可以单独使用：按保留轮数删除较早的完整对话，已标记压缩记忆会保留。无需先生成或读取摘要；清理前会显示数量让你确认。" }),
         make("div", { id: "inplace-review", hidden: true }, [
           make("label", { text: "摘要预览（已写入原聊天）" }),
@@ -2847,6 +2953,14 @@ const PromptPanel = (() => {
             const reason = String(error?.message || error);
             status("删除未完成：" + reason);
             console.warn("[Sujiu AI Studio] in-place deletion halted", reason);
+          }
+        }
+        if (action === "cleanup-thoughts") {
+          try { await InPlaceCompaction.cleanupThoughts(); }
+          catch (error) {
+            const reason = String(error?.message || error);
+            status("思维链清理未完成：" + reason);
+            console.warn("[Sujiu AI Studio] thought cleanup halted", reason);
           }
         }
         if (action === "cancel-delete") InPlaceCompaction.cancel();
