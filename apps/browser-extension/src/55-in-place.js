@@ -321,11 +321,9 @@
                         !turn.id || turn.id !== plan.domIds[index])) {
                     throw new Error("网页聊天节点在准备期间发生变化，请重新点击清理");
                 }
-                if (savedInventory) {
-                    verifyArchiveInventory(savedInventory,
-                        archiveInventory(turns, normalizeType,
-                            turn => turn.textContent));
-                }
+                // The Google saved transcript and rendered UI expose
+                // different structures. Never gate a native Thinking delete
+                // on an exact archive-list comparison between them.
                 const deletable = [];
                 let skippedThoughts = 0;
                 for (const turn of turns) {
@@ -343,21 +341,22 @@
                     thoughtOnly: true, targetIds,
                     protectedIds: turns.filter(turn => !targets.has(turn.id))
                         .map(turn => turn.id),
-                    protectedSummaryCount: savedInventory ?
-                        [...savedInventory.markers.values()]
-                            .reduce((a, b) => a + b, 0) +
-                        savedInventory.legacyReplies : 0,
+                    protectedSummaryCount: (() => {
+                        const visible = archiveInventory(turns, normalizeType,
+                            turn => turn.textContent);
+                        return [...visible.markers.values()]
+                            .reduce((total, count) => total + count, 0) +
+                            visible.legacyReplies;
+                    })(),
                     skippedThoughts, items: targetIds.length,
                     deletedOldRounds: 0, deletedUserCount: 0
                 };
             }
 
             const groups = collectGroups(turns);
-            if (savedInventory) {
-                const visibleInventory = archiveInventory(turns,
-                    normalizeType, turn => turn.textContent);
-                verifyArchiveInventory(savedInventory, visibleInventory);
-            }
+            // Protect recognized summaries by their native DOM nodes and
+            // markers below. Cross-surface matching is diagnostic only:
+            // Google can serialize a turn differently than it renders it.
             const regular = groups.filter(group => group.kind !== "memory");
             const dialogueIndices = regular.flatMap((group, index) =>
                 isArchiveGroup(group) ? [] : [index]);
@@ -508,6 +507,13 @@
             if (thoughtOnly && normalizeType(turn) !== "thought") {
                 throw new Error("待删除的思维链已经变成其他消息类型，已停止");
             }
+            // Never allow an explicitly marked memory or its tool prompt
+            // through the regular deletion path, even if the DOM changed
+            // since planning.
+            if (!thoughtOnly && /\[\[SUJIU_(?:MEMORY_V1|SCOPE_V2):/i.test(
+                String(turn.textContent || ""))) {
+                throw new Error("目标带有素酒永久记忆标识，已跳过删除");
+            }
             const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
                 turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
                 turn.querySelector("ms-chat-turn-options button");
@@ -552,12 +558,19 @@
             // Preflight still verifies the staged summary and protected
             // boundary; only post-deletion server polling is removed.
             if (!plan.manual) await verifyPersistedSummary(plan);
-            // Both summary-based cleanup and "direct" manual cleanup must
-            // cross-check every saved memory. A missing archived turn can be
-            // invisible to ordinary round-count checks.
-            const savedInventory = await readSavedArchiveInventory(
-                plan.promptId, Boolean(plan.thoughtOnly));
-            const preview = preflightDom(plan, savedInventory);
+            // A cloud snapshot is useful for post-delete diagnostics, but
+            // cannot be required for deletion: Google may render different
+            // archive markers or omit tool/error entries in its saved form.
+            // Native deletion targets are selected and protected in the DOM.
+            let savedInventory = null;
+            try {
+                savedInventory = await readSavedArchiveInventory(
+                    plan.promptId, Boolean(plan.thoughtOnly));
+            } catch (error) {
+                log.ui("Cloud archive baseline unavailable; continuing with " +
+                    "native DOM protections", String(error?.message || error));
+            }
+            const preview = preflightDom(plan);
             const prompt = plan.thoughtOnly
                 ? "清理全部思维链：准备删除 " + preview.items +
                     " 个独立思维链消息。普通对话、联网搜索与工具记录、模型回复、" +
@@ -621,14 +634,26 @@
                         "，请检查网络和页面状态，暂勿刷新。");
                     return;
                 }
-                // A successful UpdatePrompt response alone does not prove
-                // that Google retained all historical memory records.
-                // Re-read the saved conversation after the native autosave.
-                const afterInventory = await readSavedArchiveInventory(
-                    plan.promptId, Boolean(plan.thoughtOnly));
-                verifyArchiveInventory(savedInventory, afterInventory);
-                if (plan.thoughtOnly) {
-                    verifyProtectedMessages(savedInventory, afterInventory);
+                // Re-read after the native save when available. Differences
+                // in Google's serialization are reported, not used to lock
+                // future cleanup or retroactively claim an undo is possible.
+                let verificationNotice = "";
+                if (savedInventory) {
+                    try {
+                        const afterInventory = await readSavedArchiveInventory(
+                            plan.promptId, Boolean(plan.thoughtOnly));
+                        try {
+                            verifyArchiveInventory(savedInventory, afterInventory);
+                            if (plan.thoughtOnly) {
+                                verifyProtectedMessages(savedInventory, afterInventory);
+                            }
+                        } catch (error) {
+                            verificationNotice = " 云端保存记录发生变化，请刷新核对：" +
+                                String(error?.message || error);
+                        }
+                    } catch (error) {
+                        verificationNotice = " 未能重新读取云端记录，请刷新核对。";
+                    }
                 }
                 if (!selectedPlan) {
                     pending = null;
@@ -637,7 +662,8 @@
                 PromptPanel.status("批量删除已完成；观察到 " + autosave.attempts +
                     " 次原生 UpdatePrompt 响应，最后状态 " + autosave.status +
                     "。这表示保存请求有成功响应，刷新后可核对实际云端历史。" +
-                    (preview.skippedThoughts ? "部分无法独立删除的思考块已保留。" : ""));
+                    (preview.skippedThoughts ? "部分无法独立删除的思考块已保留。" : "") +
+                    verificationNotice);
             } catch (error) {
                 PromptPanel.status("批量清理处理了 " + processed + "/" + preview.items +
                     " 个页面消息后停止：" + String(error?.message || error) +
