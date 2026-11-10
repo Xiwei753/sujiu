@@ -106,7 +106,7 @@
             if (!allMarkersMatch ||
                 expected.legacyReplies !== actual.legacyReplies ||
                 expected.compressionRequests !== actual.compressionRequests) {
-                throw new Error("Google 云端与网页的历史压缩摘要不一致，已停止删除以保护所有旧摘要");
+                throw new Error("Google 保存的历史压缩摘要记录与此前读取结果不一致");
             }
         }
 
@@ -148,7 +148,7 @@
         function verifyProtectedMessages(before, after) {
             if (JSON.stringify(before.protectedMessages) !==
                 JSON.stringify(after.protectedMessages)) {
-                throw new Error("Google 云端普通对话或摘要发生变化，已停止；请检查历史记录");
+                throw new Error("Google 保存的普通对话或摘要记录与此前读取结果不一致");
             }
         }
 
