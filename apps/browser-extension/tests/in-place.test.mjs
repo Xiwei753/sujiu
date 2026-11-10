@@ -15,7 +15,7 @@ function mockTurn(id, type) {
     classList: { contains() { return false; } }
   };
 }
-function context(turns) {
+function context(turns, overrides = {}) {
   let preview;
   let confirmationCalls = 0;
   const ctx = {
@@ -31,8 +31,11 @@ function context(turns) {
     PromptPanel: { showCompactionReview(p) { preview = p; }, status() {} },
     state: { branchInProgress: false },
     userSettings: { keepRounds: 1 },
-    fetchResolvedPromptThread: async () => ({ entries: [] }),
-    extractResolvedTurns: () => [],
+    fetchResolvedPromptThread: overrides.fetchResolvedPromptThread ||
+      (async () => ({ entries: [] })),
+    extractResolvedTurns: overrides.extractResolvedTurns || (() => []),
+    extractResolvedEntryText: entry => entry[0] || "",
+    isThoughtOnlyTurn: turn => turn?.role === "model" && turn?.entry?.[19] === 1,
     assertSupportedEntries() {},
     confirm() { confirmationCalls++; return false; },
     setTimeout,
@@ -40,7 +43,7 @@ function context(turns) {
   };
   ctx.RoundSplitter = vm.runInNewContext(roundsSource + "\nRoundSplitter", {});
   const compactor = vm.runInNewContext(source + "\nInPlaceCompaction", ctx);
-  return { compactor, get preview() { return preview; }, get confirmationCalls() { return confirmationCalls; } };
+  return { compactor, state: ctx.state, get preview() { return preview; }, get confirmationCalls() { return confirmationCalls; } };
 }
 test("keeps the newest exchange and snapshot while selecting old thoughts for deletion", () => {
   const turns = [
@@ -560,13 +563,13 @@ test("old unmarked archive records must also match the cloud inventory", () => {
 
 test("autosave completion must be followed by cloud archive verification", () => {
   const code = source.slice(source.indexOf("async function commit("),source.indexOf("function cancel()"));
-  assert.match(code,/const savedInventory = await readSavedArchiveInventory\(plan.promptId\)/);
+  assert.match(code,/const savedInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
   assert.match(code,/preflightDom\(plan, savedInventory\)/);
-  assert.match(code,/const afterInventory = await readSavedArchiveInventory\(plan.promptId\)/);
+  assert.match(code,/const afterInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
   assert.match(code,/verifyArchiveInventory\(savedInventory, afterInventory\)/);
 });
 
-test("standalone cleanup removes only old thought blocks and thought blocks from archived summaries", () => {
+test("standalone cleanup removes every independent thought including recent rounds and archives", () => {
   const turns = [
     mockTurn("old-user","user"),mockTurn("old-thought","thought"),mockTurn("old-reply","model"),
     mockTurn("summary-task","user"),mockTurn("summary-thought","thought"),mockTurn("summary-reply","model"),
@@ -578,16 +581,15 @@ test("standalone cleanup removes only old thought blocks and thought blocks from
   const x = context(turns);
   const plan = x.compactor.planThoughtCleanup(2);
   assert.equal(plan.thoughtOnly, true);
-  assert.deepEqual(Array.from(plan.olderGroupIndices), [0]);
   const selection = x.compactor.preflightDom(plan);
   assert.equal(selection.thoughtOnly, true);
-  assert.deepEqual(Array.from(selection.targetIds), ["old-thought","summary-thought"]);
+  assert.deepEqual(Array.from(selection.targetIds), ["old-thought","summary-thought","recent-thought1","recent-thought2"]);
   assert.equal(selection.deletedUserCount, 0);
   assert.equal(selection.deletedOldRounds, 0);
-  assert.equal(selection.protectedSummaryCount, 1);
+  assert.equal(selection.protectedSummaryCount, 0);
   for (const id of ["old-user","old-reply","summary-task","summary-reply",
-    "recent-user1","recent-thought1","recent-reply1",
-    "recent-user2","recent-thought2","recent-reply2"]) {
+    "recent-user1","recent-reply1",
+    "recent-user2","recent-reply2"]) {
     assert.ok(selection.protectedIds.includes(id), id + " must survive");
   }
 });
@@ -657,8 +659,8 @@ test("post-delete normal user/model replies must remain exactly intact, includin
 
 test("thought-only commit checks preserved cloud replies after native autosave", () => {
   const code = source.slice(source.indexOf("async function commit("),source.indexOf("function cancel()"));
-  assert.match(code,/const savedInventory = await readSavedArchiveInventory\(plan.promptId\)/);
-  assert.match(code,/const afterInventory = await readSavedArchiveInventory\(plan.promptId\)/);
+  assert.match(code,/const savedInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
+  assert.match(code,/const afterInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
   assert.match(code,/if \(plan.thoughtOnly\) \{\s*verifyProtectedMessages\(savedInventory, afterInventory\)/);
   assert.match(code,/const preview = preflightDom\(plan, savedInventory\)/);
 });
@@ -667,5 +669,95 @@ test("native delete rechecks a thought node before clicking the destructive menu
   const code = source.slice(source.indexOf("async function deleteOne("),source.indexOf("async function commit("));
   assert.match(code,/if \(thoughtOnly && normalizeType\(turn\) !== "thought"\)/);
   assert.match(source,/await deleteOne\(id, Boolean\(plan.thoughtOnly\)\)/);
+});
+
+test("thinking cleanup ignores unknown search/tool nodes and failed generations", () => {
+  const turns = [
+    mockTurn("u","user"), mockTurn("think-before","thought"),
+    mockTurn("google-search","tool"), mockTurn("search-error","error"),
+    mockTurn("model-result","model"), mockTurn("incomplete-user","user"),
+    mockTurn("think-after","thought")
+  ];
+  const x = context(turns);
+  const plan = x.compactor.planThoughtCleanup();
+  const preview = x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds), ["think-before","think-after"]);
+  for (const id of ["u","google-search","search-error","model-result","incomplete-user"])
+    assert.ok(preview.protectedIds.includes(id), id + " must be preserved");
+});
+
+test("all thought cleanup has no recent-turn preservation window", () => {
+  const turns=[mockTurn("u1","user"),mockTurn("t1","thought"),mockTurn("m1","model"),
+               mockTurn("u2","user"),mockTurn("t2","thought"),mockTurn("m2","model")];
+  const x=context(turns);
+  const preview=x.compactor.preflightDom(x.compactor.planThoughtCleanup());
+  assert.deepEqual(Array.from(preview.targetIds),["t1","t2"]);
+});
+
+test("cloud preflight and DOM failures are covered by unconditional lock release", () => {
+  const body=source.slice(source.indexOf("async function commit("), source.indexOf("function cancel()"));
+  const acquire=body.indexOf("deleting = true;");
+  const cloud=body.indexOf("const savedInventory = await readSavedArchiveInventory(");
+  const release=body.lastIndexOf("deleting = false;");
+  assert.ok(acquire >= 0 && acquire < cloud, "lock acquired before cloud inspection");
+  assert.ok(release > cloud, "the lock is released on preflight failure");
+  assert.match(body,/finally \{[\s\S]*?deleting = false;[\s\S]*?state.branchInProgress = false;[\s\S]*?\}/);
+});
+
+test("thought-only cloud inventory accepts opaque search tool entries without strict two-role assertion", () => {
+  const code=source.slice(source.indexOf("async function readSavedArchiveInventory"),
+    source.indexOf("function verifyProtectedMessages"));
+  assert.match(code,/if \(!allowOpaque\) assertSupportedEntries\(capture.entries, turns\)/);
+  assert.match(code,/entry.length >= 9/);
+  assert.match(code,/text \|\| JSON.stringify\(entry\)/);
+});
+
+test("legacy dialogue cleanup still requires strict validation of cloud entries", () => {
+  const body=source.slice(source.indexOf("async function commit("),source.indexOf("function cancel()"));
+  assert.match(body,/plan.promptId, Boolean\(plan.thoughtOnly\)/);
+  assert.match(source,/if \(!allowOpaque\) assertSupportedEntries\(capture.entries, turns\)/);
+});
+
+test("cloud preflight failure releases the lock and permits repeated attempts", async () => {
+  const x = context([mockTurn("u","user"),mockTurn("t","thought"),mockTurn("m","model")]);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let error;
+    try { await x.compactor.cleanupThoughts(); }
+    catch (e) { error = e; }
+    assert.ok(error, "cloud inspection must reject missing server data");
+    assert.match(String(error.message), /无法读取 Google 云端完整历史/);
+    assert.equal(x.state.branchInProgress, false);
+  }
+  assert.equal(x.confirmationCalls, 0);
+});
+
+test("cloud tool records and incomplete page turns do not block thought cleanup preflight", async () => {
+  const entry = (role, content) => {
+    const result = new Array(9).fill(null);
+    result[0] = content;
+    result[8] = role;
+    return result;
+  };
+  const cloud = [
+    entry("user", "Hello"),
+    entry("tool", "web_search result"),
+    entry("model", "Search failed, but conversation can continue"),
+    entry("user", "Unfinished action due to error")
+  ];
+  const turns = [
+    mockTurn("u","user"),mockTurn("search","tool"),
+    mockTurn("reason","thought"),mockTurn("answer","model"),
+    mockTurn("incomplete","user")
+  ];
+  const x = context(turns, {
+    fetchResolvedPromptThread: async () => ({entries: cloud}),
+    extractResolvedTurns: entries => entries.map(e => ({
+      role:e[8], text:e[0], entry:e
+    }))
+  });
+  await x.compactor.cleanupThoughts();
+  assert.equal(x.confirmationCalls, 1,
+    "the confirmation dialog should be reached despite opaque tool/error turns");
+  assert.equal(x.state.branchInProgress, false);
 });
 

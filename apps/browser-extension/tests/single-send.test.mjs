@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import vm from "node:vm";
 
 const source = await readFile(new URL("../src/30-compression.js", import.meta.url), "utf8");
+const networkSource = await readFile(new URL("../src/20-network.js", import.meta.url), "utf8");
 
 function setup({ label = "Run", disabled = false, capture = true } = {}) {
   let clicks = 0;
@@ -61,3 +62,48 @@ test("no synthetic pointer chain, send retries, or forced enabling", () => {
   assert.doesNotMatch(source, /sendPromptWithRetries|dispatchPointerClickSequence|enableSendButton|triggerKeyboardSend/);
   assert.match(source, /button\.click\(\)/);
 });
+
+test("failed Google response releases both compression lifecycle flags", () => {
+  const state={ compressionInProgress:true, compressionRequestPending:true,
+    compressionResponsePending:true, historyCapturePending:true };
+  const messages=[];
+  const ctx={
+    state, UI:{setButtonLoading(){}},
+    PromptPanel:{status(message){messages.push(message)}},
+    log:{net(){}},
+    isTargetRequest:()=>true
+  };
+  const compression=vm.runInNewContext(source+"\nCompression",ctx);
+  compression.handleResponseEvent({detail:{url:"GenerateContent",status:500,bodyText:"Unknown tool"}});
+  assert.equal(state.compressionInProgress,false);
+  assert.equal(state.compressionRequestPending,false);
+  assert.equal(state.compressionResponsePending,false);
+  assert.equal(state.historyCapturePending,false);
+  assert.match(messages.join(" "),/错误 500/);
+});
+
+test("malformed tool response releases compression lifecycle flags", () => {
+  const state={ compressionInProgress:true,compressionRequestPending:true,
+    compressionResponsePending:true,historyCapturePending:true };
+  const messages=[];
+  const ctx={
+    state, UI:{setButtonLoading(){}},
+    PromptPanel:{status(message){messages.push(message)}},
+    log:{net(){}},
+    isTargetRequest:()=>true,
+    safeParseJSON:()=>({}),
+    extractStateSnapshot:()=>{throw new Error("Unknown search tool")}
+  };
+  const compression=vm.runInNewContext(source+"\nCompression",ctx);
+  compression.handleResponseEvent({detail:{url:"GenerateContent",status:200,bodyText:"{}"}});
+  assert.equal(state.compressionInProgress,false);
+  assert.equal(state.compressionResponsePending,false);
+  assert.match(messages.join(" "),/Unknown search tool/);
+});
+
+test("network failures and aborted GenerateContent calls reset compression lock", () => {
+  assert.match(networkSource,/catch \(error\) \{\s*if \(shouldLogGenerate && state.compressionInProgress\) \{/);
+  assert.match(networkSource,/for \(const eventName of \["error", "abort", "timeout"\]\)/);
+  assert.match(networkSource,/Compression.finalizeRun\(\)/);
+});
+

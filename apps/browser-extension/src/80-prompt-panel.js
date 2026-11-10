@@ -86,8 +86,8 @@ const PromptPanel = (() => {
         make("p", { className: "hint", text: "生成没有固定等待时限。模型完成回复后，再点击读取摘要；两项操作相互独立。" }),
         line(action("读取已完成摘要", "recover-summary"), action("停止插件监听", "stop-tracking")),
         line(action("直接清理旧历史", "cleanup-history")),
-        line(action("清理旧思维链", "cleanup-thoughts")),
-        make("p", { className: "hint", text: "清理旧思维链仅删除较早轮次及压缩记录中可独立删除的思考块，最近保留轮数内的思考块、普通回复和所有压缩摘要均保持不变。" }),
+        line(action("清理全部思维链", "cleanup-thoughts")),
+        make("p", { className: "hint", text: "清理全部思维链将删除当前会话中所有可独立删除的 Thinking 块，包括最近的轮次；普通对话、联网搜索记录和所有压缩摘要均保留。" }),
         make("p", { className: "hint", text: "清理历史可以单独使用：按保留轮数删除较早的完整对话，已标记压缩记忆会保留。无需先生成或读取摘要；清理前会显示数量让你确认。" }),
         make("div", { id: "inplace-review", hidden: true }, [
           make("label", { text: "摘要预览（已写入原聊天）" }),
