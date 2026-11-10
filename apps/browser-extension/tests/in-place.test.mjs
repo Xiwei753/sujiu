@@ -35,6 +35,7 @@ function context(turns, overrides = {}) {
       (async () => ({ entries: [] })),
     extractResolvedTurns: overrides.extractResolvedTurns || (() => []),
     extractResolvedEntryText: entry => entry[0] || "",
+    isThoughtOnlyTurn: turn => turn?.role === "model" && turn?.entry?.[19] === 1,
     assertSupportedEntries() {},
     confirm() { confirmationCalls++; return false; },
     setTimeout,
