@@ -15,7 +15,7 @@ function mockTurn(id, type) {
     classList: { contains() { return false; } }
   };
 }
-function context(turns) {
+function context(turns, overrides = {}) {
   let preview;
   let confirmationCalls = 0;
   const ctx = {
@@ -31,8 +31,10 @@ function context(turns) {
     PromptPanel: { showCompactionReview(p) { preview = p; }, status() {} },
     state: { branchInProgress: false },
     userSettings: { keepRounds: 1 },
-    fetchResolvedPromptThread: async () => ({ entries: [] }),
-    extractResolvedTurns: () => [],
+    fetchResolvedPromptThread: overrides.fetchResolvedPromptThread ||
+      (async () => ({ entries: [] })),
+    extractResolvedTurns: overrides.extractResolvedTurns || (() => []),
+    extractResolvedEntryText: entry => entry[0] || "",
     assertSupportedEntries() {},
     confirm() { confirmationCalls++; return false; },
     setTimeout,
@@ -40,7 +42,7 @@ function context(turns) {
   };
   ctx.RoundSplitter = vm.runInNewContext(roundsSource + "\nRoundSplitter", {});
   const compactor = vm.runInNewContext(source + "\nInPlaceCompaction", ctx);
-  return { compactor, get preview() { return preview; }, get confirmationCalls() { return confirmationCalls; } };
+  return { compactor, state: ctx.state, get preview() { return preview; }, get confirmationCalls() { return confirmationCalls; } };
 }
 test("keeps the newest exchange and snapshot while selecting old thoughts for deletion", () => {
   const turns = [
@@ -713,5 +715,48 @@ test("legacy dialogue cleanup still requires strict validation of cloud entries"
   const body=source.slice(source.indexOf("async function commit("),source.indexOf("function cancel()"));
   assert.match(body,/plan.promptId, Boolean\(plan.thoughtOnly\)/);
   assert.match(source,/if \(!allowOpaque\) assertSupportedEntries\(capture.entries, turns\)/);
+});
+
+test("cloud preflight failure releases the lock and permits repeated attempts", async () => {
+  const x = context([mockTurn("u","user"),mockTurn("t","thought"),mockTurn("m","model")]);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let error;
+    try { await x.compactor.cleanupThoughts(); }
+    catch (e) { error = e; }
+    assert.ok(error, "cloud inspection must reject missing server data");
+    assert.match(String(error.message), /无法读取 Google 云端完整历史/);
+    assert.equal(x.state.branchInProgress, false);
+  }
+  assert.equal(x.confirmationCalls, 0);
+});
+
+test("cloud tool records and incomplete page turns do not block thought cleanup preflight", async () => {
+  const entry = (role, content) => {
+    const result = new Array(9).fill(null);
+    result[0] = content;
+    result[8] = role;
+    return result;
+  };
+  const cloud = [
+    entry("user", "Hello"),
+    entry("tool", "web_search result"),
+    entry("model", "Search failed, but conversation can continue"),
+    entry("user", "Unfinished action due to error")
+  ];
+  const turns = [
+    mockTurn("u","user"),mockTurn("search","tool"),
+    mockTurn("reason","thought"),mockTurn("answer","model"),
+    mockTurn("incomplete","user")
+  ];
+  const x = context(turns, {
+    fetchResolvedPromptThread: async () => ({entries: cloud}),
+    extractResolvedTurns: entries => entries.map(e => ({
+      role:e[8], text:e[0], entry:e
+    }))
+  });
+  await x.compactor.cleanupThoughts();
+  assert.equal(x.confirmationCalls, 1,
+    "the confirmation dialog should be reached despite opaque tool/error turns");
+  assert.equal(x.state.branchInProgress, false);
 });
 
