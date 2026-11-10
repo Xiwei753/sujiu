@@ -663,3 +663,9 @@ test("thought-only commit checks preserved cloud replies after native autosave",
   assert.match(code,/const preview = preflightDom\(plan, savedInventory\)/);
 });
 
+test("native delete rechecks a thought node before clicking the destructive menu", () => {
+  const code = source.slice(source.indexOf("async function deleteOne("),source.indexOf("async function commit("));
+  assert.match(code,/if \(thoughtOnly && normalizeType\(turn\) !== "thought"\)/);
+  assert.match(source,/await deleteOne\(id, Boolean\(plan.thoughtOnly\)\)/);
+});
+
