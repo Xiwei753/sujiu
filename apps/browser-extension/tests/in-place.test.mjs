@@ -18,8 +18,12 @@ function mockTurn(id, type) {
 function context(turns, overrides = {}) {
   let preview;
   let confirmationCalls = 0;
+  const statuses = [];
   const ctx = {
-    document: { querySelectorAll: selector => selector === "ms-chat-turn" ? turns : [] },
+    document: overrides.document || {
+      querySelectorAll: selector => selector === "ms-chat-turn" ? turns : [],
+      getElementById: id => turns.find(turn => turn.id === id) || null
+    },
     Branching: { getCurrentPromptId() { return "chat-test"; } },
     CompactionTask: {
       isPinnedSummary: text => /\[\[SUJIU_MEMORY_V1:/.test(text),
@@ -28,8 +32,11 @@ function context(turns, overrides = {}) {
         .map(match => match[0])
     },
     log: { ui() {}, net() {} },
-    SaveMonitor: { attempts: 0, latest: null },
-    PromptPanel: { showCompactionReview(p) { preview = p; }, status() {} },
+    SaveMonitor: overrides.SaveMonitor || { attempts: 0, latest: null },
+    PromptPanel: {
+      showCompactionReview(p) { preview = p; },
+      status(message) { statuses.push(String(message)); }
+    },
     state: { branchInProgress: false },
     userSettings: { keepRounds: 1 },
     fetchResolvedPromptThread: overrides.fetchResolvedPromptThread ||
@@ -38,13 +45,23 @@ function context(turns, overrides = {}) {
     extractResolvedEntryText: entry => entry[0] || "",
     isThoughtOnlyTurn: turn => turn?.role === "model" && turn?.entry?.[19] === 1,
     assertSupportedEntries() {},
-    confirm() { confirmationCalls++; return false; },
+    confirm() {
+      confirmationCalls++;
+      overrides.onConfirm?.();
+      return Boolean(overrides.confirmResult);
+    },
+    PointerEvent: class { constructor() {} },
+    MouseEvent: class { constructor() {} },
     setTimeout,
     Promise
   };
   ctx.RoundSplitter = vm.runInNewContext(roundsSource + "\nRoundSplitter", {});
   const compactor = vm.runInNewContext(source + "\nInPlaceCompaction", ctx);
-  return { compactor, state: ctx.state, get preview() { return preview; }, get confirmationCalls() { return confirmationCalls; } };
+  return { compactor, state: ctx.state,
+    get preview() { return preview; },
+    get statuses() { return statuses; },
+    get confirmationCalls() { return confirmationCalls; }
+  };
 }
 test("keeps the newest exchange and snapshot while selecting old thoughts for deletion", () => {
   const turns = [
@@ -804,5 +821,101 @@ test("cloud-vs-DOM archive inventory mismatch is never a deletion gate", () => {
   assert.match(commit,/let savedInventory = null/);
   assert.match(commit,/const preview = preflightDom\(plan\)/);
   assert.match(commit,/let verificationNotice = ""/);
+});
+
+test("auto-generated task with unmarked model archive is still disposable, not a user-written recap", () => {
+  const turns = [
+    mockTurn("prompt", "user"), mockTurn("thinking", "thought"),
+    mockTurn("model", "model")
+  ];
+  turns[0].textContent = "Please summarize [[SUJIU_SCOPE_V2:12345678-aaaa]]";
+  turns[2].textContent = "【稳定设定】A\n【已发生的关键事件】B";
+  const x = context(turns);
+  const selection = x.compactor.preflightDom(x.compactor.planThoughtCleanup());
+  assert.deepEqual(Array.from(selection.targetIds), ["thinking", "prompt"]);
+  assert.ok(selection.protectedIds.includes("model"));
+});
+
+test("user-authored summary requests without the plugin task marker remain protected", () => {
+  const turns = [
+    mockTurn("manual-prompt", "user"), mockTurn("thought", "thought"),
+    mockTurn("result", "model")
+  ];
+  turns[0].textContent = "Summarize the earlier role-play conversation";
+  turns[2].textContent = "<state_snapshot>Historical details</state_snapshot>";
+  const x = context(turns);
+  const selection = x.compactor.preflightDom(x.compactor.planThoughtCleanup());
+  assert.deepEqual(Array.from(selection.targetIds), ["thought"]);
+  assert.ok(selection.protectedIds.includes("manual-prompt"));
+  assert.ok(selection.protectedIds.includes("result"));
+});
+
+test("cloud summary marker inventory ignores disposal of temporary scope requests", () => {
+  const x = context([]);
+  const before = x.compactor.archiveInventory([
+    {role:"user",text:"[[SUJIU_SCOPE_V2:12345678-aaaa]]"},
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-aaaa]] Summary"}
+  ],turn=>turn.role,turn=>turn.text);
+  const after = x.compactor.archiveInventory([
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-aaaa]] Summary"}
+  ],turn=>turn.role,turn=>turn.text);
+  assert.equal(before.compressionRequests, 1);
+  assert.equal(after.compressionRequests, 0);
+  assert.doesNotThrow(()=>x.compactor.verifyArchiveInventory(before,after));
+});
+
+test("native per-target failures are skipped; subsequent task and thinking are deleted while summary survives", async () => {
+  const turns = [
+    mockTurn("ordinary-user","user"),
+    mockTurn("thought-bad","thought"),
+    mockTurn("task","user"),
+    mockTurn("thought-good","thought"),
+    mockTurn("summary","model")
+  ];
+  turns[2].textContent = "[[SUJIU_SCOPE_V2:12345678-aaaa]]";
+  turns[4].textContent = "[[SUJIU_MEMORY_V1:12345678-aaaa]] Persistent model reply";
+  let active = null;
+  const deleted = [];
+  const overlay = {
+    disabled: false,
+    getAttribute(name) { return name === "aria-label" ? "Delete" : null; },
+    querySelector() { return null; },
+    dispatchEvent() {},
+    click() {
+      if (!active) throw new Error("No active menu turn");
+      const index = turns.indexOf(active);
+      if (index < 0) throw new Error("Turn already absent");
+      deleted.push(active.id);
+      turns.splice(index,1);
+      active = null;
+    }
+  };
+  for (const turn of turns) {
+    turn.querySelector = selector => selector.includes("ms-chat-turn-options") ?
+      { click() { active = turn; } } : null;
+  }
+  const document = {
+    querySelectorAll(selector) {
+      if (selector === "ms-chat-turn") return turns;
+      return selector.includes(".cdk-overlay-container") ? [overlay] : [];
+    },
+    getElementById(id) { return turns.find(t=>t.id===id) || null; }
+  };
+  const x = context(turns,{
+    document, confirmResult:true,
+    onConfirm() { turns[1].querySelector = () => null; },
+    SaveMonitor: {
+      attempts: 0,
+      async waitForNativeSave() {
+        return {observed:true,ok:true,status:200,attempts:1};
+      }
+    }
+  });
+  await x.compactor.cleanupThoughts();
+  assert.deepEqual(deleted,["thought-good","task"]);
+  assert.ok(document.getElementById("summary"),"the model summary must survive");
+  assert.ok(document.getElementById("thought-bad"),"unavailable thought is skipped");
+  assert.ok(x.statuses.some(msg=>msg.includes("跳过 1 条")));
+  assert.equal(x.state.branchInProgress,false);
 });
 
