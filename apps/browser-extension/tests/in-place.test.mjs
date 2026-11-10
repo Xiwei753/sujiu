@@ -27,6 +27,7 @@ function context(turns, overrides = {}) {
       getMemoryMarkers: text => [...String(text).matchAll(/\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/gi)]
         .map(match => match[0])
     },
+    log: { ui() {}, net() {} },
     SaveMonitor: { attempts: 0, latest: null },
     PromptPanel: { showCompactionReview(p) { preview = p; }, status() {} },
     state: { branchInProgress: false },
@@ -279,7 +280,7 @@ test("manual cleanup path skips generated-summary verification, but still requir
   const code = source.slice(source.indexOf("async function commit("), source.indexOf("function cancel()"));
   assert.match(code, /if \(!plan\.manual\) await verifyPersistedSummary\(plan\)/);
   assert.match(code, /if \(!confirm\(prompt\)\) return/);
-  assert.match(code, /const preview = preflightDom\(plan, savedInventory\)/);
+  assert.match(code, /const preview = preflightDom\(plan\)/);
   assert.match(source, /async function manualCleanup\(\)/);
 });
 
@@ -588,7 +589,7 @@ test("standalone cleanup removes every independent thought including recent roun
   assert.deepEqual(Array.from(selection.targetIds), ["old-thought","summary-thought","recent-thought1","recent-thought2"]);
   assert.equal(selection.deletedUserCount, 0);
   assert.equal(selection.deletedOldRounds, 0);
-  assert.equal(selection.protectedSummaryCount, 0);
+  assert.equal(selection.protectedSummaryCount, 1);
   for (const id of ["old-user","old-reply","summary-task","summary-reply",
     "recent-user1","recent-reply1",
     "recent-user2","recent-reply2"]) {
@@ -664,7 +665,7 @@ test("thought-only commit checks preserved cloud replies after native autosave",
   assert.match(code,/savedInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
   assert.match(code,/const afterInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
   assert.match(code,/if \(plan.thoughtOnly\) \{\s*verifyProtectedMessages\(savedInventory, afterInventory\)/);
-  assert.match(code,/const preview = preflightDom\(plan, savedInventory\)/);
+  assert.match(code,/const preview = preflightDom\(plan\)/);
 });
 
 test("native delete rechecks a thought node before clicking the destructive menu", () => {
