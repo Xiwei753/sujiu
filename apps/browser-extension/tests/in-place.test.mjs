@@ -162,7 +162,7 @@ test("native deletion autosaves without a separate Save click or cloud polling",
   const loop = source.slice(loopStart, wait);
   assert.doesNotMatch(loop, /fetchResolvedPromptThread|awaitCloudPersistence|NativeSave\.triggerOnce/);
   assert.equal((source.match(/SaveMonitor\.waitForNativeSave\(/g) || []).length, 1);
-  assert.match(source, /lastDeletionStartedAt = Date\.now\(\)/);
+  assert.match(source, /lastDeletionStartedAt = attemptStartedAt/);
   assert.match(source, /waitForNativeSave\(saveBaseline, lastDeletionStartedAt\)/);
 });
 
@@ -340,9 +340,9 @@ test("manual cleanup protects an older tool summary even without a memory marker
   const plan = x.compactor.planManualCleanup(1);
   assert.deepEqual(Array.from(plan.olderGroupIndices), [0, 2]);
   const preview = x.compactor.preflightDom(plan);
-  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","m2","u2","old-thought"]);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","m2","u2","old-thought","old-task"]);
   assert.ok(preview.protectedIds.includes("old-result"), "old summary reply is retained");
-  assert.ok(preview.protectedIds.includes("old-task"), "old summary command is kept to avoid cascading delete");
+  assert.ok(!preview.protectedIds.includes("old-task"), "the temporary auto-generated request is disposable");
   assert.equal(preview.protectedSummaryCount, 1);
 });
 
@@ -402,10 +402,10 @@ test("a new compression keeps old unmarked summaries and the newest result", () 
     totalRounds:3, olderRounds:2, recentRounds:1
   }, { marker });
   const preview = x.compactor.preflightDom(plan);
-  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","m2","u2","new-thought","new-task"]);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","m2","u2","new-thought","old-task","new-task"]);
   assert.ok(preview.protectedIds.includes("old-summary"));
   assert.ok(preview.protectedIds.includes("new-summary"));
-  assert.ok(preview.protectedIds.includes("old-task"));
+  assert.ok(!preview.protectedIds.includes("old-task"));
   assert.ok(!preview.protectedIds.includes("new-task"));
 });
 
