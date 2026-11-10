@@ -901,9 +901,21 @@ test("native per-target failures are skipped; subsequent task and thinking are d
     },
     getElementById(id) { return turns.find(t=>t.id===id) || null; }
   };
+  const liveEntries = () => turns.map(turn => {
+    const type = turn.getAttribute("data-turn-type");
+    const entry = new Array(33).fill(null);
+    entry[0] = turn.textContent;
+    entry[8] = type === "thought" ? "model" : type;
+    entry[19] = type === "thought" ? 1 : 0;
+    return entry;
+  });
   const x = context(turns,{
     document, confirmResult:true,
     onConfirm() { turns[1].querySelector = () => null; },
+    fetchResolvedPromptThread: async () => ({entries: liveEntries()}),
+    extractResolvedTurns: entries => entries.map(entry => ({
+      role: entry[8], text: entry[0], entry
+    })),
     SaveMonitor: {
       attempts: 0,
       async waitForNativeSave() {
@@ -911,11 +923,18 @@ test("native per-target failures are skipped; subsequent task and thinking are d
       }
     }
   });
+  x.compactor.stage(turns[4].textContent,
+    {totalRounds:1,olderRounds:0,recentRounds:1},
+    {marker:"[[SUJIU_SCOPE_V2:12345678-aaaa]]"});
   await x.compactor.cleanupThoughts();
   assert.deepEqual(deleted,["thought-good","task"]);
   assert.ok(document.getElementById("summary"),"the model summary must survive");
   assert.ok(document.getElementById("thought-bad"),"unavailable thought is skipped");
   assert.ok(x.statuses.some(msg=>msg.includes("跳过 1 条")));
+  assert.ok(!x.statuses.some(msg=>msg.includes("云端保存记录发生变化")),
+    "removing the disposable task must not count as losing a model summary");
+  assert.equal(x.compactor.pending, null,
+    "staged review of the deleted synthetic task is cleared");
   assert.equal(x.state.branchInProgress,false);
 });
 
