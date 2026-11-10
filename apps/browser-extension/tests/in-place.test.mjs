@@ -561,7 +561,7 @@ test("old unmarked archive records must also match the cloud inventory", () => {
     {role:"model",text:"unmarked plain reply"}
   ], turn=>turn.role, turn=>turn.text);
   assert.throws(()=>x.compactor.verifyArchiveInventory(cloud,page),
-    /云端与网页的历史压缩摘要不一致/);
+    /保存的历史压缩摘要记录与此前读取结果不一致/);
 });
 
 test("autosave completion must be followed by cloud archive verification", () => {
@@ -657,7 +657,7 @@ test("post-delete normal user/model replies must remain exactly intact, includin
     ]
   };
   assert.throws(() => x.compactor.verifyProtectedMessages(before,afterLostReply),
-    /普通对话或摘要发生变化/);
+    /普通对话或摘要记录与此前读取结果不一致/);
 });
 
 test("thought-only commit checks preserved cloud replies after native autosave", () => {
