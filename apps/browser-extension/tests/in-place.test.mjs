@@ -27,6 +27,7 @@ function context(turns, overrides = {}) {
       getMemoryMarkers: text => [...String(text).matchAll(/\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/gi)]
         .map(match => match[0])
     },
+    log: { ui() {}, net() {} },
     SaveMonitor: { attempts: 0, latest: null },
     PromptPanel: { showCompactionReview(p) { preview = p; }, status() {} },
     state: { branchInProgress: false },
@@ -279,7 +280,7 @@ test("manual cleanup path skips generated-summary verification, but still requir
   const code = source.slice(source.indexOf("async function commit("), source.indexOf("function cancel()"));
   assert.match(code, /if \(!plan\.manual\) await verifyPersistedSummary\(plan\)/);
   assert.match(code, /if \(!confirm\(prompt\)\) return/);
-  assert.match(code, /const preview = preflightDom\(plan, savedInventory\)/);
+  assert.match(code, /const preview = preflightDom\(plan\)/);
   assert.match(source, /async function manualCleanup\(\)/);
 });
 
@@ -518,7 +519,7 @@ test("three compression generations are preserved by a cloud-verified inventory"
   assert.deepEqual(Array.from(selection.targetIds), ["old-m","old-u","middle-m","middle-u"]);
 });
 
-test("missing one cloud-saved archive blocks manual cleanup before any deletion", () => {
+test("cloud and rendered archive counts can differ without blocking native cleanup", () => {
   const turns = [
     mockTurn("old-u", "user"), mockTurn("old-m", "model"),
     mockTurn("task-a", "user"), mockTurn("memory-a", "model"),
@@ -533,8 +534,10 @@ test("missing one cloud-saved archive blocks manual cleanup before any deletion"
   ], turn => turn.role || turn.getAttribute("data-turn-type"),
     turn => turn.text || turn.textContent);
   assert.equal(expected.markers.size, 2);
-  assert.throws(() => x.compactor.preflightDom(x.compactor.planManualCleanup(1), expected),
-    /云端与网页的历史压缩摘要不一致/);
+  const selection = x.compactor.preflightDom(x.compactor.planManualCleanup(1), expected);
+  assert.deepEqual(Array.from(selection.targetIds), ["old-m", "old-u"]);
+  assert.ok(selection.protectedIds.includes("memory-a"));
+  assert.ok(selection.protectedIds.includes("task-a"));
 });
 
 test("a marker quoted in a user message cannot fake a protected model result", () => {
@@ -558,13 +561,13 @@ test("old unmarked archive records must also match the cloud inventory", () => {
     {role:"model",text:"unmarked plain reply"}
   ], turn=>turn.role, turn=>turn.text);
   assert.throws(()=>x.compactor.verifyArchiveInventory(cloud,page),
-    /云端与网页的历史压缩摘要不一致/);
+    /保存的历史压缩摘要记录与此前读取结果不一致/);
 });
 
 test("autosave completion must be followed by cloud archive verification", () => {
   const code = source.slice(source.indexOf("async function commit("),source.indexOf("function cancel()"));
-  assert.match(code,/const savedInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
-  assert.match(code,/preflightDom\(plan, savedInventory\)/);
+  assert.match(code,/savedInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
+  assert.match(code,/preflightDom\(plan\)/);
   assert.match(code,/const afterInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
   assert.match(code,/verifyArchiveInventory\(savedInventory, afterInventory\)/);
 });
@@ -586,7 +589,7 @@ test("standalone cleanup removes every independent thought including recent roun
   assert.deepEqual(Array.from(selection.targetIds), ["old-thought","summary-thought","recent-thought1","recent-thought2"]);
   assert.equal(selection.deletedUserCount, 0);
   assert.equal(selection.deletedOldRounds, 0);
-  assert.equal(selection.protectedSummaryCount, 0);
+  assert.equal(selection.protectedSummaryCount, 1);
   for (const id of ["old-user","old-reply","summary-task","summary-reply",
     "recent-user1","recent-reply1",
     "recent-user2","recent-reply2"]) {
@@ -618,7 +621,7 @@ test("standalone cleanup rejects a changed or virtualized live DOM", () => {
   assert.throws(() => x.compactor.preflightDom(plan), /网页聊天节点在准备期间发生变化/);
 });
 
-test("standalone cleanup refuses to delete when the cloud archive inventory misses an old summary", () => {
+test("thought-only cleanup ignores a mismatched cloud archive list", () => {
   const turns = [
     mockTurn("task","user"), mockTurn("archive-thought","thought"),
     mockTurn("archive","model"),mockTurn("recent-user","user"),mockTurn("recent-model","model")
@@ -630,10 +633,10 @@ test("standalone cleanup refuses to delete when the cloud archive inventory miss
     ...turns,
     {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-bbbb]] Missing"}
   ], turn => turn.role || turn.getAttribute("data-turn-type"), turn => turn.text || turn.textContent);
-  assert.throws(
-    () => x.compactor.preflightDom(x.compactor.planThoughtCleanup(1),cloud),
-    /云端与网页的历史压缩摘要不一致/
-  );
+  const selection = x.compactor.preflightDom(x.compactor.planThoughtCleanup(1), cloud);
+  assert.deepEqual(Array.from(selection.targetIds), ["archive-thought"]);
+  assert.ok(selection.protectedIds.includes("archive"));
+  assert.ok(selection.protectedIds.includes("task"));
 });
 
 test("post-delete normal user/model replies must remain exactly intact, including unmarked history", () => {
@@ -654,15 +657,15 @@ test("post-delete normal user/model replies must remain exactly intact, includin
     ]
   };
   assert.throws(() => x.compactor.verifyProtectedMessages(before,afterLostReply),
-    /普通对话或摘要发生变化/);
+    /普通对话或摘要记录与此前读取结果不一致/);
 });
 
 test("thought-only commit checks preserved cloud replies after native autosave", () => {
   const code = source.slice(source.indexOf("async function commit("),source.indexOf("function cancel()"));
-  assert.match(code,/const savedInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
+  assert.match(code,/savedInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
   assert.match(code,/const afterInventory = await readSavedArchiveInventory\(\s*plan.promptId, Boolean\(plan.thoughtOnly\)\)/);
   assert.match(code,/if \(plan.thoughtOnly\) \{\s*verifyProtectedMessages\(savedInventory, afterInventory\)/);
-  assert.match(code,/const preview = preflightDom\(plan, savedInventory\)/);
+  assert.match(code,/const preview = preflightDom\(plan\)/);
 });
 
 test("native delete rechecks a thought node before clicking the destructive menu", () => {
@@ -697,7 +700,7 @@ test("all thought cleanup has no recent-turn preservation window", () => {
 test("cloud preflight and DOM failures are covered by unconditional lock release", () => {
   const body=source.slice(source.indexOf("async function commit("), source.indexOf("function cancel()"));
   const acquire=body.indexOf("deleting = true;");
-  const cloud=body.indexOf("const savedInventory = await readSavedArchiveInventory(");
+  const cloud=body.indexOf("savedInventory = await readSavedArchiveInventory(");
   const release=body.lastIndexOf("deleting = false;");
   assert.ok(acquire >= 0 && acquire < cloud, "lock acquired before cloud inspection");
   assert.ok(release > cloud, "the lock is released on preflight failure");
@@ -718,17 +721,13 @@ test("legacy dialogue cleanup still requires strict validation of cloud entries"
   assert.match(source,/if \(!allowOpaque\) assertSupportedEntries\(capture.entries, turns\)/);
 });
 
-test("cloud preflight failure releases the lock and permits repeated attempts", async () => {
+test("cloud preflight failures do not block retries or leave the lock held", async () => {
   const x = context([mockTurn("u","user"),mockTurn("t","thought"),mockTurn("m","model")]);
   for (let attempt = 0; attempt < 2; attempt++) {
-    let error;
-    try { await x.compactor.cleanupThoughts(); }
-    catch (e) { error = e; }
-    assert.ok(error, "cloud inspection must reject missing server data");
-    assert.match(String(error.message), /无法读取 Google 云端完整历史/);
+    await x.compactor.cleanupThoughts();
     assert.equal(x.state.branchInProgress, false);
   }
-  assert.equal(x.confirmationCalls, 0);
+  assert.equal(x.confirmationCalls, 2);
 });
 
 test("cloud tool records and incomplete page turns do not block thought cleanup preflight", async () => {
@@ -759,5 +758,49 @@ test("cloud tool records and incomplete page turns do not block thought cleanup 
   assert.equal(x.confirmationCalls, 1,
     "the confirmation dialog should be reached despite opaque tool/error turns");
   assert.equal(x.state.branchInProgress, false);
+});
+
+test("cloud-to-DOM mismatch does not prevent the confirmation dialog", async () => {
+  const cloudTurn = (role, text) => {
+    const entry = new Array(9).fill(null);
+    entry[0] = text;
+    entry[8] = role;
+    return entry;
+  };
+  const turns = [
+    mockTurn("u","user"),mockTurn("thinking","thought"),mockTurn("m","model")
+  ];
+  const x = context(turns, {
+    fetchResolvedPromptThread: async () => ({
+      entries: [
+        cloudTurn("user", "Hello"),
+        cloudTurn("model", "[[SUJIU_MEMORY_V1:12345678-abcd]] Archive missing from DOM")
+      ]
+    }),
+    extractResolvedTurns: entries => entries.map(entry => ({
+      role: entry[8], text: entry[0], entry
+    }))
+  });
+  await x.compactor.cleanupThoughts();
+  assert.equal(x.confirmationCalls, 1);
+  assert.equal(x.state.branchInProgress, false);
+});
+
+test("native deletion still protects explicit summary and scope markers", () => {
+  const code=source.slice(source.indexOf("async function deleteOne("),
+    source.indexOf("async function commit("));
+  assert.match(code,/SUJIU_\(\?:MEMORY_V1\|SCOPE_V2\)/);
+  assert.match(code,/目标带有素酒永久记忆标识/);
+});
+
+test("cloud-vs-DOM archive inventory mismatch is never a deletion gate", () => {
+  const code=source.slice(source.indexOf("function preflightDom("),
+    source.indexOf("async function findNativeDeleteItem("));
+  assert.doesNotMatch(code,/verifyArchiveInventory\(/);
+  const commit=source.slice(source.indexOf("async function commit("),
+    source.indexOf("function cancel()"));
+  assert.match(commit,/let savedInventory = null/);
+  assert.match(commit,/const preview = preflightDom\(plan\)/);
+  assert.match(commit,/let verificationNotice = ""/);
 });
 
