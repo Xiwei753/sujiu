@@ -137,9 +137,11 @@
             const allMarkersMatch = expected.markers.size === actual.markers.size &&
                 [...expected.markers].every(([marker, count]) =>
                     actual.markers.get(marker) === count);
+            // SUJIU_SCOPE_V2 user requests are deliberately disposable.
+            // Only model summaries (marked or recognized legacy replies)
+            // must remain after cleanup.
             if (!allMarkersMatch ||
-                expected.legacyReplies !== actual.legacyReplies ||
-                expected.compressionRequests !== actual.compressionRequests) {
+                expected.legacyReplies !== actual.legacyReplies) {
                 throw new Error("Google 保存的历史压缩摘要记录与此前读取结果不一致");
             }
         }
@@ -166,6 +168,9 @@
                     .filter(entry => !isThoughtOnlyTurn({
                         role: entry[8], entry
                     }))
+                    .filter(entry => !(entry[8] === "user" &&
+                        /\[\[SUJIU_SCOPE_V2:[a-z0-9-]{8,80}\]\]/i.test(
+                            String(extractResolvedEntryText(entry) || ""))))
                     .map(entry => {
                         const text = extractResolvedEntryText(entry);
                         // Preserve unrecognized tool messages and error
@@ -665,9 +670,19 @@
                         throw new Error("清理过程中会话已经切换");
                     }
                     lastDeletionStartedAt = Date.now();
-                    const result = await deleteOne(id, Boolean(plan.thoughtOnly));
+                    let result;
+                    try {
+                        result = await deleteOne(id, Boolean(plan.thoughtOnly));
+                    } catch (error) {
+                        result = { deleted: false,
+                            reason: String(error?.message || error) };
+                    }
                     if (result?.deleted) processed++;
-                    else skipped++;
+                    else {
+                        skipped++;
+                        log.ui("Skipping undeletable native turn", id,
+                            result?.reason || "unknown");
+                    }
                     // An Angular cascading delete may remove the summary
                     // alongside its temporary user prompt. Stop immediately
                     // if that happens, instead of deleting the rest blindly.
