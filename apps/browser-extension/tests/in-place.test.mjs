@@ -1033,24 +1033,25 @@ test("RoundSplitter preserves leading unmarked model summaries as pinned history
 
 test("ALL consecutive orphaned summaries after an ordinary reply survive cleanup", () => {
   const turns=[
+    mockTurn("pre-u","user"),mockTurn("pre-m","model"),
     mockTurn("older-u","user"),mockTurn("older-m","model"),
     mockTurn("archive-1","model"),mockTurn("archive-2","model"),
     mockTurn("archive-3","model"),
     mockTurn("current-u","user"),mockTurn("current-m","model")
   ];
-  turns[2].textContent="[[SUJIU_MEMORY_V1:12345678-aaaa]] First compressed memory";
-  turns[3].textContent="Second compressed memory, marker missing";
-  turns[4].textContent="Third compressed memory, marker missing";
+  turns[4].textContent="[[SUJIU_MEMORY_V1:12345678-aaaa]] First compressed memory";
+  turns[5].textContent="Second compressed memory, marker missing";
+  turns[6].textContent="Third compressed memory, marker missing";
   const x=context(turns);
   const groups=x.compactor.collectGroups(turns);
   assert.equal(groups.filter(group=>group.kind==="memory").length,3);
   const plan=x.compactor.planManualCleanup(1);
-  assert.equal(plan.totalRounds,2);
-  assert.equal(plan.olderRounds,1);
+  assert.equal(plan.totalRounds,3);
+  assert.equal(plan.olderRounds,2);
   const preview=x.compactor.preflightDom(plan);
   assert.equal(preview.protectedSummaryCount,3);
-  assert.deepEqual(Array.from(preview.targetIds),["older-m","older-u"]);
-  for(const id of ["archive-1","archive-2","archive-3","current-u","current-m"])
+  assert.deepEqual(Array.from(preview.targetIds),["pre-m","pre-u"]);
+  for(const id of ["archive-1","archive-2","archive-3","older-u","older-m","current-u","current-m"])
     assert.ok(preview.protectedIds.includes(id),id+" must survive");
 });
 
@@ -1070,8 +1071,8 @@ test("multiple standalone unmarked archives interspersed with ordinary rounds re
   assert.equal(plan.totalRounds,3);
   const preview=x.compactor.preflightDom(plan);
   assert.equal(preview.protectedSummaryCount,4);
-  assert.deepEqual(Array.from(preview.targetIds),["old-m","old-u"]);
-  for(const id of ["archive-first","archive-middle","archive-last-a","archive-last-b"])
+  assert.deepEqual(Array.from(preview.targetIds),[]);
+  for(const id of ["archive-first","archive-middle","archive-last-a","archive-last-b","old-u","old-m"])
     assert.ok(preview.protectedIds.includes(id),id+" must survive");
 });
 
