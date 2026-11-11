@@ -1031,3 +1031,86 @@ test("RoundSplitter preserves leading unmarked model summaries as pinned history
   assert.equal(result.recent[0].text,"C");
 });
 
+test("ALL consecutive orphaned summaries after an ordinary reply survive cleanup", () => {
+  const turns=[
+    mockTurn("older-u","user"),mockTurn("older-m","model"),
+    mockTurn("archive-1","model"),mockTurn("archive-2","model"),
+    mockTurn("archive-3","model"),
+    mockTurn("current-u","user"),mockTurn("current-m","model")
+  ];
+  turns[2].textContent="[[SUJIU_MEMORY_V1:12345678-aaaa]] First compressed memory";
+  turns[3].textContent="Second compressed memory, marker missing";
+  turns[4].textContent="Third compressed memory, marker missing";
+  const x=context(turns);
+  const groups=x.compactor.collectGroups(turns);
+  assert.equal(groups.filter(group=>group.kind==="memory").length,3);
+  const plan=x.compactor.planManualCleanup(1);
+  assert.equal(plan.totalRounds,2);
+  assert.equal(plan.olderRounds,1);
+  const preview=x.compactor.preflightDom(plan);
+  assert.equal(preview.protectedSummaryCount,3);
+  assert.deepEqual(Array.from(preview.targetIds),["older-m","older-u"]);
+  for(const id of ["archive-1","archive-2","archive-3","current-u","current-m"])
+    assert.ok(preview.protectedIds.includes(id),id+" must survive");
+});
+
+test("multiple standalone unmarked archives interspersed with ordinary rounds remain pinned", () => {
+  const turns=[
+    mockTurn("archive-first","model"),
+    mockTurn("old-u","user"),mockTurn("old-m","model"),
+    mockTurn("archive-middle","model"),
+    mockTurn("next-u","user"),mockTurn("next-m","model"),
+    mockTurn("archive-last-a","model"),mockTurn("archive-last-b","model"),
+    mockTurn("recent-u","user"),mockTurn("recent-m","model")
+  ];
+  const x=context(turns);
+  const groups=x.compactor.collectGroups(turns);
+  assert.equal(groups.filter(group=>group.kind==="memory").length,4);
+  const plan=x.compactor.planManualCleanup(1);
+  assert.equal(plan.totalRounds,3);
+  const preview=x.compactor.preflightDom(plan);
+  assert.equal(preview.protectedSummaryCount,4);
+  assert.deepEqual(Array.from(preview.targetIds),["old-m","old-u"]);
+  for(const id of ["archive-first","archive-middle","archive-last-a","archive-last-b"])
+    assert.ok(preview.protectedIds.includes(id),id+" must survive");
+});
+
+test("multi-generation orphaned memories never count toward RoundSplitter protected N rounds", () => {
+  const rounds=vm.runInNewContext(roundsSource+"\nRoundSplitter",{});
+  const turns=[
+    {role:"user",text:"Old user"},{role:"model",text:"Old reply"},
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-aaaa]] A"},
+    {role:"model",text:"B archive without marker"},
+    {role:"model",text:"C archive without marker"},
+    {role:"user",text:"Middle user"},{role:"model",text:"Middle reply"},
+    {role:"model",text:"D later standalone archive"},
+    {role:"user",text:"Recent user"},{role:"model",text:"Recent reply"}
+  ];
+  const split=rounds.partition(turns,1);
+  assert.equal(split.totalRounds,3);
+  assert.equal(split.olderRounds,2);
+  assert.equal(split.pinnedMemories,4);
+  for (const text of ["[[SUJIU_MEMORY_V1:12345678-aaaa]] A",
+    "B archive without marker","C archive without marker","D later standalone archive"])
+    assert.ok(split.older.some(t=>t.text===text),text+" must be included in old history context");
+  assert.equal(split.recent[0].text,"Recent user");
+});
+
+test("standalone model reply after a deleted temporary request is protected regardless of position", () => {
+  const turns=[
+    mockTurn("u1","user"),mockTurn("m1","model"),
+    mockTurn("archive-1","model"),
+    mockTurn("u2","user"),mockTurn("m2","model"),
+    mockTurn("archive-2","model"),
+    mockTurn("archive-3","model"),
+    mockTurn("u3","user"),mockTurn("m3","model")
+  ];
+  turns[3].textContent="Just a normal user question";
+  const x=context(turns);
+  const plan=x.compactor.planManualCleanup(1);
+  const p=x.compactor.preflightDom(plan);
+  for(const id of ["archive-1","archive-2","archive-3"])
+    assert.ok(!p.targetIds.includes(id),id+" cannot be deleted");
+  assert.equal(p.protectedSummaryCount,3);
+});
+
