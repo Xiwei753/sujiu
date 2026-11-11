@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.4.11
+// @version      0.4.12
 // @updateURL    https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @downloadURL  https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @description  AI Studio manual context compaction and history cleanup
@@ -13,7 +13,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.4.11", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.4.12", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -75,7 +75,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.4.11";
+    const SCRIPT_VERSION = "0.4.12";
 
     const state = {
         compressionInProgress: false,
@@ -987,10 +987,16 @@ const RoundSplitter = Object.freeze({
                JSON.stringify(current[0]?.entry?.[0] ?? ""))))) {
           closeRound();
           units.push({ kind: "memory", turns: [turn] });
+        } else if (turn.role === "model" && current?.some(item =>
+          item.role === "model") &&
+          !/\[\[SUJIU_SCOPE_V2:/i.test(this.textOf(current[0]))) {
+          // More than one independently saved MODEL turn may follow
+          // deletion of several temporary USER summary requests. A
+          // standalone unmarked archive may occur anywhere in history.
+          // Close the preceding completed exchange and pin this reply.
+          closeRound();
+          units.push({ kind: "memory", turns: [turn] });
         } else if (!current && turn.role === "model") {
-          // A previously deleted SUJIU_SCOPE_V2 task can leave an
-          // unmarked standalone MODEL summary at the start of history.
-          // Preserve it as archived content, never as a dialogue round.
           units.push({ kind: "memory", turns: [turn] });
         } else if (!current) {
           throw new Error("Conversation starts with a non-user turn");
@@ -1857,7 +1863,14 @@ const RoundSplitter = Object.freeze({
                     const group = groups[groups.length - 1];
                     const hasMemory = type === "model" && isArchiveReply(turn);
                     const toolPrompt = group?.turns?.[0]?.textContent?.includes("[[SUJIU_SCOPE_V2:");
-                    if (hasMemory && (!group || (group.hasModel && !toolPrompt))) {
+                    // Deleting a temporary USER task leaves each archived
+                    // MODEL reply at its original position. An unmarked
+                    // standalone reply may follow an ordinary completed round,
+                    // or another archive. Protect *every* such MODEL turn,
+                    // rather than appending it to an old round for deletion.
+                    const followsCompletedModel = type === "model" &&
+                        group?.hasModel && !toolPrompt;
+                    if ((hasMemory && !group) || followsCompletedModel) {
                         groups.push({ turns: [turn], hasModel: true, kind: "memory" });
                         continue;
                     }
@@ -2231,6 +2244,25 @@ const RoundSplitter = Object.freeze({
             // even if the current DOM no longer groups them with their task.
             if (type === "model" && isArchiveReply(turn)) {
                 return { deleted: false, reason: "模型摘要受保护" };
+            }
+            if (type === "model") {
+                // Check the current native order again at the moment of
+                // deletion. The model reply may have become an orphan after
+                // an earlier USER task was removed in the same batch.
+                const liveTurns = [...document.querySelectorAll("ms-chat-turn")];
+                const at = liveTurns.indexOf(turn);
+                let previous = null;
+                for (let index = at - 1; index >= 0; index--) {
+                    const role = normalizeType(liveTurns[index]);
+                    if (role === "user" || role === "model") {
+                        previous = role;
+                        break;
+                    }
+                }
+                if (at >= 0 && previous !== "user") {
+                    return { deleted: false,
+                        reason: "独立模型回复或压缩摘要始终保留" };
+                }
             }
             if (type === "user" && isArchiveRequest(turn) && !isTask) {
                 return { deleted: false, reason: "人工摘要请求保持原样" };
