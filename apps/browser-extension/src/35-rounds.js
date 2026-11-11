@@ -70,10 +70,16 @@ const RoundSplitter = Object.freeze({
                JSON.stringify(current[0]?.entry?.[0] ?? ""))))) {
           closeRound();
           units.push({ kind: "memory", turns: [turn] });
+        } else if (turn.role === "model" && current?.some(item =>
+          item.role === "model") &&
+          !/\[\[SUJIU_SCOPE_V2:/i.test(this.textOf(current[0]))) {
+          // More than one independently saved MODEL turn may follow
+          // deletion of several temporary USER summary requests. A
+          // standalone unmarked archive may occur anywhere in history.
+          // Close the preceding completed exchange and pin this reply.
+          closeRound();
+          units.push({ kind: "memory", turns: [turn] });
         } else if (!current && turn.role === "model") {
-          // A previously deleted SUJIU_SCOPE_V2 task can leave an
-          // unmarked standalone MODEL summary at the start of history.
-          // Preserve it as archived content, never as a dialogue round.
           units.push({ kind: "memory", turns: [turn] });
         } else if (!current) {
           throw new Error("Conversation starts with a non-user turn");
