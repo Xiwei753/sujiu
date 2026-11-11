@@ -592,6 +592,25 @@
             if (type === "model" && isArchiveReply(turn)) {
                 return { deleted: false, reason: "模型摘要受保护" };
             }
+            if (type === "model") {
+                // Check the current native order again at the moment of
+                // deletion. The model reply may have become an orphan after
+                // an earlier USER task was removed in the same batch.
+                const liveTurns = [...document.querySelectorAll("ms-chat-turn")];
+                const at = liveTurns.indexOf(turn);
+                let previous = null;
+                for (let index = at - 1; index >= 0; index--) {
+                    const role = normalizeType(liveTurns[index]);
+                    if (role === "user" || role === "model") {
+                        previous = role;
+                        break;
+                    }
+                }
+                if (at >= 0 && previous !== "user") {
+                    return { deleted: false,
+                        reason: "独立模型回复或压缩摘要始终保留" };
+                }
+            }
             if (type === "user" && isArchiveRequest(turn) && !isTask) {
                 return { deleted: false, reason: "人工摘要请求保持原样" };
             }
