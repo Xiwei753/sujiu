@@ -70,6 +70,11 @@ const RoundSplitter = Object.freeze({
                JSON.stringify(current[0]?.entry?.[0] ?? ""))))) {
           closeRound();
           units.push({ kind: "memory", turns: [turn] });
+        } else if (!current && turn.role === "model") {
+          // A previously deleted SUJIU_SCOPE_V2 task can leave an
+          // unmarked standalone MODEL summary at the start of history.
+          // Preserve it as archived content, never as a dialogue round.
+          units.push({ kind: "memory", turns: [turn] });
         } else if (!current) {
           throw new Error("Conversation starts with a non-user turn");
         } else {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.4.10
+// @version      0.4.11
 // @updateURL    https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @downloadURL  https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @description  AI Studio manual context compaction and history cleanup
@@ -13,7 +13,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.4.10", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.4.11", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -75,7 +75,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.4.10";
+    const SCRIPT_VERSION = "0.4.11";
 
     const state = {
         compressionInProgress: false,
@@ -987,6 +987,11 @@ const RoundSplitter = Object.freeze({
                JSON.stringify(current[0]?.entry?.[0] ?? ""))))) {
           closeRound();
           units.push({ kind: "memory", turns: [turn] });
+        } else if (!current && turn.role === "model") {
+          // A previously deleted SUJIU_SCOPE_V2 task can leave an
+          // unmarked standalone MODEL summary at the start of history.
+          // Preserve it as archived content, never as a dialogue round.
+          units.push({ kind: "memory", turns: [turn] });
         } else if (!current) {
           throw new Error("Conversation starts with a non-user turn");
         } else {
@@ -1856,12 +1861,25 @@ const RoundSplitter = Object.freeze({
                         groups.push({ turns: [turn], hasModel: true, kind: "memory" });
                         continue;
                     }
-                    if (!group) throw new Error("历史消息的顺序异常");
+                    if (!group) {
+                        // Removing a disposable SUJIU_SCOPE_V2 request can
+                        // leave its MODEL summary as the first saved message.
+                        // Even unmarked legacy summaries are valid standalone
+                        // content and must not consume a dialogue round.
+                        groups.push({
+                            turns: [turn],
+                            hasModel: type === "model",
+                            kind: "memory"
+                        });
+                        continue;
+                    }
                     group.turns.push(turn);
                     if (type === "model") group.hasModel = true;
                 }
             }
-            if (groups.some(group => !group.hasModel)) throw new Error("发现未完成的轮次，已停止删除");
+            if (groups.some(group => group.kind === "round" && !group.hasModel)) {
+                throw new Error("发现未完成的轮次，已停止删除");
+            }
             return groups;
         }
 

@@ -959,3 +959,75 @@ test("last deletion save timestamp ignores targets skipped after preflight", () 
   assert.doesNotMatch(sourceLoop,/lastDeletionStartedAt = Date.now\(\)/);
 });
 
+test("cleanup accepts a saved conversation beginning with a marked orphaned model summary", () => {
+  const turns = [
+    mockTurn("summary","model"),
+    mockTurn("old-u","user"),mockTurn("old-m","model"),
+    mockTurn("middle-u","user"),mockTurn("middle-m","model"),
+    mockTurn("latest-u","user"),mockTurn("latest-m","model")
+  ];
+  turns[0].textContent = "[[SUJIU_MEMORY_V1:12345678-aaaa]] Earlier conversation";
+  const x=context(turns);
+  const groups=x.compactor.collectGroups(turns);
+  assert.equal(groups[0].kind,"memory");
+  assert.equal(groups[0].hasModel,true);
+  const plan=x.compactor.planManualCleanup(1);
+  assert.equal(plan.totalRounds,3);
+  assert.equal(plan.olderRounds,2);
+  const chosen=x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(chosen.targetIds),["old-m","old-u","middle-m","middle-u"]);
+  assert.ok(chosen.protectedIds.includes("summary"));
+  assert.ok(chosen.protectedIds.includes("latest-u"));
+  assert.ok(chosen.protectedIds.includes("latest-m"));
+});
+
+test("first orphaned MODEL turn is accepted even if Google omitted the memory marker", () => {
+  const turns=[
+    mockTurn("legacy-model","model"),
+    mockTurn("old-u","user"),mockTurn("old-m","model"),
+    mockTurn("latest-u","user"),mockTurn("latest-m","model")
+  ];
+  turns[0].textContent="Old summary with no reliable marker";
+  const x=context(turns);
+  const groups=x.compactor.collectGroups(turns);
+  assert.equal(groups[0].kind,"memory");
+  assert.equal(groups[0].hasModel,true);
+  const preview=x.compactor.preflightDom(x.compactor.planManualCleanup(1));
+  assert.deepEqual(Array.from(preview.targetIds),["old-m","old-u"]);
+  assert.ok(preview.protectedIds.includes("legacy-model"));
+});
+
+test("leading detached thinking and its model summary do not break normal history grouping", () => {
+  const turns=[
+    mockTurn("orphan-thought","thought"),
+    mockTurn("orphan-summary","model"),
+    mockTurn("old-u","user"),mockTurn("old-m","model"),
+    mockTurn("latest-u","user"),mockTurn("latest-m","model")
+  ];
+  const x=context(turns);
+  const groups=x.compactor.collectGroups(turns);
+  assert.equal(groups[0].kind,"memory");
+  assert.equal(groups[0].hasModel,true);
+  assert.deepEqual(Array.from(groups[0].turns.map(turn=>turn.id)),
+    ["orphan-thought","orphan-summary"]);
+  const preview=x.compactor.preflightDom(x.compactor.planManualCleanup(1));
+  assert.deepEqual(Array.from(preview.targetIds),["old-m","old-u"]);
+  assert.ok(preview.protectedIds.includes("orphan-summary"));
+});
+
+test("RoundSplitter preserves leading unmarked model summaries as pinned history", () => {
+  const rounds=vm.runInNewContext(roundsSource+"\nRoundSplitter",{});
+  const turns=[
+    {role:"model",text:"Previous summary, model reply after prompt was deleted"},
+    {role:"user",text:"A"},{role:"model",text:"Reply A"},
+    {role:"user",text:"B"},{role:"model",text:"Reply B"},
+    {role:"user",text:"C"},{role:"model",text:"Reply C"}
+  ];
+  const result=rounds.partition(turns,1);
+  assert.equal(result.totalRounds,3);
+  assert.equal(result.olderRounds,2);
+  assert.equal(result.pinnedMemories,1);
+  assert.equal(result.older[0].text,turns[0].text);
+  assert.equal(result.recent[0].text,"C");
+});
+

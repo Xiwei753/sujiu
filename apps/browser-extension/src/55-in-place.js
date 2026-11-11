@@ -214,12 +214,25 @@
                         groups.push({ turns: [turn], hasModel: true, kind: "memory" });
                         continue;
                     }
-                    if (!group) throw new Error("历史消息的顺序异常");
+                    if (!group) {
+                        // Removing a disposable SUJIU_SCOPE_V2 request can
+                        // leave its MODEL summary as the first saved message.
+                        // Even unmarked legacy summaries are valid standalone
+                        // content and must not consume a dialogue round.
+                        groups.push({
+                            turns: [turn],
+                            hasModel: type === "model",
+                            kind: "memory"
+                        });
+                        continue;
+                    }
                     group.turns.push(turn);
                     if (type === "model") group.hasModel = true;
                 }
             }
-            if (groups.some(group => !group.hasModel)) throw new Error("发现未完成的轮次，已停止删除");
+            if (groups.some(group => group.kind === "round" && !group.hasModel)) {
+                throw new Error("发现未完成的轮次，已停止删除");
+            }
             return groups;
         }
 
