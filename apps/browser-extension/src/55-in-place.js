@@ -210,7 +210,14 @@
                     const group = groups[groups.length - 1];
                     const hasMemory = type === "model" && isArchiveReply(turn);
                     const toolPrompt = group?.turns?.[0]?.textContent?.includes("[[SUJIU_SCOPE_V2:");
-                    if (hasMemory && (!group || (group.hasModel && !toolPrompt))) {
+                    // Deleting a temporary USER task leaves each archived
+                    // MODEL reply at its original position. An unmarked
+                    // standalone reply may follow an ordinary completed round,
+                    // or another archive. Protect *every* such MODEL turn,
+                    // rather than appending it to an old round for deletion.
+                    const followsCompletedModel = type === "model" &&
+                        group?.hasModel && !toolPrompt;
+                    if ((hasMemory && !group) || followsCompletedModel) {
                         groups.push({ turns: [turn], hasModel: true, kind: "memory" });
                         continue;
                     }
