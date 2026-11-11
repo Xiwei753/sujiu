@@ -1115,3 +1115,31 @@ test("standalone model reply after a deleted temporary request is protected rega
   assert.equal(p.protectedSummaryCount,3);
 });
 
+test("standalone archived model replies remain protected when thought blocks sit between them", () => {
+  const turns=[
+    mockTurn("old-u","user"),mockTurn("old-m","model"),
+    mockTurn("archive-think-1","thought"),mockTurn("archive-a","model"),
+    mockTurn("archive-think-2","thought"),mockTurn("archive-b","model"),
+    mockTurn("latest-u","user"),mockTurn("latest-m","model")
+  ];
+  turns[3].textContent="Model archive one, no marker";
+  turns[5].textContent="Model archive two, no marker";
+  const x=context(turns);
+  const groups=x.compactor.collectGroups(turns);
+  const preview=x.compactor.preflightDom(x.compactor.planManualCleanup(1));
+  assert.equal(groups.filter(g=>g.kind==="memory").length,2);
+  assert.equal(preview.protectedSummaryCount,2);
+  assert.ok(preview.protectedIds.includes("archive-a"));
+  assert.ok(preview.protectedIds.includes("archive-b"));
+  assert.ok(!preview.targetIds.includes("archive-a"));
+  assert.ok(!preview.targetIds.includes("archive-b"));
+});
+
+test("native delete rechecks model's live preceding turn before any destructive click", () => {
+  const code=source.slice(source.indexOf("async function deleteOne("),
+    source.indexOf("async function commit("));
+  assert.match(code,/const liveTurns = \[\.\.\.document.querySelectorAll\("ms-chat-turn"\)\]/);
+  assert.match(code,/if \(at >= 0 && previous !== "user"\)/);
+  assert.match(code,/独立模型回复或压缩摘要始终保留/);
+});
+
