@@ -1150,3 +1150,88 @@ test("native deletion checks marker instead of inferring protection from positio
   assert.doesNotMatch(code,/previous !== "user"/);
 });
 
+test("a user-written SUJIU_PROTECT_V1 marker keeps that message through old-history cleanup", () => {
+  const turns=[
+    mockTurn("old-u","user"),mockTurn("old-m","model"),
+    mockTurn("protected-u","user"),mockTurn("protected-thought","thought"),
+    mockTurn("protected-answer","model"),
+    mockTurn("new-u","user"),mockTurn("new-m","model")
+  ];
+  turns[2].textContent="[[SUJIU_PROTECT_V1]] My custom character card";
+  const x=context(turns);
+  const plan=x.compactor.planManualCleanup(1);
+  assert.equal(plan.olderRounds,1);
+  const preview=x.compactor.preflightDom(plan);
+  assert.deepEqual(Array.from(preview.targetIds),
+    ["old-m","old-u","protected-thought"]);
+  for(const id of ["protected-u","protected-answer","new-u","new-m"])
+    assert.ok(preview.protectedIds.includes(id),id+" must survive");
+  assert.equal(preview.protectedSummaryCount,1);
+});
+
+test("marked model summaries across three compression generations remain protected, Thinking is deleted", () => {
+  const turns=[
+    mockTurn("task-a","user"),mockTurn("think-a","thought"),mockTurn("summary-a","model"),
+    mockTurn("task-b","user"),mockTurn("think-b","thought"),mockTurn("summary-b","model"),
+    mockTurn("task-c","user"),mockTurn("think-c","thought"),mockTurn("summary-c","model"),
+    mockTurn("u","user"),mockTurn("m","model")
+  ];
+  for(const [i,id] of [[0,"aaaa"],[1,"bbbb"],[2,"cccc"]]){
+    turns[3*i].textContent="[[SUJIU_SCOPE_V2:12345678-"+id+"]]";
+    turns[3*i+2].textContent="[[SUJIU_MEMORY_V1:12345678-"+id+"]] Archive "+id;
+  }
+  turns[1].textContent="[[SUJIU_PROTECT_V1]] thinking must still go";
+  const x=context(turns);
+  const preview=x.compactor.preflightDom(x.compactor.planThoughtCleanup());
+  assert.deepEqual(Array.from(preview.targetIds),
+    ["think-a","think-b","think-c","task-a","task-b","task-c"]);
+  for(const id of ["summary-a","summary-b","summary-c","u","m"])
+    assert.ok(preview.protectedIds.includes(id),id+" must survive");
+  assert.equal(preview.protectedSummaryCount,3);
+});
+
+test("a protected user message and its Thinking can be independently selected only for Thinking", () => {
+  const turns=[
+    mockTurn("user","user"),mockTurn("thought","thought"),mockTurn("model","model")
+  ];
+  turns[0].textContent="[[SUJIU_PROTECT_V1]] Keep this one";
+  turns[1].textContent="[[SUJIU_PROTECT_V1]] accidental quote inside Thinking";
+  const x=context(turns);
+  const preview=x.compactor.preflightDom(x.compactor.planThoughtCleanup());
+  assert.deepEqual(Array.from(preview.targetIds),["thought"]);
+  assert.ok(preview.protectedIds.includes("user"));
+  assert.ok(preview.protectedIds.includes("model"));
+});
+
+test("verbose unmarked summary-like prose and XML are never automatically pinned", () => {
+  const turns=[
+    mockTurn("old-u","user"),mockTurn("old-model","model"),
+    mockTurn("xml-u","user"),mockTurn("xml-model","model"),
+    mockTurn("recent-u","user"),mockTurn("recent-m","model")
+  ];
+  turns[2].textContent="请总结之前发生的故事和人物关系";
+  turns[3].textContent="<state_snapshot>【稳定设定】<escape>【已发生的关键事件】";
+  const x=context(turns);
+  const preview=x.compactor.preflightDom(x.compactor.planManualCleanup(1));
+  assert.deepEqual(Array.from(preview.targetIds),
+    ["old-model","old-u","xml-model","xml-u"]);
+  assert.equal(preview.protectedSummaryCount,0);
+});
+
+test("cloud inventory tracks explicit user protection and never treats unmarked prose as a memory", () => {
+  const x=context([]);
+  const before=x.compactor.archiveInventory([
+    {role:"user",text:"[[SUJIU_PROTECT_V1]] important"},
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-abcd]] summary"},
+    {role:"model",text:"【稳定设定】 A\n【已发生的关键事件】 B"}
+  ],turn=>turn.role,turn=>turn.text);
+  const after=x.compactor.archiveInventory([
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-abcd]] summary"},
+    {role:"model",text:"【稳定设定】 A\n【已发生的关键事件】 B"}
+  ],turn=>turn.role,turn=>turn.text);
+  assert.equal(before.protectedCount,2);
+  assert.equal(before.legacyReplies,0);
+  assert.throws(()=>x.compactor.verifyArchiveInventory(before,after),
+    /保存的历史压缩摘要记录与此前读取结果不一致/);
+});
+
