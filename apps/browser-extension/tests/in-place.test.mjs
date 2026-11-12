@@ -1012,7 +1012,7 @@ test("leading thinking with marked model summary forms protected archive group",
   assert.deepEqual(Array.from(groups[0].turns.map(turn=>turn.id)),
     ["orphan-thought","orphan-summary"]);
   const preview=x.compactor.preflightDom(x.compactor.planManualCleanup(1));
-  assert.deepEqual(Array.from(preview.targetIds),["old-m","old-u"]);
+  assert.deepEqual(Array.from(preview.targetIds),["old-m","old-u","orphan-thought"]);
   assert.ok(preview.protectedIds.includes("orphan-summary"));
 });
 
