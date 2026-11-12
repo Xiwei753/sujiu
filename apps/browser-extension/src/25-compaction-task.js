@@ -14,6 +14,14 @@
         isPinnedSummary(text) {
             return this.getMemoryMarkers(text).length > 0;
         },
+        // Explicit markers are the only protection mechanism. The short
+        // SUJIU_PROTECT_V1 marker can be added to any USER or MODEL message.
+        // Existing generated MODEL summaries carry SUJIU_MEMORY_V1:<id>.
+        // Thinking chunks are intentionally excluded by the callers.
+        isProtectedMessage(text) {
+            return typeof text === "string" &&
+                /\[\[(?:SUJIU_PROTECT_V1|SUJIU_MEMORY_V1:[a-z0-9-]{8,80})\]\]/i.test(text);
+        },
         create(promptId, keepRounds) {
             if (!promptId || !Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) {
                 throw new Error("无效的会话 ID 或保留轮数");
