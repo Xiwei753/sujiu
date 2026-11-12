@@ -91,10 +91,10 @@ test("never deletes when older messages are not fully rendered", () => {
     totalRounds: 2, olderRounds: 1, recentRounds: 1
   }), /历史轮次已改变/);
 });
-test("unknown role or incomplete exchange is rejected", () => {
+test("unknown and incomplete messages can be preserved without blocking cleanup", () => {
   const x = context([]);
-  assert.throws(() => x.compactor.collectGroups([mockTurn("u", "user"),mockTurn("x", "other")]), /未识别/);
-  assert.throws(() => x.compactor.collectGroups([mockTurn("u", "user")]), /未完成/);
+  assert.doesNotThrow(() => x.compactor.collectGroups([mockTurn("u", "user"),mockTurn("x", "other")]));
+  assert.doesNotThrow(() => x.compactor.collectGroups([mockTurn("u", "user")]));
 });
 test("cancel clears staged deletion without mutating chat history", () => {
   const x = context([]);
@@ -241,9 +241,9 @@ test("standalone pinned memories survive future compression without protecting u
   assert.deepEqual(Array.from(plan.pinnedOlderRounds), []);
   assert.deepEqual(Array.from(plan.pinnedMemoryTexts), [pinned + " old archive"]);
   const selection = x.compactor.preflightDom(plan);
-  assert.deepEqual(Array.from(selection.targetIds), ["m2", "u2", "tool"]);
-  assert.ok(selection.protectedIds.includes("u1"), "neighboring user turn stays protected against cascading deletion");
-  assert.ok(selection.protectedIds.includes("m1"));
+  assert.deepEqual(Array.from(selection.targetIds), ["m1", "u1", "m2", "u2", "tool"]);
+  assert.ok(!selection.protectedIds.includes("u1"), "unmarked preceding user is not protected");
+  assert.ok(!selection.protectedIds.includes("m1"));
   assert.ok(selection.protectedIds.includes("memory-old"));
   assert.ok(!selection.targetIds.includes("memory-old"));
 });
@@ -328,7 +328,7 @@ test("marked summary/tool exchange does not consume one of the protected recent 
 });
 
 
-test("manual cleanup protects an older tool summary even without a memory marker", () => {
+test("manual cleanup protects only explicitly marked old model summaries", () => {
   const turns = [
     mockTurn("u1","user"), mockTurn("m1","model"),
     mockTurn("old-task","user"), mockTurn("old-thought","thought"), mockTurn("old-result","model"),
@@ -336,7 +336,7 @@ test("manual cleanup protects an older tool summary even without a memory marker
     mockTurn("u3","user"), mockTurn("m3","model")
   ];
   turns[2].textContent = "Summarize history [[SUJIU_SCOPE_V2:12345678-abcd]]";
-  turns[4].textContent = "Old summary without a marker";
+  turns[4].textContent = "[[SUJIU_MEMORY_V1:12345678-abcd]] Old summary";
   const x = context(turns);
   const plan = x.compactor.planManualCleanup(1);
   assert.deepEqual(Array.from(plan.olderGroupIndices), [0, 2]);
@@ -347,13 +347,13 @@ test("manual cleanup protects an older tool summary even without a memory marker
   assert.equal(preview.protectedSummaryCount, 1);
 });
 
-test("unmarked structured summary is retained even if its user command looks ordinary", () => {
+test("user-supplied protection marker pins their own message and its associated reply", () => {
   const turns = [
     mockTurn("u1","user"), mockTurn("m1","model"),
     mockTurn("old-ask","user"), mockTurn("old-summary","model"),
     mockTurn("u2","user"), mockTurn("m2","model")
   ];
-  turns[2].textContent = "帮我概括一下吧";
+  turns[2].textContent = "[[SUJIU_PROTECT_V1]] 帮我概括一下吧";
   turns[3].textContent = "【历史范围与时间锚点】\n前情\n【关键事件时间线】\n初遇和结盟";
   const x = context(turns);
   const plan = x.compactor.planManualCleanup(1);
@@ -471,7 +471,7 @@ test("repeated compression excludes earlier archive requests when counting prote
     assert.ok(preview.protectedIds.includes(id),id+" must remain");
 });
 
-test("legacy XML snapshot and its English prompt survive later manual cleanup", () => {
+test("legacy XML wording has no effect, explicit memory marker protects archive", () => {
   const turns = [
     mockTurn("u1","user"), mockTurn("m1","model"),
     mockTurn("legacy-prompt","user"), mockTurn("legacy-archive","model"),
@@ -479,7 +479,7 @@ test("legacy XML snapshot and its English prompt survive later manual cleanup", 
     mockTurn("u3","user"), mockTurn("m3","model")
   ];
   turns[2].textContent = "Summarize the earlier role-play conversation. Return only: <state_snapshot>";
-  turns[3].textContent = "<state_snapshot>Old events and relationships</state_snapshot>";
+  turns[3].textContent = "[[SUJIU_MEMORY_V1:12345678-cafe]] <state_snapshot>Old events and relationships</state_snapshot>";
   const x = context(turns);
   const plan = x.compactor.planManualCleanup(1);
   assert.equal(plan.olderRounds, 2);
@@ -491,7 +491,7 @@ test("legacy XML snapshot and its English prompt survive later manual cleanup", 
   assert.equal(preview.protectedSummaryCount, 1);
 });
 
-test("orphaned XML summary and its predecessor stay protected during another compression", () => {
+test("marked orphan memory remains protected but unmarked predecessor follows normal cleanup", () => {
   const marker = "[[SUJIU_SCOPE_V2:12345678-1111]]";
   const turns = [
     mockTurn("u1","user"), mockTurn("m1","model"),
@@ -499,7 +499,7 @@ test("orphaned XML summary and its predecessor stay protected during another com
     mockTurn("u2","user"), mockTurn("m2","model"),
     mockTurn("latest-task","user"),mockTurn("latest-memory","model")
   ];
-  turns[2].textContent = "<state_snapshot>Earliest events</state_snapshot>";
+  turns[2].textContent = "[[SUJIU_MEMORY_V1:12345678-ffff]] <state_snapshot>Earliest events</state_snapshot>";
   turns[5].textContent = marker;
   turns[6].textContent = "[[SUJIU_MEMORY_V1:12345678-1111]] Updated story";
   const x=context(turns);
@@ -507,8 +507,8 @@ test("orphaned XML summary and its predecessor stay protected during another com
     older:[], totalRounds:2, olderRounds:1, recentRounds:1
   },{marker});
   const preview=x.compactor.preflightDom(plan);
-  assert.deepEqual(Array.from(preview.targetIds), ["latest-task"]);
-  for (const id of ["u1","m1","old-memory","u2","m2","latest-memory"]) {
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","latest-task"]);
+  for (const id of ["old-memory","u2","m2","latest-memory"]) {
     assert.ok(preview.protectedIds.includes(id),id+" must survive");
   }
 });
@@ -570,7 +570,7 @@ test("a marker quoted in a user message cannot fake a protected model result", (
   assert.equal(b.markers.size, 1);
 });
 
-test("old unmarked archive records must also match the cloud inventory", () => {
+test("unmarked text differences are not treated as loss of protected messages", () => {
   const x = context([]);
   const cloud = x.compactor.archiveInventory([
     {role:"user",text:"Summarize earlier conversation"},
@@ -580,8 +580,7 @@ test("old unmarked archive records must also match the cloud inventory", () => {
     {role:"user",text:"Summarize earlier conversation"},
     {role:"model",text:"unmarked plain reply"}
   ], turn=>turn.role, turn=>turn.text);
-  assert.throws(()=>x.compactor.verifyArchiveInventory(cloud,page),
-    /保存的历史压缩摘要记录与此前读取结果不一致/);
+  assert.doesNotThrow(()=>x.compactor.verifyArchiveInventory(cloud,page));
 });
 
 test("autosave completion must be followed by cloud archive verification", () => {
@@ -806,11 +805,11 @@ test("cloud-to-DOM mismatch does not prevent the confirmation dialog", async () 
   assert.equal(x.state.branchInProgress, false);
 });
 
-test("native deletion protects model memory but permits generated task prompts", () => {
+test("native deletion checks explicit marker for either user or model but never thinking", () => {
   const code=source.slice(source.indexOf("async function deleteOne("),
     source.indexOf("async function commit("));
-  assert.match(code,/type === "model" && isArchiveReply\(turn\)/);
-  assert.match(code,/type === "user" && isArchiveRequest\(turn\) && !isTask/);
+  assert.match(code,/type !== "thought" && isProtectedTurn\(turn\)/);
+  assert.match(code,/消息带有素酒保护标识符/);
 });
 
 test("cloud-vs-DOM archive inventory mismatch is never a deletion gate", () => {
@@ -982,13 +981,13 @@ test("cleanup accepts a saved conversation beginning with a marked orphaned mode
   assert.ok(chosen.protectedIds.includes("latest-m"));
 });
 
-test("first orphaned MODEL turn is accepted even if Google omitted the memory marker", () => {
+test("first orphan model with explicit memory marker remains pinned", () => {
   const turns=[
     mockTurn("legacy-model","model"),
     mockTurn("old-u","user"),mockTurn("old-m","model"),
     mockTurn("latest-u","user"),mockTurn("latest-m","model")
   ];
-  turns[0].textContent="Old summary with no reliable marker";
+  turns[0].textContent="[[SUJIU_MEMORY_V1:12345678-abcd]] Old summary";
   const x=context(turns);
   const groups=x.compactor.collectGroups(turns);
   assert.equal(groups[0].kind,"memory");
@@ -998,13 +997,14 @@ test("first orphaned MODEL turn is accepted even if Google omitted the memory ma
   assert.ok(preview.protectedIds.includes("legacy-model"));
 });
 
-test("leading detached thinking and its model summary do not break normal history grouping", () => {
+test("leading thinking with marked model summary forms protected archive group", () => {
   const turns=[
     mockTurn("orphan-thought","thought"),
     mockTurn("orphan-summary","model"),
     mockTurn("old-u","user"),mockTurn("old-m","model"),
     mockTurn("latest-u","user"),mockTurn("latest-m","model")
   ];
+  turns[1].textContent="[[SUJIU_MEMORY_V1:12345678-abcd]] Pinned summary";
   const x=context(turns);
   const groups=x.compactor.collectGroups(turns);
   assert.equal(groups[0].kind,"memory");
@@ -1016,10 +1016,10 @@ test("leading detached thinking and its model summary do not break normal histor
   assert.ok(preview.protectedIds.includes("orphan-summary"));
 });
 
-test("RoundSplitter preserves leading unmarked model summaries as pinned history", () => {
+test("RoundSplitter uses explicit marker to preserve first orphan model summary", () => {
   const rounds=vm.runInNewContext(roundsSource+"\nRoundSplitter",{});
   const turns=[
-    {role:"model",text:"Previous summary, model reply after prompt was deleted"},
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-abcd]] Previous summary"},
     {role:"user",text:"A"},{role:"model",text:"Reply A"},
     {role:"user",text:"B"},{role:"model",text:"Reply B"},
     {role:"user",text:"C"},{role:"model",text:"Reply C"}
@@ -1032,7 +1032,7 @@ test("RoundSplitter preserves leading unmarked model summaries as pinned history
   assert.equal(result.recent[0].text,"C");
 });
 
-test("ALL consecutive orphaned summaries after an ordinary reply survive cleanup", () => {
+test("all consecutive explicitly marked summaries survive cleanup", () => {
   const turns=[
     mockTurn("pre-u","user"),mockTurn("pre-m","model"),
     mockTurn("older-u","user"),mockTurn("older-m","model"),
@@ -1041,8 +1041,8 @@ test("ALL consecutive orphaned summaries after an ordinary reply survive cleanup
     mockTurn("current-u","user"),mockTurn("current-m","model")
   ];
   turns[4].textContent="[[SUJIU_MEMORY_V1:12345678-aaaa]] First compressed memory";
-  turns[5].textContent="Second compressed memory, marker missing";
-  turns[6].textContent="Third compressed memory, marker missing";
+  turns[5].textContent="[[SUJIU_MEMORY_V1:12345678-bbbb]] Second summary";
+  turns[6].textContent="[[SUJIU_MEMORY_V1:12345678-cccc]] Third summary";
   const x=context(turns);
   const groups=x.compactor.collectGroups(turns);
   assert.equal(groups.filter(group=>group.kind==="memory").length,3);
@@ -1051,12 +1051,12 @@ test("ALL consecutive orphaned summaries after an ordinary reply survive cleanup
   assert.equal(plan.olderRounds,2);
   const preview=x.compactor.preflightDom(plan);
   assert.equal(preview.protectedSummaryCount,3);
-  assert.deepEqual(Array.from(preview.targetIds),["pre-m","pre-u"]);
-  for(const id of ["archive-1","archive-2","archive-3","older-u","older-m","current-u","current-m"])
+  assert.deepEqual(Array.from(preview.targetIds),["pre-m","pre-u","older-m","older-u"]);
+  for(const id of ["archive-1","archive-2","archive-3","current-u","current-m"])
     assert.ok(preview.protectedIds.includes(id),id+" must survive");
 });
 
-test("multiple standalone unmarked archives interspersed with ordinary rounds remain pinned", () => {
+test("all marked archives interspersed with rounds remain pinned", () => {
   const turns=[
     mockTurn("archive-first","model"),
     mockTurn("old-u","user"),mockTurn("old-m","model"),
@@ -1065,6 +1065,10 @@ test("multiple standalone unmarked archives interspersed with ordinary rounds re
     mockTurn("archive-last-a","model"),mockTurn("archive-last-b","model"),
     mockTurn("recent-u","user"),mockTurn("recent-m","model")
   ];
+  turns[0].textContent="[[SUJIU_MEMORY_V1:12345678-aaaa]] A";
+  turns[3].textContent="[[SUJIU_MEMORY_V1:12345678-bbbb]] B";
+  turns[6].textContent="[[SUJIU_MEMORY_V1:12345678-cccc]] C";
+  turns[7].textContent="[[SUJIU_MEMORY_V1:12345678-dddd]] D";
   const x=context(turns);
   const groups=x.compactor.collectGroups(turns);
   assert.equal(groups.filter(group=>group.kind==="memory").length,4);
@@ -1072,20 +1076,20 @@ test("multiple standalone unmarked archives interspersed with ordinary rounds re
   assert.equal(plan.totalRounds,3);
   const preview=x.compactor.preflightDom(plan);
   assert.equal(preview.protectedSummaryCount,4);
-  assert.deepEqual(Array.from(preview.targetIds),[]);
-  for(const id of ["archive-first","archive-middle","archive-last-a","archive-last-b","old-u","old-m"])
+  assert.deepEqual(Array.from(preview.targetIds),["old-m","old-u","next-m","next-u"]);
+  for(const id of ["archive-first","archive-middle","archive-last-a","archive-last-b"])
     assert.ok(preview.protectedIds.includes(id),id+" must survive");
 });
 
-test("multi-generation orphaned memories never count toward RoundSplitter protected N rounds", () => {
+test("all explicitly marked model archives are excluded from recent N rounds", () => {
   const rounds=vm.runInNewContext(roundsSource+"\nRoundSplitter",{});
   const turns=[
     {role:"user",text:"Old user"},{role:"model",text:"Old reply"},
     {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-aaaa]] A"},
-    {role:"model",text:"B archive without marker"},
-    {role:"model",text:"C archive without marker"},
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-bbbb]] B"},
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-cccc]] C"},
     {role:"user",text:"Middle user"},{role:"model",text:"Middle reply"},
-    {role:"model",text:"D later standalone archive"},
+    {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-dddd]] D"},
     {role:"user",text:"Recent user"},{role:"model",text:"Recent reply"}
   ];
   const split=rounds.partition(turns,1);
@@ -1093,12 +1097,12 @@ test("multi-generation orphaned memories never count toward RoundSplitter protec
   assert.equal(split.olderRounds,2);
   assert.equal(split.pinnedMemories,4);
   for (const text of ["[[SUJIU_MEMORY_V1:12345678-aaaa]] A",
-    "B archive without marker","C archive without marker","D later standalone archive"])
+    "[[SUJIU_MEMORY_V1:12345678-bbbb]] B","[[SUJIU_MEMORY_V1:12345678-cccc]] C","[[SUJIU_MEMORY_V1:12345678-dddd]] D"])
     assert.ok(split.older.some(t=>t.text===text),text+" must be included in old history context");
   assert.equal(split.recent[0].text,"Recent user");
 });
 
-test("standalone model reply after a deleted temporary request is protected regardless of position", () => {
+test("marked standalone model summaries are protected at every position", () => {
   const turns=[
     mockTurn("u1","user"),mockTurn("m1","model"),
     mockTurn("archive-1","model"),
@@ -1107,7 +1111,10 @@ test("standalone model reply after a deleted temporary request is protected rega
     mockTurn("archive-3","model"),
     mockTurn("u3","user"),mockTurn("m3","model")
   ];
+  turns[2].textContent="[[SUJIU_MEMORY_V1:12345678-aaaa]] A";
   turns[3].textContent="Just a normal user question";
+  turns[5].textContent="[[SUJIU_MEMORY_V1:12345678-bbbb]] B";
+  turns[6].textContent="[[SUJIU_MEMORY_V1:12345678-cccc]] C";
   const x=context(turns);
   const plan=x.compactor.planManualCleanup(1);
   const p=x.compactor.preflightDom(plan);
@@ -1116,15 +1123,15 @@ test("standalone model reply after a deleted temporary request is protected rega
   assert.equal(p.protectedSummaryCount,3);
 });
 
-test("standalone archived model replies remain protected when thought blocks sit between them", () => {
+test("explicitly marked model archives survive even with intervening thought chunks", () => {
   const turns=[
     mockTurn("old-u","user"),mockTurn("old-m","model"),
     mockTurn("archive-think-1","thought"),mockTurn("archive-a","model"),
     mockTurn("archive-think-2","thought"),mockTurn("archive-b","model"),
     mockTurn("latest-u","user"),mockTurn("latest-m","model")
   ];
-  turns[3].textContent="Model archive one, no marker";
-  turns[5].textContent="Model archive two, no marker";
+  turns[3].textContent="[[SUJIU_MEMORY_V1:12345678-aaaa]] Model archive one";
+  turns[5].textContent="[[SUJIU_MEMORY_V1:12345678-bbbb]] Model archive two";
   const x=context(turns);
   const groups=x.compactor.collectGroups(turns);
   const preview=x.compactor.preflightDom(x.compactor.planManualCleanup(1));
@@ -1136,11 +1143,10 @@ test("standalone archived model replies remain protected when thought blocks sit
   assert.ok(!preview.targetIds.includes("archive-b"));
 });
 
-test("native delete rechecks model's live preceding turn before any destructive click", () => {
+test("native deletion checks marker instead of inferring protection from position", () => {
   const code=source.slice(source.indexOf("async function deleteOne("),
     source.indexOf("async function commit("));
-  assert.match(code,/const liveTurns = \[\.\.\.document.querySelectorAll\("ms-chat-turn"\)\]/);
-  assert.match(code,/if \(at >= 0 && previous !== "user"\)/);
-  assert.match(code,/独立模型回复或压缩摘要始终保留/);
+  assert.match(code,/type !== "thought" && isProtectedTurn\(turn\)/);
+  assert.doesNotMatch(code,/previous !== "user"/);
 });
 
