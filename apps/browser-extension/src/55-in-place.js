@@ -193,7 +193,14 @@
                         kind: "round" });
                 } else {
                     group.turns.push(turn);
-                    if (isModel) group.hasModel = true;
+                    if (isModel) {
+                        group.hasModel = true;
+                        if (group.turns[0] &&
+                            normalizeType(group.turns[0]) === "thought" &&
+                            isProtectedTurn(turn)) {
+                            group.kind = "memory";
+                        }
+                    }
                 }
             }
             // Incomplete turns from tool errors are legitimate history.
