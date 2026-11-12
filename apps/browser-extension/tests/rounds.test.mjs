@@ -5,6 +5,8 @@ const test = (await import("node:test")).default;
   const vm = await import("node:vm");
   const source = await fs.readFile(new URL("../src/35-rounds.js",import.meta.url),"utf8");
   const splitter = vm.runInNewContext(source + "\nRoundSplitter", {});
+  const markerSource = await fs.readFile(new URL("../src/25-compaction-task.js",import.meta.url),"utf8");
+  const markers = vm.runInNewContext(markerSource + "\nCompactionTask", {});
   function make(count) {
     return Array.from({length:count}, (_,i)=> [
       {role:"user",text:"user "+i},
@@ -138,4 +140,13 @@ test("XML state_snapshot alone is not a protection marker", () => {
     assert.equal(split.pinnedMemories,3);
     assert.equal(split.olderRounds,3);
     assert.equal(split.recent[0].text,"user 3");
+  });
+
+  test("real CompactionTask accepts explicit protection markers in either message role", () => {
+    assert.equal(markers.isProtectedMessage("[[SUJIU_PROTECT_V1]] My user text"),true);
+    assert.equal(markers.isProtectedMessage("Prefix [[SUJIU_MEMORY_V1:12345678-abcd]] Model memory"),true);
+    assert.equal(markers.isProtectedMessage("SUJIU_PROTECT_V1 without square brackets"),false);
+    assert.equal(markers.isProtectedMessage("[[SUJIU_SCOPE_V2:12345678-abcd]] Disposable task"),false);
+    assert.equal(markers.isProtectedMessage("【稳定设定】A【已发生的关键事件】B"),false);
+    assert.equal(markers.isProtectedMessage("<state_snapshot>memory</state_snapshot>"),false);
   });
