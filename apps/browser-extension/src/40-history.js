@@ -503,6 +503,67 @@
         };
     }
 
+    function stripCompressionArtifacts(turns) {
+        if (!turns.length) return turns;
+        const sanitized = turns.slice();
+        let removed = 0;
+        let removedSnapshotTurn = false;
+
+        while (sanitized.length) {
+            const lastTurn = sanitized[sanitized.length - 1];
+            if (isCompressionPromptTurn(lastTurn)) {
+                sanitized.pop();
+                removed += 1;
+                removedSnapshotTurn = false;
+                continue;
+            }
+            if (isCompressionSnapshotTurn(lastTurn)) {
+                sanitized.pop();
+                removed += 1;
+                removedSnapshotTurn = true;
+                continue;
+            }
+            if (removedSnapshotTurn && isThoughtOnlyTurn(lastTurn)) {
+                sanitized.pop();
+                removed += 1;
+                continue;
+            }
+            break;
+        }
+
+        if (removed > 0) {
+            log.net("Removed compression artifact turns from tail", {
+                removed,
+                remaining: sanitized.length
+            });
+        }
+        return sanitized;
+    }
+
+    function isCompressionPromptTurn(turn) {
+        const snippet = state.activeCompressionSnippet || deriveSnippet(getCompressPrompt());
+        return Boolean(
+            turn?.role === "user" &&
+            typeof turn.text === "string" &&
+            snippet &&
+            turn.text.includes(snippet)
+        );
+    }
+
+    function isCompressionSnapshotTurn(turn) {
+        if (turn?.role !== "model" || typeof turn.text !== "string" || !turn.text) {
+            return false;
+        }
+        if (/<state_snapshot>[\s\S]*<\/state_snapshot>/i.test(turn.text)) {
+            return true;
+        }
+        const pattern = getSnapshotRegex();
+        if (pattern && matchByRegex(turn.text, pattern)) {
+            return true;
+        }
+        return /<scratchpad>/i.test(turn.text) && /state[_ -]?snapshot/i.test(turn.text);
+    }
+
     function isThoughtOnlyTurn(turn) {
         return Boolean(
             turn?.role === "model" &&
