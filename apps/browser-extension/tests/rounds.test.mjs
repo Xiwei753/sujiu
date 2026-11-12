@@ -81,36 +81,61 @@ const test = (await import("node:test")).default;
     assert.equal(result.recent[0].text, "user 2");
   });
 
-  test("unmarked legacy summary and custom request stay outside ordinary N-round accounting", () => {
+  test("unmarked Chinese summary text is an ordinary round, not protected", () => {
     const source = make(3);
     source.splice(2, 0,
       {role:"user",text:"请总结之前的剧情，方便继续"},
       {role:"model",text:"【历史范围与时间锚点】前情【关键事件时间线】初遇"});
     const result = splitter.partition(source, 2);
-    assert.equal(result.totalRounds, 3);
-    assert.equal(result.olderRounds, 1);
-    assert.equal(result.pinnedMemories, 1);
+    assert.equal(result.totalRounds, 4);
+    assert.equal(result.olderRounds, 2);
+    assert.equal(result.pinnedMemories, 0);
     assert.equal(result.recent[0].text, "user 1");
   });
 
-test("legacy XML state_snapshot is pinned across a subsequent compression", () => {
+test("XML state_snapshot alone is not a protection marker", () => {
     const source = make(3);
     source.splice(2, 0,
       {role:"user",text:"Summarize the earlier role-play conversation. Return only: <state_snapshot>"},
       {role:"model",text:"<state_snapshot>Historical memory</state_snapshot>"});
     const result = splitter.partition(source, 1);
-    assert.equal(result.totalRounds, 3);
-    assert.equal(result.pinnedMemories, 1);
-    assert.equal(result.olderRounds, 2);
+    assert.equal(result.totalRounds, 4);
+    assert.equal(result.pinnedMemories, 0);
+    assert.equal(result.olderRounds, 3);
     assert.ok(result.older.some(turn => turn.text?.includes("<state_snapshot>Historical memory")));
   });
 
-  test("legacy Chinese heading format remains a pinned archived exchange", () => {
+  test("Chinese summary headings alone do not protect messages", () => {
     const source = make(3);
     source.splice(2, 0,
       {role:"user",text:"请为这段长期对话制作按剧情时间线整理的精炼记忆"},
       {role:"model",text:"【稳定设定】主角已转学。\\n【已发生的关键事件】认识了新同学。"});
     const result = splitter.partition(source, 1);
-    assert.equal(result.totalRounds, 3);
-    assert.equal(result.pinnedMemories, 1);
+    assert.equal(result.totalRounds, 4);
+    assert.equal(result.pinnedMemories, 0);
+  });
+
+  test("user protection marker excludes their round from the recent-N count", () => {
+    const source = make(4);
+    source[2].text = "[[SUJIU_PROTECT_V1]] Personally important instruction";
+    const split = splitter.partition(source, 1);
+    assert.equal(split.totalRounds, 3);
+    assert.equal(split.pinnedMemories, 1);
+    assert.equal(split.olderRounds, 2);
+    assert.ok(split.older.includes(source[2]));
+    assert.ok(split.older.includes(source[3]));
+    assert.equal(split.recent[0].text, "user 3");
+  });
+
+  test("protected model replies and all generated memory markers survive as separate archives", () => {
+    const source = make(4);
+    source.splice(4,0,
+      {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-aaaa]] First summary"},
+      {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-bbbb]] Second summary"},
+      {role:"model",text:"[[SUJIU_PROTECT_V1]] Manual protected reply"});
+    const split = splitter.partition(source,1);
+    assert.equal(split.totalRounds,4);
+    assert.equal(split.pinnedMemories,3);
+    assert.equal(split.olderRounds,3);
+    assert.equal(split.recent[0].text,"user 3");
   });
