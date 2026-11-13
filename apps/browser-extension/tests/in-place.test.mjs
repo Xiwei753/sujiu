@@ -467,7 +467,7 @@ test("repeated compression excludes earlier archive requests when counting prote
     totalRounds:3, olderRounds:1, recentRounds:2
   },{marker:last});
   const preview=x.compactor.preflightDom(plan);
-  assert.deepEqual(Array.from(preview.targetIds),["m1","u1","old-tool","new-tool"]);
+  assert.deepEqual(Array.from(preview.targetIds),["m1","u1"]);
   for(const id of ["old-archive","u2","m2","u3","m3","new-archive"])
     assert.ok(preview.protectedIds.includes(id),id+" must remain");
 });
@@ -508,13 +508,13 @@ test("marked orphan memory remains protected but unmarked predecessor follows no
     older:[], totalRounds:2, olderRounds:1, recentRounds:1
   },{marker});
   const preview=x.compactor.preflightDom(plan);
-  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1","latest-task"]);
+  assert.deepEqual(Array.from(preview.targetIds), ["m1","u1"]);
   for (const id of ["old-memory","u2","m2","latest-memory"]) {
     assert.ok(preview.protectedIds.includes(id),id+" must survive");
   }
 });
 
-test("three archived model summaries remain pinned while all their temporary prompts are selected", () => {
+test("three archived model summaries and their paired inputs are protected from native cascade", () => {
   const turns = [
     mockTurn("old-u", "user"), mockTurn("old-m", "model"),
     mockTurn("task-a", "user"), mockTurn("memory-a", "model"),
@@ -537,7 +537,7 @@ test("three archived model summaries remain pinned while all their temporary pro
     assert.ok(selection.protectedIds.includes(id), id + " remains pinned");
   }
   assert.equal(selection.protectedSummaryCount, 3);
-  assert.deepEqual(Array.from(selection.targetIds), ["old-m","old-u","middle-m","middle-u","task-a","task-b","task-c"]);
+  assert.deepEqual(Array.from(selection.targetIds), ["old-m","old-u","middle-m","middle-u"]);
 });
 
 test("cloud and rendered archive counts can differ without blocking native cleanup", () => {
@@ -556,9 +556,9 @@ test("cloud and rendered archive counts can differ without blocking native clean
     turn => turn.text || turn.textContent);
   assert.equal(expected.markers.size, 2);
   const selection = x.compactor.preflightDom(x.compactor.planManualCleanup(1), expected);
-  assert.deepEqual(Array.from(selection.targetIds), ["old-m", "old-u", "task-a"]);
+  assert.deepEqual(Array.from(selection.targetIds), ["old-m", "old-u"]);
   assert.ok(selection.protectedIds.includes("memory-a"));
-  assert.ok(!selection.protectedIds.includes("task-a"));
+  assert.ok(selection.protectedIds.includes("task-a"));
 });
 
 test("a marker quoted in a user message cannot fake a protected model result", () => {
@@ -606,8 +606,8 @@ test("standalone cleanup removes every independent thought including recent roun
   assert.equal(plan.thoughtOnly, true);
   const selection = x.compactor.preflightDom(plan);
   assert.equal(selection.thoughtOnly, true);
-  assert.deepEqual(Array.from(selection.targetIds), ["old-thought","summary-thought","recent-thought1","recent-thought2","summary-task"]);
-  assert.equal(selection.deletedUserCount, 1);
+  assert.deepEqual(Array.from(selection.targetIds), ["old-thought","summary-thought","recent-thought1","recent-thought2"]);
+  assert.equal(selection.deletedUserCount, 0);
   assert.equal(selection.deletedOldRounds, 0);
   assert.equal(selection.protectedSummaryCount, 1);
   for (const id of ["old-user","old-reply","summary-reply",
@@ -654,9 +654,9 @@ test("thought-only cleanup ignores a mismatched cloud archive list", () => {
     {role:"model",text:"[[SUJIU_MEMORY_V1:12345678-bbbb]] Missing"}
   ], turn => turn.role || turn.getAttribute("data-turn-type"), turn => turn.text || turn.textContent);
   const selection = x.compactor.preflightDom(x.compactor.planThoughtCleanup(1), cloud);
-  assert.deepEqual(Array.from(selection.targetIds), ["archive-thought","task"]);
+  assert.deepEqual(Array.from(selection.targetIds), ["archive-thought"]);
   assert.ok(selection.protectedIds.includes("archive"));
-  assert.ok(!selection.protectedIds.includes("task"));
+  assert.ok(selection.protectedIds.includes("task"));
 });
 
 test("post-delete normal user/model replies must remain exactly intact, including unmarked history", () => {
@@ -806,11 +806,11 @@ test("cloud-to-DOM mismatch does not prevent the confirmation dialog", async () 
   assert.equal(x.state.branchInProgress, false);
 });
 
-test("native deletion checks explicit marker for either user or model but never thinking", () => {
+test("native deletion checks literal sujiu marker and never protects Thinking", () => {
   const code=source.slice(source.indexOf("async function deleteOne("),
     source.indexOf("async function commit("));
   assert.match(code,/type !== "thought" && isProtectedTurn\(turn\)/);
-  assert.match(code,/消息带有素酒保护标识符/);
+  assert.match(code,/消息包含 sujiu 保护标记/);
 });
 
 test("cloud-vs-DOM archive inventory mismatch is never a deletion gate", () => {
@@ -824,7 +824,7 @@ test("cloud-vs-DOM archive inventory mismatch is never a deletion gate", () => {
   assert.match(commit,/let verificationNotice = ""/);
 });
 
-test("auto-generated task with unmarked model archive is still disposable, not a user-written recap", () => {
+test("auto-generated task with an unmarked MODEL reply is kept to avoid native cascade", () => {
   const turns = [
     mockTurn("prompt", "user"), mockTurn("thinking", "thought"),
     mockTurn("model", "model")
@@ -833,7 +833,7 @@ test("auto-generated task with unmarked model archive is still disposable, not a
   turns[2].textContent = "【稳定设定】A\n【已发生的关键事件】B";
   const x = context(turns);
   const selection = x.compactor.preflightDom(x.compactor.planThoughtCleanup());
-  assert.deepEqual(Array.from(selection.targetIds), ["thinking", "prompt"]);
+  assert.deepEqual(Array.from(selection.targetIds), ["thinking"]);
   assert.ok(selection.protectedIds.includes("model"));
 });
 
@@ -865,7 +865,7 @@ test("cloud summary marker inventory ignores disposal of temporary scope request
   assert.doesNotThrow(()=>x.compactor.verifyArchiveInventory(before,after));
 });
 
-test("native per-target failures are skipped; subsequent task and thinking are deleted while summary survives", async () => {
+test("stale native menu cannot delete other turns; paired summary task stays, thinking deleted", async () => {
   const turns = [
     mockTurn("ordinary-user","user"),
     mockTurn("thought-bad","thought"),
@@ -891,16 +891,30 @@ test("native per-target failures are skipped; subsequent task and thinking are d
       active = null;
     }
   };
+  const panel = {
+    isConnected: true,
+    getAttribute() { return null; },
+    querySelectorAll() { return [overlay]; }
+  };
   for (const turn of turns) {
     turn.querySelector = selector => selector.includes("ms-chat-turn-options") ?
-      { click() { active = turn; } } : null;
+      {
+        click() { active = turn; },
+        getAttribute(name) {
+          if (name === "aria-controls") return "active-menu";
+          if (name === "aria-expanded") return "true";
+          return null;
+        }
+      } : null;
   }
   const document = {
     querySelectorAll(selector) {
       if (selector === "ms-chat-turn") return turns;
-      return selector.includes(".cdk-overlay-container") ? [overlay] : [];
+      return [];
     },
-    getElementById(id) { return turns.find(t=>t.id===id) || null; }
+    getElementById(id) {
+      return id === "active-menu" ? panel : turns.find(t=>t.id===id) || null;
+    }
   };
   const liveEntries = () => turns.map(turn => {
     const type = turn.getAttribute("data-turn-type");
@@ -928,14 +942,14 @@ test("native per-target failures are skipped; subsequent task and thinking are d
     {totalRounds:1,olderRounds:0,recentRounds:1},
     {marker:"[[SUJIU_SCOPE_V2:12345678-aaaa]]"});
   await x.compactor.cleanupThoughts();
-  assert.deepEqual(deleted,["thought-good","task"]);
+  assert.deepEqual(deleted,["thought-good"]);
   assert.ok(document.getElementById("summary"),"the model summary must survive");
   assert.ok(document.getElementById("thought-bad"),"unavailable thought is skipped");
   assert.ok(x.statuses.some(msg=>msg.includes("跳过 1 条")));
   assert.ok(!x.statuses.some(msg=>msg.includes("云端保存记录发生变化")),
     "removing the disposable task must not count as losing a model summary");
-  assert.equal(x.compactor.pending, null,
-    "staged review of the deleted synthetic task is cleared");
+  assert.ok(x.compactor.pending,
+    "staged review remains because the synthetic task was safely retained");
   assert.equal(x.state.branchInProgress,false);
 });
 
@@ -1185,7 +1199,7 @@ test("marked model summaries across three compression generations remain protect
   const x=context(turns);
   const preview=x.compactor.preflightDom(x.compactor.planThoughtCleanup());
   assert.deepEqual(Array.from(preview.targetIds),
-    ["think-a","think-b","think-c","task-a","task-b","task-c"]);
+    ["think-a","think-b","think-c"]);
   for(const id of ["summary-a","summary-b","summary-c","u","m"])
     assert.ok(preview.protectedIds.includes(id),id+" must survive");
   assert.equal(preview.protectedSummaryCount,3);
