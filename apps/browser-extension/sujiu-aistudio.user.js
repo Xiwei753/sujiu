@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Sujiu AI Studio Tools
 // @namespace    https://github.com/Xiwei753/sujiu
-// @version      0.4.13
+// @version      0.4.14
 // @updateURL    https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @downloadURL  https://raw.githubusercontent.com/Xiwei753/sujiu/main/apps/browser-extension/sujiu-aistudio.user.js
 // @description  AI Studio manual context compaction and history cleanup
@@ -13,7 +13,7 @@
 // ==/UserScript==
 (function () {
 "use strict";
-const bootstrapStatus = { version: "0.4.13", phase: "loaded", loadedAt: new Date().toISOString() };
+const bootstrapStatus = { version: "0.4.14", phase: "loaded", loadedAt: new Date().toISOString() };
 window.__SUJIU_AISTUDIO_BOOT__ = bootstrapStatus;
 console.info("[Sujiu AI Studio] injected", bootstrapStatus.version, location.href);
 try {
@@ -75,7 +75,7 @@ const unsafeWindow = window;
         isAppContext: location.pathname.startsWith("/app/"),
         topWindow: unsafeWindow?.top || window
     };
-    const SCRIPT_VERSION = "0.4.13";
+    const SCRIPT_VERSION = "0.4.14";
 
     const state = {
         compressionInProgress: false,
@@ -219,15 +219,15 @@ const unsafeWindow = window;
             return [...text.matchAll(this.memoryPattern)].map(match => match[0]);
         },
         isPinnedSummary(text) {
-            return this.getMemoryMarkers(text).length > 0;
+            return this.isProtectedMessage(text);
         },
-        // Explicit markers are the only protection mechanism. The short
-        // SUJIU_PROTECT_V1 marker can be added to any USER or MODEL message.
-        // Existing generated MODEL summaries carry SUJIU_MEMORY_V1:<id>.
-        // Thinking chunks are intentionally excluded by the callers.
+        // The user-facing protection marker is the five letters "sujiu".
+        // Older saved model summaries with SUJIU_MEMORY_V1 keep working too.
+        // Callers must exclude native Thinking and exact SUJIU_SCOPE_V2
+        // USER tasks before applying this general text predicate.
         isProtectedMessage(text) {
             return typeof text === "string" &&
-                /\[\[(?:SUJIU_PROTECT_V1|SUJIU_MEMORY_V1:[a-z0-9-]{8,80})\]\]/i.test(text);
+                text.toLowerCase().includes("sujiu");
         },
         create(promptId, keepRounds) {
             if (!promptId || !Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) {
@@ -249,8 +249,9 @@ const unsafeWindow = window;
             // recent-turn counts must never be included in the model input.
             return basePrompt.trim() +
                 "\n\n请仅依据本次请求实际提供的历史记录整理摘要。不要推测后续剧情。" +
-                "\n\n摘要第一行必须独立、原样输出以下记忆标识：" + this.memoryMarker(task.marker) +
-                "\n这是一条会被永久保留的压缩记忆，标识之后才是摘要正文。" +
+                "\n\n摘要第一行单独输出这五个字母：sujiu" +
+                "\n第二行原样输出任务记忆标识：" + this.memoryMarker(task.marker) +
+                "\n然后继续输出完整的摘要正文。以上两行会随模型摘要一起保留。" +
                 "\n\n[客户端任务] " + task.marker;
         },
         parsePrompt(prompt) {
@@ -933,8 +934,10 @@ const RoundSplitter = Object.freeze({
     },
     hasProtectionMarker(turn) {
       if (!turn || (turn.role !== "user" && turn.role !== "model")) return false;
-      return /\[\[(?:SUJIU_PROTECT_V1|SUJIU_MEMORY_V1:[a-z0-9-]{8,80})\]\]/i.test(
-        this.textOf(turn));
+      // Plugin-created USER commands are disposable regardless of the
+      // internal SUJIU_SCOPE_V2 token and copied conversation text.
+      if (this.isCompressionPrompt(turn)) return false;
+      return this.textOf(turn).toLowerCase().includes("sujiu");
     },
     isMemory(turn) {
       return turn?.role === "model" && this.hasProtectionMarker(turn);
@@ -1667,6 +1670,10 @@ const RoundSplitter = Object.freeze({
         // Explicit user/model markers alone decide protection.
         function isProtectedTurn(turn) {
             const role = normalizeType(turn);
+            // Scope-tagged USER messages are the plugin's own temporary
+            // inputs. They are never protected by their internal "sujiu"
+            // token (or by archived history quoted in their body).
+            if (role === "user" && temporaryTaskId(turn)) return false;
             return (role === "user" || role === "model") &&
                 CompactionTask.isProtectedMessage(String(turn.textContent || ""));
         }
@@ -1694,26 +1701,37 @@ const RoundSplitter = Object.freeze({
         function temporaryTasks(turns) {
             const tasks = [];
             for (let index = 0; index < turns.length; index++) {
-                const turn = turns[index];
-                const id = temporaryTaskId(turn);
+                const prompt = turns[index];
+                const id = temporaryTaskId(prompt);
                 if (!id) continue;
-                let reply = null;
+                const replies = [];
                 for (let next = index + 1; next < turns.length; next++) {
                     const candidate = turns[next];
                     const type = normalizeType(candidate);
                     if (type === "user") break;
-                    if (type !== "model") continue;
-                    const text = String(candidate.textContent || "");
-                    if (text.toLowerCase().includes(
-                        "[[sujiu_memory_v1:" + id + "]]") ||
-                        isArchiveReply(candidate)) {
-                        reply = candidate;
-                        break;
-                    }
+                    if (type === "model") replies.push(candidate);
                 }
-                tasks.push({ prompt: turn, reply });
+                // Any MODEL response following the explicit script task is
+                // potentially a precious summary, even when its marker was
+                // stripped by rendering. Never gamble with its native delete.
+                tasks.push({ prompt, replies, reply: replies[0] || null });
             }
             return tasks;
+        }
+
+        function pairedArchiveIds(turns) {
+            return new Set(temporaryTasks(turns)
+                .flatMap(task => task.replies.map(reply => reply.id)));
+        }
+
+        function safeDisposablePrompts(turns) {
+            return temporaryTasks(turns)
+                // Google native USER deletion has destroyed its paired MODEL
+                // reply in real use. An associated MODEL makes the scope USER
+                // unsafe to remove with the native menu: preserve for now.
+                .filter(task => task.replies.length === 0)
+                .filter(task => hasIndependentDeleteMenu(task.prompt))
+                .map(task => task.prompt);
         }
 
         // Stable memory markers live in Google-saved message text. We cannot
@@ -1732,7 +1750,9 @@ const RoundSplitter = Object.freeze({
                     RoundSplitter.isCompressionPrompt({ role, text })) {
                     compressionRequests++;
                 }
-                if (CompactionTask.isProtectedMessage(text)) protectedCount++;
+                if (!(role === "user" &&
+                    RoundSplitter.isCompressionPrompt({ role, text })) &&
+                    CompactionTask.isProtectedMessage(text)) protectedCount++;
                 if (role === "model") {
                     const ids = new Set(CompactionTask.getMemoryMarkers(text)
                         .map(marker => marker.toLowerCase()));
@@ -1902,8 +1922,7 @@ const RoundSplitter = Object.freeze({
             const hasOldArchiveThoughts = archiveIndices.some(index =>
                 regular[index].turns.some(turn =>
                     normalizeType(turn) === "thought" && hasIndependentDeleteMenu(turn)));
-            const hasTemporaryTasks = temporaryTasks(turns).some(item =>
-                hasIndependentDeleteMenu(item.prompt));
+            const hasTemporaryTasks = safeDisposablePrompts(turns).length > 0;
             if (chatIndices.length <= keepRounds &&
                 !hasOldArchiveThoughts && !hasTemporaryTasks) {
                 throw new Error("当前只有 " + chatIndices.length +
@@ -2000,12 +2019,9 @@ const RoundSplitter = Object.freeze({
                     else skippedThoughts++;
                 }
                 const temporary = temporaryTasks(turns);
-                const disposablePrompts = temporary
-                    .filter(item => !isProtectedTurn(item.prompt))
-                .filter(item => hasIndependentDeleteMenu(item.prompt))
-                    .map(item => item.prompt);
-                // Remove thinking first; then the script's temporary USER
-                // request. The paired MODEL summary is never a deletion target.
+                const disposablePrompts = safeDisposablePrompts(turns);
+                // Delete standalone Thinking and only truly orphaned
+                // plugin USER requests. A paired MODEL is never targeted.
                 deletable.push(...disposablePrompts);
                 const targetIds = deletable.map(turn => turn.id);
                 if (targetIds.some(id => !id) ||
@@ -2088,9 +2104,10 @@ const RoundSplitter = Object.freeze({
                 }
             }
 
-            // Archive MODEL replies are permanent. The corresponding
-            // SUJIU_SCOPE_V2 USER requests are temporary and are removable
-            // with their independent thinking nodes.
+            // Archived MODEL replies are never deletion candidates. A
+            // temporary USER request with an existing MODEL is also retained
+            // until an independently verified, non-cascading way to remove
+            // that request exists. Its Thinking can still be removed.
             let skippedThoughts = 0;
             for (const group of groups) {
                 if (!isArchiveGroup(group) && group.kind !== "memory") continue;
@@ -2105,10 +2122,7 @@ const RoundSplitter = Object.freeze({
             }
 
             const temporary = temporaryTasks(turns);
-            const disposablePrompts = temporary
-                .filter(item => !isProtectedTurn(item.prompt))
-                .filter(item => hasIndependentDeleteMenu(item.prompt))
-                .map(item => item.prompt);
+            const disposablePrompts = safeDisposablePrompts(turns);
             // Remove thinking first, then temporary auto-generated prompts.
             targetTurns.push(...disposablePrompts);
             const targetIds = targetTurns.map(turn => turn.id);
@@ -2139,24 +2153,44 @@ const RoundSplitter = Object.freeze({
             };
         }
 
-        async function findNativeDeleteItem() {
+        async function findNativeDeleteItem(trigger) {
+            // Angular's menu panels live in a global overlay. Selecting the
+            // first visible "Delete" anywhere can delete an unrelated MODEL
+            // turn. Only act on the panel controlled by this exact trigger.
             for (let attempt = 0; attempt < 12; attempt++) {
-                const items = [...document.querySelectorAll(
-                    ".cdk-overlay-container .mat-mdc-menu-content button, .cdk-overlay-container [role=menuitem], .cdk-overlay-pane button"
+                const menuId = trigger?.getAttribute?.("aria-controls");
+                const expanded = trigger?.getAttribute?.("aria-expanded");
+                if (!menuId || expanded !== "true") {
+                    await sleep(80);
+                    continue;
+                }
+                const panel = document.getElementById(menuId);
+                if (!panel || !panel.isConnected ||
+                    panel.getAttribute?.("aria-hidden") === "true") {
+                    await sleep(80);
+                    continue;
+                }
+                const items = [...panel.querySelectorAll(
+                    ".mat-mdc-menu-content button, [role=menuitem], button"
                 )];
-                const target = items.find(item => {
-                    if (item.disabled || item.getAttribute("aria-disabled") === "true") return false;
-                    const icon = item.querySelector("mat-icon, .material-symbols-outlined, [data-mat-icon-name]");
+                const matched = items.filter(item => {
+                    if (item.disabled ||
+                        item.getAttribute?.("aria-disabled") === "true") return false;
+                    const icon = item.querySelector?.(
+                        "mat-icon, .material-symbols-outlined, [data-mat-icon-name]"
+                    );
                     const label = [
-                        item.getAttribute("aria-label"),
-                        icon?.getAttribute("fonticon"),
-                        icon?.getAttribute("data-mat-icon-name"),
+                        item.getAttribute?.("aria-label"),
+                        icon?.getAttribute?.("fonticon"),
+                        icon?.getAttribute?.("data-mat-icon-name"),
                         icon?.textContent,
                         item.textContent
                     ].filter(Boolean).join(" ").toLowerCase();
                     return /(?:delete|trash|删除|移除)/i.test(label);
                 });
-                if (target) return target;
+                // Ambiguous or stale menus are unsafe for destructive clicks.
+                if (matched.length === 1) return matched[0];
+                if (matched.length > 1) return null;
                 await sleep(80);
             }
             return null;
@@ -2174,16 +2208,27 @@ const RoundSplitter = Object.freeze({
             }
             // Thinking still deletes, regardless of any marker in its text.
             if (type !== "thought" && isProtectedTurn(turn)) {
-                return { deleted: false, reason: "消息带有素酒保护标识符" };
+                return { deleted: false, reason: "消息包含 sujiu 保护标记" };
             }
-            const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
-                turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
+            const liveTurns = [...document.querySelectorAll("ms-chat-turn")];
+            const archiveIds = pairedArchiveIds(liveTurns);
+            if (type === "model" && archiveIds.has(id)) {
+                return { deleted: false, reason: "该模型回复属于插件压缩结果" };
+            }
+            if (isTask && temporaryTasks(liveTurns).some(task =>
+                task.prompt.id === id && task.replies.length > 0)) {
+                return { deleted: false,
+                    reason: "原生删除该指令可能连带删除模型摘要，暂时保留" };
+            }
+            // Select the native trigger button, not its inner icon. Clicking
+            // a stale icon can activate the wrong floating menu.
+            const button = turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
                 turn.querySelector("ms-chat-turn-options button");
             if (!button) {
                 return { deleted: false, reason: "没有独立删除菜单" };
             }
             button.click();
-            const item = await findNativeDeleteItem();
+            const item = await findNativeDeleteItem(button);
             if (!item) {
                 return { deleted: false, reason: "原生菜单没有删除选项" };
             }
@@ -2237,11 +2282,15 @@ const RoundSplitter = Object.freeze({
                     preview.protectedSummaryCount + " 条带保护标识的消息都会保留。" +
                     (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                         " 个没有独立删除菜单的思考块将跳过。" : "") +
-                    "仅模型生成的摘要永久保留；原生删除不可撤销，继续？"
+                    (preview.skippedPrompts ? "另有 " + preview.skippedPrompts +
+                        " 条带模型回复或无删除菜单的临时输入会保留。" : "") +
+                    "原生删除不可撤销，继续？"
                 : (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
                 preview.deletedOldRounds + " 轮旧历史" +
                 "，保护 " + preview.protectedSummaryCount + " 条带保护标识的消息" +
-                "，清理压缩思维链及素酒自动生成的临时摘要指令。" +
+                "，清理压缩思维链及没有模型回复的临时指令。" +
+                (preview.skippedPrompts ? "另有 " + preview.skippedPrompts +
+                    " 条带模型回复或无删除菜单的临时输入会保留。" : "") +
                 "最近 " + plan.recentRounds + " 轮普通对话会保留。" +
                 "无法识别的历史摘要仍需人工核对。" +
                 (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
@@ -2249,7 +2298,7 @@ const RoundSplitter = Object.freeze({
                 "删除操作使用 AI Studio 原生消息菜单，Google 会自行自动保存。全部删除后统一等待保存响应。该操作不可撤销，继续？";
             if (!preview.items) {
                 PromptPanel.status(plan.thoughtOnly ?
-                    "没有可独立删除的思维链。所有普通消息和压缩摘要保持原样。" :
+                    "没有可独立删除的思维链或孤立临时指令；带模型摘要的临时输入安全保留。" :
                     "没有可删除的旧对话或独立思考块。带保护标识的消息均已保留。");
                 return;
             }
@@ -2351,6 +2400,8 @@ const RoundSplitter = Object.freeze({
                     "。这表示保存请求有成功响应，刷新后可核对实际云端历史。" +
                     (preview.skippedThoughts ? "部分无法独立删除的思考块已保留。" : "") +
                     (skipped ? " 已跳过 " + skipped + " 条不可删除的目标。" : "") +
+                    (preview.skippedPrompts ? " 另有 " + preview.skippedPrompts +
+                        " 条临时输入未删除，以防连带清除模型摘要。" : "") +
                     verificationNotice);
             } catch (error) {
                 PromptPanel.status("批量清理处理了 " + processed + "/" + preview.items +
@@ -2872,8 +2923,8 @@ const PromptPanel = (() => {
         line(action("读取已完成摘要", "recover-summary"), action("停止插件监听", "stop-tracking")),
         line(action("直接清理旧历史", "cleanup-history")),
         line(action("清理全部思维链", "cleanup-thoughts")),
-        make("p", { className: "hint", text: "消息保护仅按标识符生效：在想保留的用户消息里加入 [[SUJIU_PROTECT_V1]]。模型压缩摘要自动带有 SUJIU_MEMORY_V1 标识。所有独立 Thinking 仍会清理，素酒自动发送的 SUJIU_SCOPE_V2 临时摘要指令也会清理。" }),
-        make("p", { className: "hint", text: "清理历史按最近完整轮数选择旧消息，带保护标记的消息及其关联回复会保留；无法删除的单条消息跳过。清理前会显示数量供确认。" }),
+        make("p", { className: "hint", text: "保护消息只需在正文写 sujiu 五个字母（不区分大小写）。模型压缩摘要也会带 sujiu。思维链仍可单独清理。" }),
+        make("p", { className: "hint", text: "素酒自动发送的 SUJIU_SCOPE_V2 是临时任务。任务没有模型回复时可以清理；已有模型摘要的任务暂时保留，避免 Google 原生删除连带误删模型摘要。清理旧历史按最近完整轮数计算。" }),
         make("div", { id: "inplace-review", hidden: true }, [
           make("label", { text: "摘要预览（已写入原聊天）" }),
           role("snapshot-preview", "textarea", { rows: "8", readonly: "readonly" }),
