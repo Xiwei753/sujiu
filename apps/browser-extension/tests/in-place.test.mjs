@@ -1250,3 +1250,63 @@ test("cloud inventory tracks explicit user protection and never treats unmarked 
     /保存的历史压缩摘要记录与此前读取结果不一致/);
 });
 
+test("literal five-letter sujiu protects a user's message while its Thinking remains deletable", () => {
+  const turns = [
+    mockTurn("old-u","user"),mockTurn("old-m","model"),
+    mockTurn("my-user","user"),mockTurn("my-thought","thought"),
+    mockTurn("my-answer","model"),mockTurn("recent-u","user"),
+    mockTurn("recent-m","model")
+  ];
+  turns[2].textContent="Please keep this: sujiu";
+  const x=context(turns);
+  const normal=x.compactor.preflightDom(x.compactor.planManualCleanup(1));
+  assert.deepEqual(Array.from(normal.targetIds),
+    ["old-m","old-u","my-thought"]);
+  for(const id of ["my-user","my-answer","recent-u","recent-m"])
+    assert.ok(normal.protectedIds.includes(id));
+  const thoughts=x.compactor.preflightDom(x.compactor.planThoughtCleanup());
+  assert.ok(thoughts.targetIds.includes("my-thought"));
+  assert.ok(thoughts.protectedIds.includes("my-user"));
+});
+
+test("plugin USER scope marker is never considered sujiu-protected or deletable when model output exists", () => {
+  const turns = [
+    mockTurn("task","user"),mockTurn("thought","thought"),
+    mockTurn("model","model")
+  ];
+  turns[0].textContent="[[SUJIU_SCOPE_V2:12345678-aaaa]] sujiu quoted in history";
+  turns[2].textContent="Summary with no marker because generation truncated";
+  const x=context(turns);
+  const thoughts=x.compactor.preflightDom(x.compactor.planThoughtCleanup());
+  assert.deepEqual(Array.from(thoughts.targetIds),["thought"]);
+  assert.ok(thoughts.protectedIds.includes("task"));
+  assert.ok(thoughts.protectedIds.includes("model"));
+  assert.equal(thoughts.protectedSummaryCount,0,
+    "scope markers are disposable markers, not extra protected memories");
+  const cloud=x.compactor.archiveInventory([
+    {role:"user",text:turns[0].textContent},
+    {role:"model",text:turns[2].textContent}
+  ],turn=>turn.role,turn=>turn.text);
+  assert.equal(cloud.protectedCount,0);
+  assert.equal(cloud.compressionRequests,1);
+});
+
+test("unpaired generated prompt is eligible for cleanup and cannot enter a different menu", () => {
+  const turns=[mockTurn("task","user"),mockTurn("old-model","model")];
+  turns[0].textContent="[[SUJIU_SCOPE_V2:12345678-aaaa]]";
+  // This model belongs to the task. The prompt must not be selected.
+  const x=context(turns);
+  let p=x.compactor.preflightDom(x.compactor.planThoughtCleanup());
+  assert.deepEqual(Array.from(p.targetIds),[]);
+  const orphan=[mockTurn("orphan-task","user")];
+  orphan[0].textContent="[[SUJIU_SCOPE_V2:12345678-bbbb]]";
+  const y=context(orphan);
+  p=y.compactor.preflightDom(y.compactor.planThoughtCleanup());
+  assert.deepEqual(Array.from(p.targetIds),["orphan-task"]);
+  const deleteCode=source.slice(source.indexOf("async function findNativeDeleteItem("),
+    source.indexOf("async function commit("));
+  assert.match(deleteCode,/trigger\?\.getAttribute\?\.\("aria-controls"\)/);
+  assert.match(deleteCode,/const panel = document.getElementById\(menuId\)/);
+  assert.doesNotMatch(deleteCode,/document.querySelectorAll\(\s*".cdk-overlay-container/);
+});
+
