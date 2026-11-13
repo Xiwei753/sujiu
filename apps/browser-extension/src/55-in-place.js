@@ -26,6 +26,10 @@
         // Explicit user/model markers alone decide protection.
         function isProtectedTurn(turn) {
             const role = normalizeType(turn);
+            // Scope-tagged USER messages are the plugin's own temporary
+            // inputs. They are never protected by their internal "sujiu"
+            // token (or by archived history quoted in their body).
+            if (role === "user" && temporaryTaskId(turn)) return false;
             return (role === "user" || role === "model") &&
                 CompactionTask.isProtectedMessage(String(turn.textContent || ""));
         }
@@ -53,26 +57,37 @@
         function temporaryTasks(turns) {
             const tasks = [];
             for (let index = 0; index < turns.length; index++) {
-                const turn = turns[index];
-                const id = temporaryTaskId(turn);
+                const prompt = turns[index];
+                const id = temporaryTaskId(prompt);
                 if (!id) continue;
-                let reply = null;
+                const replies = [];
                 for (let next = index + 1; next < turns.length; next++) {
                     const candidate = turns[next];
                     const type = normalizeType(candidate);
                     if (type === "user") break;
-                    if (type !== "model") continue;
-                    const text = String(candidate.textContent || "");
-                    if (text.toLowerCase().includes(
-                        "[[sujiu_memory_v1:" + id + "]]") ||
-                        isArchiveReply(candidate)) {
-                        reply = candidate;
-                        break;
-                    }
+                    if (type === "model") replies.push(candidate);
                 }
-                tasks.push({ prompt: turn, reply });
+                // Any MODEL response following the explicit script task is
+                // potentially a precious summary, even when its marker was
+                // stripped by rendering. Never gamble with its native delete.
+                tasks.push({ prompt, replies, reply: replies[0] || null });
             }
             return tasks;
+        }
+
+        function pairedArchiveIds(turns) {
+            return new Set(temporaryTasks(turns)
+                .flatMap(task => task.replies.map(reply => reply.id)));
+        }
+
+        function safeDisposablePrompts(turns) {
+            return temporaryTasks(turns)
+                // Google native USER deletion has destroyed its paired MODEL
+                // reply in real use. An associated MODEL makes the scope USER
+                // unsafe to remove with the native menu: preserve for now.
+                .filter(task => task.replies.length === 0)
+                .filter(task => hasIndependentDeleteMenu(task.prompt))
+                .map(task => task.prompt);
         }
 
         // Stable memory markers live in Google-saved message text. We cannot
@@ -91,7 +106,9 @@
                     RoundSplitter.isCompressionPrompt({ role, text })) {
                     compressionRequests++;
                 }
-                if (CompactionTask.isProtectedMessage(text)) protectedCount++;
+                if (!(role === "user" &&
+                    RoundSplitter.isCompressionPrompt({ role, text })) &&
+                    CompactionTask.isProtectedMessage(text)) protectedCount++;
                 if (role === "model") {
                     const ids = new Set(CompactionTask.getMemoryMarkers(text)
                         .map(marker => marker.toLowerCase()));
@@ -261,8 +278,7 @@
             const hasOldArchiveThoughts = archiveIndices.some(index =>
                 regular[index].turns.some(turn =>
                     normalizeType(turn) === "thought" && hasIndependentDeleteMenu(turn)));
-            const hasTemporaryTasks = temporaryTasks(turns).some(item =>
-                hasIndependentDeleteMenu(item.prompt));
+            const hasTemporaryTasks = safeDisposablePrompts(turns).length > 0;
             if (chatIndices.length <= keepRounds &&
                 !hasOldArchiveThoughts && !hasTemporaryTasks) {
                 throw new Error("当前只有 " + chatIndices.length +
@@ -359,10 +375,7 @@
                     else skippedThoughts++;
                 }
                 const temporary = temporaryTasks(turns);
-                const disposablePrompts = temporary
-                    .filter(item => !isProtectedTurn(item.prompt))
-                .filter(item => hasIndependentDeleteMenu(item.prompt))
-                    .map(item => item.prompt);
+                const disposablePrompts = safeDisposablePrompts(turns);
                 // Remove thinking first; then the script's temporary USER
                 // request. The paired MODEL summary is never a deletion target.
                 deletable.push(...disposablePrompts);
@@ -447,9 +460,10 @@
                 }
             }
 
-            // Archive MODEL replies are permanent. The corresponding
-            // SUJIU_SCOPE_V2 USER requests are temporary and are removable
-            // with their independent thinking nodes.
+            // Archived MODEL replies are never deletion candidates. A
+            // temporary USER request with an existing MODEL is also retained
+            // until an independently verified, non-cascading way to remove
+            // that request exists. Its Thinking can still be removed.
             let skippedThoughts = 0;
             for (const group of groups) {
                 if (!isArchiveGroup(group) && group.kind !== "memory") continue;
@@ -464,10 +478,7 @@
             }
 
             const temporary = temporaryTasks(turns);
-            const disposablePrompts = temporary
-                .filter(item => !isProtectedTurn(item.prompt))
-                .filter(item => hasIndependentDeleteMenu(item.prompt))
-                .map(item => item.prompt);
+            const disposablePrompts = safeDisposablePrompts(turns);
             // Remove thinking first, then temporary auto-generated prompts.
             targetTurns.push(...disposablePrompts);
             const targetIds = targetTurns.map(turn => turn.id);
@@ -533,10 +544,21 @@
             }
             // Thinking still deletes, regardless of any marker in its text.
             if (type !== "thought" && isProtectedTurn(turn)) {
-                return { deleted: false, reason: "消息带有素酒保护标识符" };
+                return { deleted: false, reason: "消息包含 sujiu 保护标记" };
             }
-            const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
-                turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
+            const liveTurns = [...document.querySelectorAll("ms-chat-turn")];
+            const archiveIds = pairedArchiveIds(liveTurns);
+            if (type === "model" && archiveIds.has(id)) {
+                return { deleted: false, reason: "该模型回复属于插件压缩结果" };
+            }
+            if (isTask && temporaryTasks(liveTurns).some(task =>
+                task.prompt.id === id && task.replies.length > 0)) {
+                return { deleted: false,
+                    reason: "原生删除该指令可能连带删除模型摘要，暂时保留" };
+            }
+            // Select the native trigger button, not its inner icon. Clicking
+            // a stale icon can activate the wrong floating menu.
+            const button = turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
                 turn.querySelector("ms-chat-turn-options button");
             if (!button) {
                 return { deleted: false, reason: "没有独立删除菜单" };
@@ -596,7 +618,7 @@
                     preview.protectedSummaryCount + " 条带保护标识的消息都会保留。" +
                     (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                         " 个没有独立删除菜单的思考块将跳过。" : "") +
-                    "仅模型生成的摘要永久保留；原生删除不可撤销，继续？"
+                    "携带模型回复的临时指令暂时保留以防连带删除；原生删除不可撤销，继续？"
                 : (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
                 preview.deletedOldRounds + " 轮旧历史" +
                 "，保护 " + preview.protectedSummaryCount + " 条带保护标识的消息" +
