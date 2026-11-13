@@ -27,7 +27,7 @@ function context(turns, overrides = {}) {
     Branching: { getCurrentPromptId() { return "chat-test"; } },
     CompactionTask: {
       isPinnedSummary: text => /\[\[SUJIU_MEMORY_V1:/.test(text),
-      isProtectedMessage: text => /\[\[(?:SUJIU_PROTECT_V1|SUJIU_MEMORY_V1:[a-z0-9-]{8,80})\]\]/i.test(String(text)),
+      isProtectedMessage: text => String(text).toLowerCase().includes("sujiu"),
       memoryMarker: marker => marker.replace("SCOPE_V2", "MEMORY_V1"),
       getMemoryMarkers: text => [...String(text).matchAll(/\[\[SUJIU_MEMORY_V1:[a-z0-9-]{8,80}\]\]/gi)]
         .map(match => match[0])
