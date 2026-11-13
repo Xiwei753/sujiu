@@ -87,8 +87,8 @@ const PromptPanel = (() => {
         line(action("读取已完成摘要", "recover-summary"), action("停止插件监听", "stop-tracking")),
         line(action("直接清理旧历史", "cleanup-history")),
         line(action("清理全部思维链", "cleanup-thoughts")),
-        make("p", { className: "hint", text: "消息保护仅按标识符生效：在想保留的用户消息里加入 [[SUJIU_PROTECT_V1]]。模型压缩摘要自动带有 SUJIU_MEMORY_V1 标识。所有独立 Thinking 仍会清理，素酒自动发送的 SUJIU_SCOPE_V2 临时摘要指令也会清理。" }),
-        make("p", { className: "hint", text: "清理历史按最近完整轮数选择旧消息，带保护标记的消息及其关联回复会保留；无法删除的单条消息跳过。清理前会显示数量供确认。" }),
+        make("p", { className: "hint", text: "保护消息只需在正文写 sujiu 五个字母（不区分大小写）。模型压缩摘要也会带 sujiu。思维链仍可单独清理。" }),
+        make("p", { className: "hint", text: "素酒自动发送的 SUJIU_SCOPE_V2 是临时任务。任务没有模型回复时可以清理；已有模型摘要的任务暂时保留，避免 Google 原生删除连带误删模型摘要。清理旧历史按最近完整轮数计算。" }),
         make("div", { id: "inplace-review", hidden: true }, [
           make("label", { text: "摘要预览（已写入原聊天）" }),
           role("snapshot-preview", "textarea", { rows: "8", readonly: "readonly" }),
