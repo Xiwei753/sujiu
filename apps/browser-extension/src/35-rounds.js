@@ -8,8 +8,10 @@ const RoundSplitter = Object.freeze({
     },
     hasProtectionMarker(turn) {
       if (!turn || (turn.role !== "user" && turn.role !== "model")) return false;
-      return /\[\[(?:SUJIU_PROTECT_V1|SUJIU_MEMORY_V1:[a-z0-9-]{8,80})\]\]/i.test(
-        this.textOf(turn));
+      // Plugin-created USER commands are disposable regardless of the
+      // internal SUJIU_SCOPE_V2 token and copied conversation text.
+      if (this.isCompressionPrompt(turn)) return false;
+      return this.textOf(turn).toLowerCase().includes("sujiu");
     },
     isMemory(turn) {
       return turn?.role === "model" && this.hasProtectionMarker(turn);
