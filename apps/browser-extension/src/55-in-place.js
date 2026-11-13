@@ -26,6 +26,10 @@
         // Explicit user/model markers alone decide protection.
         function isProtectedTurn(turn) {
             const role = normalizeType(turn);
+            // Scope-tagged USER messages are the plugin's own temporary
+            // inputs. They are never protected by their internal "sujiu"
+            // token (or by archived history quoted in their body).
+            if (role === "user" && temporaryTaskId(turn)) return false;
             return (role === "user" || role === "model") &&
                 CompactionTask.isProtectedMessage(String(turn.textContent || ""));
         }
@@ -53,26 +57,37 @@
         function temporaryTasks(turns) {
             const tasks = [];
             for (let index = 0; index < turns.length; index++) {
-                const turn = turns[index];
-                const id = temporaryTaskId(turn);
+                const prompt = turns[index];
+                const id = temporaryTaskId(prompt);
                 if (!id) continue;
-                let reply = null;
+                const replies = [];
                 for (let next = index + 1; next < turns.length; next++) {
                     const candidate = turns[next];
                     const type = normalizeType(candidate);
                     if (type === "user") break;
-                    if (type !== "model") continue;
-                    const text = String(candidate.textContent || "");
-                    if (text.toLowerCase().includes(
-                        "[[sujiu_memory_v1:" + id + "]]") ||
-                        isArchiveReply(candidate)) {
-                        reply = candidate;
-                        break;
-                    }
+                    if (type === "model") replies.push(candidate);
                 }
-                tasks.push({ prompt: turn, reply });
+                // Any MODEL response following the explicit script task is
+                // potentially a precious summary, even when its marker was
+                // stripped by rendering. Never gamble with its native delete.
+                tasks.push({ prompt, replies, reply: replies[0] || null });
             }
             return tasks;
+        }
+
+        function pairedArchiveIds(turns) {
+            return new Set(temporaryTasks(turns)
+                .flatMap(task => task.replies.map(reply => reply.id)));
+        }
+
+        function safeDisposablePrompts(turns) {
+            return temporaryTasks(turns)
+                // Google native USER deletion has destroyed its paired MODEL
+                // reply in real use. An associated MODEL makes the scope USER
+                // unsafe to remove with the native menu: preserve for now.
+                .filter(task => task.replies.length === 0)
+                .filter(task => hasIndependentDeleteMenu(task.prompt))
+                .map(task => task.prompt);
         }
 
         // Stable memory markers live in Google-saved message text. We cannot
@@ -91,7 +106,9 @@
                     RoundSplitter.isCompressionPrompt({ role, text })) {
                     compressionRequests++;
                 }
-                if (CompactionTask.isProtectedMessage(text)) protectedCount++;
+                if (!(role === "user" &&
+                    RoundSplitter.isCompressionPrompt({ role, text })) &&
+                    CompactionTask.isProtectedMessage(text)) protectedCount++;
                 if (role === "model") {
                     const ids = new Set(CompactionTask.getMemoryMarkers(text)
                         .map(marker => marker.toLowerCase()));
@@ -261,8 +278,7 @@
             const hasOldArchiveThoughts = archiveIndices.some(index =>
                 regular[index].turns.some(turn =>
                     normalizeType(turn) === "thought" && hasIndependentDeleteMenu(turn)));
-            const hasTemporaryTasks = temporaryTasks(turns).some(item =>
-                hasIndependentDeleteMenu(item.prompt));
+            const hasTemporaryTasks = safeDisposablePrompts(turns).length > 0;
             if (chatIndices.length <= keepRounds &&
                 !hasOldArchiveThoughts && !hasTemporaryTasks) {
                 throw new Error("当前只有 " + chatIndices.length +
@@ -359,12 +375,9 @@
                     else skippedThoughts++;
                 }
                 const temporary = temporaryTasks(turns);
-                const disposablePrompts = temporary
-                    .filter(item => !isProtectedTurn(item.prompt))
-                .filter(item => hasIndependentDeleteMenu(item.prompt))
-                    .map(item => item.prompt);
-                // Remove thinking first; then the script's temporary USER
-                // request. The paired MODEL summary is never a deletion target.
+                const disposablePrompts = safeDisposablePrompts(turns);
+                // Delete standalone Thinking and only truly orphaned
+                // plugin USER requests. A paired MODEL is never targeted.
                 deletable.push(...disposablePrompts);
                 const targetIds = deletable.map(turn => turn.id);
                 if (targetIds.some(id => !id) ||
@@ -447,9 +460,10 @@
                 }
             }
 
-            // Archive MODEL replies are permanent. The corresponding
-            // SUJIU_SCOPE_V2 USER requests are temporary and are removable
-            // with their independent thinking nodes.
+            // Archived MODEL replies are never deletion candidates. A
+            // temporary USER request with an existing MODEL is also retained
+            // until an independently verified, non-cascading way to remove
+            // that request exists. Its Thinking can still be removed.
             let skippedThoughts = 0;
             for (const group of groups) {
                 if (!isArchiveGroup(group) && group.kind !== "memory") continue;
@@ -464,10 +478,7 @@
             }
 
             const temporary = temporaryTasks(turns);
-            const disposablePrompts = temporary
-                .filter(item => !isProtectedTurn(item.prompt))
-                .filter(item => hasIndependentDeleteMenu(item.prompt))
-                .map(item => item.prompt);
+            const disposablePrompts = safeDisposablePrompts(turns);
             // Remove thinking first, then temporary auto-generated prompts.
             targetTurns.push(...disposablePrompts);
             const targetIds = targetTurns.map(turn => turn.id);
@@ -498,24 +509,44 @@
             };
         }
 
-        async function findNativeDeleteItem() {
+        async function findNativeDeleteItem(trigger) {
+            // Angular's menu panels live in a global overlay. Selecting the
+            // first visible "Delete" anywhere can delete an unrelated MODEL
+            // turn. Only act on the panel controlled by this exact trigger.
             for (let attempt = 0; attempt < 12; attempt++) {
-                const items = [...document.querySelectorAll(
-                    ".cdk-overlay-container .mat-mdc-menu-content button, .cdk-overlay-container [role=menuitem], .cdk-overlay-pane button"
+                const menuId = trigger?.getAttribute?.("aria-controls");
+                const expanded = trigger?.getAttribute?.("aria-expanded");
+                if (!menuId || expanded !== "true") {
+                    await sleep(80);
+                    continue;
+                }
+                const panel = document.getElementById(menuId);
+                if (!panel || !panel.isConnected ||
+                    panel.getAttribute?.("aria-hidden") === "true") {
+                    await sleep(80);
+                    continue;
+                }
+                const items = [...panel.querySelectorAll(
+                    ".mat-mdc-menu-content button, [role=menuitem], button"
                 )];
-                const target = items.find(item => {
-                    if (item.disabled || item.getAttribute("aria-disabled") === "true") return false;
-                    const icon = item.querySelector("mat-icon, .material-symbols-outlined, [data-mat-icon-name]");
+                const matched = items.filter(item => {
+                    if (item.disabled ||
+                        item.getAttribute?.("aria-disabled") === "true") return false;
+                    const icon = item.querySelector?.(
+                        "mat-icon, .material-symbols-outlined, [data-mat-icon-name]"
+                    );
                     const label = [
-                        item.getAttribute("aria-label"),
-                        icon?.getAttribute("fonticon"),
-                        icon?.getAttribute("data-mat-icon-name"),
+                        item.getAttribute?.("aria-label"),
+                        icon?.getAttribute?.("fonticon"),
+                        icon?.getAttribute?.("data-mat-icon-name"),
                         icon?.textContent,
                         item.textContent
                     ].filter(Boolean).join(" ").toLowerCase();
                     return /(?:delete|trash|删除|移除)/i.test(label);
                 });
-                if (target) return target;
+                // Ambiguous or stale menus are unsafe for destructive clicks.
+                if (matched.length === 1) return matched[0];
+                if (matched.length > 1) return null;
                 await sleep(80);
             }
             return null;
@@ -533,16 +564,27 @@
             }
             // Thinking still deletes, regardless of any marker in its text.
             if (type !== "thought" && isProtectedTurn(turn)) {
-                return { deleted: false, reason: "消息带有素酒保护标识符" };
+                return { deleted: false, reason: "消息包含 sujiu 保护标记" };
             }
-            const button = turn.querySelector("ms-chat-turn-options span.ms-button-icon-symbol") ||
-                turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
+            const liveTurns = [...document.querySelectorAll("ms-chat-turn")];
+            const archiveIds = pairedArchiveIds(liveTurns);
+            if (type === "model" && archiveIds.has(id)) {
+                return { deleted: false, reason: "该模型回复属于插件压缩结果" };
+            }
+            if (isTask && temporaryTasks(liveTurns).some(task =>
+                task.prompt.id === id && task.replies.length > 0)) {
+                return { deleted: false,
+                    reason: "原生删除该指令可能连带删除模型摘要，暂时保留" };
+            }
+            // Select the native trigger button, not its inner icon. Clicking
+            // a stale icon can activate the wrong floating menu.
+            const button = turn.querySelector("ms-chat-turn-options button.mat-mdc-menu-trigger") ||
                 turn.querySelector("ms-chat-turn-options button");
             if (!button) {
                 return { deleted: false, reason: "没有独立删除菜单" };
             }
             button.click();
-            const item = await findNativeDeleteItem();
+            const item = await findNativeDeleteItem(button);
             if (!item) {
                 return { deleted: false, reason: "原生菜单没有删除选项" };
             }
@@ -596,11 +638,15 @@
                     preview.protectedSummaryCount + " 条带保护标识的消息都会保留。" +
                     (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                         " 个没有独立删除菜单的思考块将跳过。" : "") +
-                    "仅模型生成的摘要永久保留；原生删除不可撤销，继续？"
+                    (preview.skippedPrompts ? "另有 " + preview.skippedPrompts +
+                        " 条带模型回复或无删除菜单的临时输入会保留。" : "") +
+                    "原生删除不可撤销，继续？"
                 : (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
                 preview.deletedOldRounds + " 轮旧历史" +
                 "，保护 " + preview.protectedSummaryCount + " 条带保护标识的消息" +
-                "，清理压缩思维链及素酒自动生成的临时摘要指令。" +
+                "，清理压缩思维链及没有模型回复的临时指令。" +
+                (preview.skippedPrompts ? "另有 " + preview.skippedPrompts +
+                    " 条带模型回复或无删除菜单的临时输入会保留。" : "") +
                 "最近 " + plan.recentRounds + " 轮普通对话会保留。" +
                 "无法识别的历史摘要仍需人工核对。" +
                 (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
@@ -608,7 +654,7 @@
                 "删除操作使用 AI Studio 原生消息菜单，Google 会自行自动保存。全部删除后统一等待保存响应。该操作不可撤销，继续？";
             if (!preview.items) {
                 PromptPanel.status(plan.thoughtOnly ?
-                    "没有可独立删除的思维链。所有普通消息和压缩摘要保持原样。" :
+                    "没有可独立删除的思维链或孤立临时指令；带模型摘要的临时输入安全保留。" :
                     "没有可删除的旧对话或独立思考块。带保护标识的消息均已保留。");
                 return;
             }
@@ -710,6 +756,8 @@
                     "。这表示保存请求有成功响应，刷新后可核对实际云端历史。" +
                     (preview.skippedThoughts ? "部分无法独立删除的思考块已保留。" : "") +
                     (skipped ? " 已跳过 " + skipped + " 条不可删除的目标。" : "") +
+                    (preview.skippedPrompts ? " 另有 " + preview.skippedPrompts +
+                        " 条临时输入未删除，以防连带清除模型摘要。" : "") +
                     verificationNotice);
             } catch (error) {
                 PromptPanel.status("批量清理处理了 " + processed + "/" + preview.items +

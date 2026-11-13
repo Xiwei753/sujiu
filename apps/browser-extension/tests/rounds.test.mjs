@@ -143,10 +143,37 @@ test("XML state_snapshot alone is not a protection marker", () => {
   });
 
   test("real CompactionTask accepts explicit protection markers in either message role", () => {
+    assert.equal(markers.isProtectedMessage("sujiu"),true);
+    assert.equal(markers.isProtectedMessage("Keep this please: SuJiU"),true);
+    assert.equal(markers.isProtectedMessage("My custom sujiu reminder"),true);
     assert.equal(markers.isProtectedMessage("[[SUJIU_PROTECT_V1]] My user text"),true);
     assert.equal(markers.isProtectedMessage("Prefix [[SUJIU_MEMORY_V1:12345678-abcd]] Model memory"),true);
-    assert.equal(markers.isProtectedMessage("SUJIU_PROTECT_V1 without square brackets"),false);
-    assert.equal(markers.isProtectedMessage("[[SUJIU_SCOPE_V2:12345678-abcd]] Disposable task"),false);
+    assert.equal(markers.isProtectedMessage("SUJIU_PROTECT_V1 without square brackets"),true);
+    assert.equal(markers.isProtectedMessage("[[SUJIU_SCOPE_V2:12345678-abcd]] Disposable task"),true);
+    assert.equal(splitter.hasProtectionMarker({
+      role:"user",text:"[[SUJIU_SCOPE_V2:12345678-abcd]] Disposable task sujiu"
+    }),false,"full scoped task marker overrides the literal token");
     assert.equal(markers.isProtectedMessage("【稳定设定】A【已发生的关键事件】B"),false);
     assert.equal(markers.isProtectedMessage("<state_snapshot>memory</state_snapshot>"),false);
+  });
+
+  test("literal sujiu protects a user-authored message from the compression round window", () => {
+    const source = make(4);
+    source[2].text="Important user note sujiu";
+    const result=splitter.partition(source,1);
+    assert.equal(result.totalRounds,3);
+    assert.equal(result.pinnedMemories,1);
+    assert.equal(result.recent[0].text,"user 3");
+  });
+
+  test("generated summary prompt asks the model to output literal sujiu", () => {
+    const scoped={
+      marker:"[[SUJIU_SCOPE_V2:12345678-abcd]]",
+      promptId:"p",
+      keepRounds:1
+    };
+    const prompt=markers.compose("Summarize",scoped);
+    assert.ok(prompt.includes("摘要第一行单独输出这五个字母：sujiu"));
+    assert.ok(prompt.includes("[[SUJIU_MEMORY_V1:12345678-abcd]]"));
+    assert.equal(splitter.hasProtectionMarker({role:"user",text:prompt}),false);
   });

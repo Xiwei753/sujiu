@@ -12,15 +12,15 @@
             return [...text.matchAll(this.memoryPattern)].map(match => match[0]);
         },
         isPinnedSummary(text) {
-            return this.getMemoryMarkers(text).length > 0;
+            return this.isProtectedMessage(text);
         },
-        // Explicit markers are the only protection mechanism. The short
-        // SUJIU_PROTECT_V1 marker can be added to any USER or MODEL message.
-        // Existing generated MODEL summaries carry SUJIU_MEMORY_V1:<id>.
-        // Thinking chunks are intentionally excluded by the callers.
+        // The user-facing protection marker is the five letters "sujiu".
+        // Older saved model summaries with SUJIU_MEMORY_V1 keep working too.
+        // Callers must exclude native Thinking and exact SUJIU_SCOPE_V2
+        // USER tasks before applying this general text predicate.
         isProtectedMessage(text) {
             return typeof text === "string" &&
-                /\[\[(?:SUJIU_PROTECT_V1|SUJIU_MEMORY_V1:[a-z0-9-]{8,80})\]\]/i.test(text);
+                text.toLowerCase().includes("sujiu");
         },
         create(promptId, keepRounds) {
             if (!promptId || !Number.isSafeInteger(keepRounds) || keepRounds < 1 || keepRounds > 100) {
@@ -42,8 +42,9 @@
             // recent-turn counts must never be included in the model input.
             return basePrompt.trim() +
                 "\n\n请仅依据本次请求实际提供的历史记录整理摘要。不要推测后续剧情。" +
-                "\n\n摘要第一行必须独立、原样输出以下记忆标识：" + this.memoryMarker(task.marker) +
-                "\n这是一条会被永久保留的压缩记忆，标识之后才是摘要正文。" +
+                "\n\n摘要第一行单独输出这五个字母：sujiu" +
+                "\n第二行原样输出任务记忆标识：" + this.memoryMarker(task.marker) +
+                "\n然后继续输出完整的摘要正文。以上两行会随模型摘要一起保留。" +
                 "\n\n[客户端任务] " + task.marker;
         },
         parsePrompt(prompt) {
