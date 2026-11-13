@@ -376,8 +376,8 @@
                 }
                 const temporary = temporaryTasks(turns);
                 const disposablePrompts = safeDisposablePrompts(turns);
-                // Remove thinking first; then the script's temporary USER
-                // request. The paired MODEL summary is never a deletion target.
+                // Delete standalone Thinking and only truly orphaned
+                // plugin USER requests. A paired MODEL is never targeted.
                 deletable.push(...disposablePrompts);
                 const targetIds = deletable.map(turn => turn.id);
                 if (targetIds.some(id => !id) ||
@@ -638,11 +638,15 @@
                     preview.protectedSummaryCount + " 条带保护标识的消息都会保留。" +
                     (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
                         " 个没有独立删除菜单的思考块将跳过。" : "") +
-                    "携带模型回复的临时指令暂时保留以防连带删除；原生删除不可撤销，继续？"
+                    (preview.skippedPrompts ? "另有 " + preview.skippedPrompts +
+                        " 条带模型回复或无删除菜单的临时输入会保留。" : "") +
+                    "原生删除不可撤销，继续？"
                 : (plan.manual ? "手动清理（无需摘要）：准备删除 " : "准备一次性清理 ") +
                 preview.deletedOldRounds + " 轮旧历史" +
                 "，保护 " + preview.protectedSummaryCount + " 条带保护标识的消息" +
-                "，清理压缩思维链及素酒自动生成的临时摘要指令。" +
+                "，清理压缩思维链及没有模型回复的临时指令。" +
+                (preview.skippedPrompts ? "另有 " + preview.skippedPrompts +
+                    " 条带模型回复或无删除菜单的临时输入会保留。" : "") +
                 "最近 " + plan.recentRounds + " 轮普通对话会保留。" +
                 "无法识别的历史摘要仍需人工核对。" +
                 (preview.skippedThoughts ? "另有 " + preview.skippedThoughts +
@@ -650,7 +654,7 @@
                 "删除操作使用 AI Studio 原生消息菜单，Google 会自行自动保存。全部删除后统一等待保存响应。该操作不可撤销，继续？";
             if (!preview.items) {
                 PromptPanel.status(plan.thoughtOnly ?
-                    "没有可独立删除的思维链。所有普通消息和压缩摘要保持原样。" :
+                    "没有可独立删除的思维链或孤立临时指令；带模型摘要的临时输入安全保留。" :
                     "没有可删除的旧对话或独立思考块。带保护标识的消息均已保留。");
                 return;
             }
@@ -752,6 +756,8 @@
                     "。这表示保存请求有成功响应，刷新后可核对实际云端历史。" +
                     (preview.skippedThoughts ? "部分无法独立删除的思考块已保留。" : "") +
                     (skipped ? " 已跳过 " + skipped + " 条不可删除的目标。" : "") +
+                    (preview.skippedPrompts ? " 另有 " + preview.skippedPrompts +
+                        " 条临时输入未删除，以防连带清除模型摘要。" : "") +
                     verificationNotice);
             } catch (error) {
                 PromptPanel.status("批量清理处理了 " + processed + "/" + preview.items +
