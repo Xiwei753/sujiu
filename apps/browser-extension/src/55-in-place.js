@@ -509,24 +509,44 @@
             };
         }
 
-        async function findNativeDeleteItem() {
+        async function findNativeDeleteItem(trigger) {
+            // Angular's menu panels live in a global overlay. Selecting the
+            // first visible "Delete" anywhere can delete an unrelated MODEL
+            // turn. Only act on the panel controlled by this exact trigger.
             for (let attempt = 0; attempt < 12; attempt++) {
-                const items = [...document.querySelectorAll(
-                    ".cdk-overlay-container .mat-mdc-menu-content button, .cdk-overlay-container [role=menuitem], .cdk-overlay-pane button"
+                const menuId = trigger?.getAttribute?.("aria-controls");
+                const expanded = trigger?.getAttribute?.("aria-expanded");
+                if (!menuId || expanded !== "true") {
+                    await sleep(80);
+                    continue;
+                }
+                const panel = document.getElementById(menuId);
+                if (!panel || !panel.isConnected ||
+                    panel.getAttribute?.("aria-hidden") === "true") {
+                    await sleep(80);
+                    continue;
+                }
+                const items = [...panel.querySelectorAll(
+                    ".mat-mdc-menu-content button, [role=menuitem], button"
                 )];
-                const target = items.find(item => {
-                    if (item.disabled || item.getAttribute("aria-disabled") === "true") return false;
-                    const icon = item.querySelector("mat-icon, .material-symbols-outlined, [data-mat-icon-name]");
+                const matched = items.filter(item => {
+                    if (item.disabled ||
+                        item.getAttribute?.("aria-disabled") === "true") return false;
+                    const icon = item.querySelector?.(
+                        "mat-icon, .material-symbols-outlined, [data-mat-icon-name]"
+                    );
                     const label = [
-                        item.getAttribute("aria-label"),
-                        icon?.getAttribute("fonticon"),
-                        icon?.getAttribute("data-mat-icon-name"),
+                        item.getAttribute?.("aria-label"),
+                        icon?.getAttribute?.("fonticon"),
+                        icon?.getAttribute?.("data-mat-icon-name"),
                         icon?.textContent,
                         item.textContent
                     ].filter(Boolean).join(" ").toLowerCase();
                     return /(?:delete|trash|删除|移除)/i.test(label);
                 });
-                if (target) return target;
+                // Ambiguous or stale menus are unsafe for destructive clicks.
+                if (matched.length === 1) return matched[0];
+                if (matched.length > 1) return null;
                 await sleep(80);
             }
             return null;
@@ -564,7 +584,7 @@
                 return { deleted: false, reason: "没有独立删除菜单" };
             }
             button.click();
-            const item = await findNativeDeleteItem();
+            const item = await findNativeDeleteItem(button);
             if (!item) {
                 return { deleted: false, reason: "原生菜单没有删除选项" };
             }
