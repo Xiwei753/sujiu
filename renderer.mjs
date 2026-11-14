@@ -37,7 +37,7 @@ function colorFor(name) {
     return hash % 7;
 }
 
-function renderSegment(segment, avatars) {
+function renderSegment(segment, avatars, continued = false) {
     const name = String(segment.speaker || '旁白');
     const kind = String(segment.kind || 'narration');
     const text = String(segment.text ?? '');
@@ -46,9 +46,9 @@ function renderSegment(segment, avatars) {
         return `<section class="sujiu-narration" aria-label="场景旁白">${richText(text)}</section>`;
     }
     const nameSafe = escapeHtml(name);
-    return `<section class="sujiu-speaker" data-sujiu-kind="${escapeHtml(kind)}">
-       <div class="sujiu-avatar sujiu-hue-${colorFor(name)}" aria-hidden="true">${escapeHtml(avatarFor(name, avatars))}</div>
-       <div class="sujiu-speaker-body"><div class="sujiu-speaker-name">${nameSafe}</div>
+    return `<section class="sujiu-speaker${continued ? ' sujiu-speaker-continued' : ''}" data-sujiu-kind="${escapeHtml(kind)}">
+       <div class="sujiu-avatar sujiu-hue-${colorFor(name)}" aria-hidden="true">${continued ? '' : escapeHtml(avatarFor(name, avatars))}</div>
+       <div class="sujiu-speaker-body">${continued ? '' : '<div class="sujiu-speaker-name">' + nameSafe + '</div>'}
        <div class="sujiu-speech">${richText(text)}</div></div></section>`;
 }
 
@@ -72,7 +72,10 @@ function renderContinuity(record) {
 }
 
 export function renderSujiu(data, avatars = {}) {
-    const segments = (data.segments ?? []).map(v => renderSegment(v, avatars)).join('');
+    const parts = data.segments ?? [];
+    const segments = parts.map((v, i) => renderSegment(v, avatars,
+        i > 0 && v.speaker === parts[i - 1].speaker && v.kind === parts[i - 1].kind &&
+        v.kind !== 'narration')).join('');
     const pending = data.complete ? '' : `<div class="sujiu-pending">${segments ? '生成中…' : '正在生成场景…'}</div>`;
     return `<div class="sujiu-scene" data-sujiu-version="4">${segments}${pending}${renderState(data.state)}${renderContinuity(data.continuity)}</div>`;
 }
