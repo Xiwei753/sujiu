@@ -7,7 +7,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "sujiu",
-  "version": "4.0.1",
+  "version": "4.0.2",
   "auto_update": true,
   "minimum_client_version": "1.12.0"
 }
