@@ -128,3 +128,84 @@ export function parseSujiu(raw) {
     if (value.length > 100 && !/"(?:sujiu_schema|segments)"/.test(value.slice(0, 1200))) return null;
     return { complete: false, segments: partialSegments(value), state: null, continuity: null };
 }
+
+
+// Deliberately conservative fallback for multi-speaker, human-readable RP.
+const ROLE_LABEL = /^(?:老师|班主任|教官|导师|同学[\p{L}\p{N}]{0,10}|学生[\p{L}\p{N}]{0,10}|学生会长|风纪委员|旁白)$/u;
+const COMMON_NAMES = new Set(['御坂美琴','白井黑子','食蜂操祈','初春饰利','佐天泪子','帆风润子','一方通行','麦野沉利']);
+const NON_NAMES = new Set(['时间','地点','状态','持有物品','场景','剧情','备注','今日','清晨','黄昏','翌日','教室','走廊','窗边','讲台','座位','下午','晚上','上午']);
+const EMOJI_LINE = /^(?:[\u{1F000}-\u{1FAFF}\u2600-\u27BF]\uFE0F?\s*){1,4}$/u;
+function labelInfo(line) {
+    let name = line.trim(), marked = false;
+    if ((name.startsWith('**') && name.endsWith('**')) || (name.startsWith('__') && name.endsWith('__'))) {
+        name = name.slice(2, -2).trim(); marked = true;
+    }
+    if ((name.startsWith('【') && name.endsWith('】')) || (name.startsWith('[') && name.endsWith(']')) ||
+        (name.startsWith('「') && name.endsWith('」'))) {
+        name = name.slice(1, -1).trim(); marked = true;
+    }
+    return {name, marked};
+}
+function speakerName(line, next = '', avatar = false) {
+    const {name, marked} = labelInfo(line);
+    if (!name || name.length > 24 || NON_NAMES.has(name)) return null;
+    if (ROLE_LABEL.test(name) || COMMON_NAMES.has(name)) return name;
+    if (/^[\p{Script=Han}·]{2,8}$/u.test(name) &&
+        (marked || avatar || /^[「『“"'‘]/u.test(next.trim()))) return name;
+    if (/^[A-Za-z][A-Za-z0-9 _.·-]{1,19}$/u.test(name) &&
+        (marked || avatar || /^[「『“"'‘]/u.test(next.trim()))) return name;
+    return null;
+}
+function nextContent(lines, start) {
+    for (let i=start; i<lines.length; i++) {
+        const value=lines[i].trim();
+        if (value && !EMOJI_LINE.test(value)) return value;
+    }
+    return '';
+}
+function likelyNarration(line) {
+    return /^(?:窗边|旁边|一旁|门口|教室|讲台|走廊|过道|座位|这时|此时|随后|与此同时|你从|她|他|班主任|老师|御坂美琴|食蜂操祈)/u.test(line) &&
+        /(?:轻轻|已经|抬|挑|点了|回头|望|看|朝|走|站|坐|露出|扫过|指向|记号|补充|沿着|微笑|皱眉|转身|低头|悄悄)/u.test(line);
+}
+/** Only parse clear speaker boundaries. Return null for ordinary prose. */
+export function parseRoleplayText(raw) {
+    if (typeof raw !== 'string' || !raw.trim() || raw.length > MAX_RAW) return null;
+    const source=raw.trim();
+    if (/^(?:\{|\[|[\x60]{3}\s*(?:json)?\s*[\r\n]*\{)/i.test(source)) return null;
+    const lines=raw.replace(/\r\n?/g, '\n').split('\n');
+    if (lines.length>1800) return null;
+    const segments=[];
+    let active=null, labels=0;
+    const flush=()=>{
+        if (!active) return;
+        active.text=active.text.trim().slice(0,MAX_SEGMENT_TEXT);
+        if (active.text) segments.push(active);
+        active=null;
+    };
+    const append=(speaker,kind,value)=>{
+        if (active && active.speaker===speaker && active.kind===kind) active.text+=(active.text?'\n':'')+value;
+        else {flush(); active={speaker,kind,text:value};}
+    };
+    for(let i=0;i<lines.length && segments.length<MAX_SEGMENTS;i++){
+        const line=lines[i].trim();
+        if(!line){if(active?.text) active.text+='\n';continue;}
+        const next=nextContent(lines,i+1);
+        if(line==='同' && /^同学[\p{L}\p{N}]{1,10}$/u.test(next)) continue;
+        if(EMOJI_LINE.test(line) && speakerName(next,nextContent(lines,i+2),true)) continue;
+        const inline=/^(.{1,24}?)\s*[：:]\s*(.+)$/u.exec(line);
+        if(inline){
+            const speaker=speakerName(inline[1],inline[2],true);
+            if(speaker){labels++;append(speaker,speaker==='旁白'?'narration':'dialogue',inline[2]);continue;}
+        }
+        const avatar=EMOJI_LINE.test(lines[i-1]?.trim()||'');
+        const speaker=speakerName(line,next,avatar);
+        if(speaker && next && !/^[：:。！？,.，；;]/u.test(next)){
+            labels++;flush();active={speaker,kind:speaker==='旁白'?'narration':'dialogue',text:''};continue;
+        }
+        if(active?.kind==='dialogue' && /[。！？!?」』”]\s*$/u.test(active.text.trim()) && likelyNarration(line)) flush();
+        append(active?.speaker||'旁白',active?.kind||'narration',line);
+    }
+    flush();
+    if(!labels || !segments.some(s=>s.kind==='dialogue'))return null;
+    return {complete:true,format:'plain',segments,state:null,continuity:null};
+}
