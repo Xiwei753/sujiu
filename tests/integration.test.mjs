@@ -4,6 +4,13 @@ import { pathToFileURL } from 'node:url';
 import { resolve } from 'node:path';
 
 const hooks = [];
+const subscribed = [];
+const events = {
+    CHAT_CHANGED: 'chat_id_changed',
+    APP_READY: 'app_ready',
+    CHARACTER_MESSAGE_RENDERED: 'character_message_rendered',
+    MESSAGE_RECEIVED: 'message_received',
+};
 const formatter = {
     stage:{ AFTER_REGEX:'afterRegex', AFTER_MARKDOWN:'afterMarkdown' },
     order:{ LATEST:100 },
@@ -14,14 +21,18 @@ const ctxt = {
     messageFormatter: formatter,
     characters:[{data:{extensions:{sujiu:{structured_chat:true}}}}],
     characterId:0,
-    event_types:{},
-    eventSource:{on(){}},
+    eventTypes:events,
+    eventSource:{on(type){subscribed.push(type);}},
     saveSettingsDebounced(){}
 };
 globalThis.SillyTavern = {getContext:()=>ctxt};
 globalThis.document = {readyState:'complete',querySelector:()=>null,getElementById:()=>null};
 const entry = pathToFileURL(resolve(import.meta.dirname,'../index.js')).href;
 await import(entry);
+
+test('official SillyTavern eventTypes subscriptions register',()=>{
+    assert.deepEqual(subscribed.slice().sort(),Object.values(events).sort());
+});
 
 test('extension registers both pipeline hooks',()=>{
     assert.equal(hooks.length,2);
