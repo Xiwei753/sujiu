@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseSujiu } from '../parser.mjs';
+import { parseSujiu, parseRoleplayText } from '../parser.mjs';
 import { renderSujiu } from '../renderer.mjs';
 
 const fixture = {
@@ -70,4 +70,47 @@ test('malformed trailing JSON still yields bubbles', () => {
 
 test('plain non-specific JSON is not treated as sujiu schema', () => {
   assert.equal(parseSujiu('{"hello":"world"}'),null);
+});
+
+
+test('Android example: multi-speaker text becomes three speech bubbles', () => {
+  const raw = '你的声音落在讲台上，清晰利落。\n同\n同学A\n月守……是那个新同学？\n同\n同学B\n从外面转来的大小姐？还是温度使。\n窗边的御坂美琴轻轻挑了挑眉，目光从你身上扫过。\n📚\n老师\n月守同学的能力测试成绩相当出色。';
+  const data = parseRoleplayText(raw);
+  assert.ok(data);
+  assert.deepEqual(data.segments.map(s => [s.speaker, s.kind]), [
+    ['旁白','narration'],['同学A','dialogue'],['同学B','dialogue'],
+    ['旁白','narration'],['老师','dialogue'],
+  ]);
+  const html = renderSujiu(data);
+  assert.equal((html.match(/class="sujiu-speech"/g) || []).length, 3);
+  assert.equal((html.match(/class="sujiu-narration"/g) || []).length, 2);
+  assert.doesNotMatch(html, /<p>同<\/p>/);
+});
+
+test('plain text fallback handles explicit and decorated speaker names', () => {
+  for (const raw of ['老师：欢迎。', '📚\n老师\n欢迎。',
+    '**御坂美琴**\n好呀。', '【月守】\n“请多指教。”']) {
+    assert.equal(parseRoleplayText(raw)?.segments[0]?.kind, 'dialogue', raw);
+  }
+});
+
+test('unlabelled prose and unrelated data keep the ordinary renderer', () => {
+  for (const raw of ['今天天气很好。','她坐在窗边，看着旁边的同学。',
+    '{"sujiu_schema":"1","segments":[','时间：今天\n地点：教室']) {
+    assert.equal(parseRoleplayText(raw), null, raw);
+  }
+});
+
+test('plain speech stays escaped, and consecutive actor bubbles are compact', () => {
+  const html = renderSujiu(parseRoleplayText('老师：<img src=x onerror=alert(1)> & 小心'));
+  assert.doesNotMatch(html, /<img src=x/);
+  assert.match(html, /&lt;img/);
+  assert.match(html, /&amp;/);
+  const repeated = renderSujiu({complete:true,segments:[
+    {speaker:'老师',kind:'dialogue',text:'第一句。'},
+    {speaker:'老师',kind:'dialogue',text:'第二句。'},
+    {speaker:'同学A',kind:'dialogue',text:'收到。'},
+  ]});
+  assert.equal((repeated.match(/sujiu-speaker-name/g) || []).length, 2);
+  assert.equal((repeated.match(/sujiu-speaker-continued/g) || []).length, 1);
 });
