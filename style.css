@@ -1,17 +1,85 @@
-.sujiu-scene{display:flex;flex-direction:column;gap:12px;margin:6px 0;color:var(--SmartThemeBodyColor,inherit);font-size:inherit;line-height:1.65}
-.sujiu-scene p{margin:0 0 .55em!important}.sujiu-scene p:last-child{margin-bottom:0!important}
-.sujiu-narration{padding:4px 7px;opacity:.94;line-height:1.75;overflow-wrap:anywhere}
-.sujiu-speaker{display:flex;align-items:flex-start;gap:9px;max-width:96%;min-width:0}
-.sujiu-avatar{height:37px;width:37px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:0 0 37px;font-size:18px;font-weight:600;background:color-mix(in srgb,var(--SmartThemeQuoteColor,#718096) 22%,transparent);border:1px solid color-mix(in srgb,currentColor 15%,transparent)}
-.sujiu-hue-0{background:#9c754b3d}.sujiu-hue-1{background:#4c91ba3d}.sujiu-hue-2{background:#9974d83d}.sujiu-hue-3{background:#5cae873d}.sujiu-hue-4{background:#d4789d3d}.sujiu-hue-5{background:#c7a8563d}.sujiu-hue-6{background:#779ab03d}
-.sujiu-speaker-body{min-width:0;flex:1}.sujiu-speaker-name{font-size:.85em;font-weight:700;margin:0 0 4px 2px;opacity:.89}
-.sujiu-speech{border-radius:11px;padding:10px 12px;background:color-mix(in srgb,var(--SmartThemeBlurTintColor,#777) 12%,transparent);border:1px solid color-mix(in srgb,currentColor 8%,transparent);overflow-wrap:anywhere}
-.sujiu-speaker[data-sujiu-kind="action"] .sujiu-speech{border-style:dashed}
-.sujiu-status{border-top:1px solid color-mix(in srgb,currentColor 15%,transparent);padding:10px 4px 0;opacity:.86;font-size:.86em;line-height:1.65}
-.sujiu-status-title{font-weight:650}.sujiu-inventory{margin-top:3px}.sujiu-inventory strong{font-weight:650}
-.sujiu-continuity{font-size:.85em;margin:0 3px;padding:6px 9px;border:1px solid color-mix(in srgb,currentColor 16%,transparent);border-radius:7px}
-.sujiu-continuity>summary{cursor:pointer;user-select:none;opacity:.8}.sujiu-continuity-text{white-space:pre-wrap;overflow-wrap:anywhere;padding:8px 1px 3px;line-height:1.6;max-height:55vh;overflow:auto}
-.sujiu-pending{font-size:.8em;opacity:.6;margin-left:3px}
-.sujiu-settings{padding:8px;border:1px solid color-mix(in srgb,currentColor 15%,transparent);border-radius:8px;margin:6px 0}
-.sujiu-settings summary{font-weight:600;cursor:pointer}.sujiu-settings label{display:block;margin-top:10px}.sujiu-settings textarea{width:100%;margin-top:5px;font-family:monospace;resize:vertical}.sujiu-settings small{display:block;margin-top:8px;opacity:.8}
-@media(max-width:560px){.sujiu-scene{gap:10px}.sujiu-avatar{width:32px;height:32px;flex-basis:32px;font-size:17px}.sujiu-speech{padding:9px 10px}.sujiu-speaker{max-width:100%}}
+
+/* Scoped to Sujiu message markup; never restyle SillyTavern's chat globally. */
+.sujiu-scene{
+  --sujiu-line:color-mix(in srgb,var(--SmartThemeBodyColor,currentColor) 17%,transparent);
+  --sujiu-surface:color-mix(in srgb,var(--SmartThemeQuoteColor,#a6a6a6) 12%,var(--SmartThemeBlurTintColor,#171717) 88%);
+  display:flex;flex-direction:column;gap:10px;max-width:100%;min-width:0;margin:8px 0;
+  color:var(--SmartThemeBodyColor,inherit);font-size:min(1em,17px);line-height:1.55;
+  overflow-wrap:anywhere;
+}
+.sujiu-scene p{margin:0!important;white-space:normal;overflow-wrap:anywhere;}
+.sujiu-scene p+p{margin-top:.6em!important;}
+.sujiu-narration{
+  padding:3px 5px 3px 8px;border-left:2px solid var(--sujiu-line);
+  opacity:.84;font-size:.94em;line-height:1.7;white-space:normal;
+}
+.sujiu-speaker{
+  display:grid;grid-template-columns:33px minmax(0,1fr);gap:9px;align-items:start;
+  width:100%;max-width:100%;min-width:0;
+}
+.sujiu-avatar{
+  box-sizing:border-box;width:33px;height:33px;border-radius:50%;
+  display:grid;place-items:center;font-size:16px;font-weight:650;
+  border:1px solid var(--sujiu-line);background:color-mix(in srgb,var(--SmartThemeQuoteColor,#777) 24%,transparent);
+  overflow:hidden;flex-shrink:0;
+}
+.sujiu-hue-0{background:#9c754b35}.sujiu-hue-1{background:#4c91ba35}
+.sujiu-hue-2{background:#9974d835}.sujiu-hue-3{background:#5cae8735}
+.sujiu-hue-4{background:#d4789d35}.sujiu-hue-5{background:#c7a85635}
+.sujiu-hue-6{background:#779ab035}
+.sujiu-speaker-body{min-width:0;max-width:100%;}
+.sujiu-speaker-name{
+  margin:0 0 4px 4px;font-size:.82em;line-height:1.35;
+  font-weight:650;opacity:.79;letter-spacing:.015em;
+}
+.sujiu-speech{
+  box-sizing:border-box;display:inline-block;width:fit-content;max-width:100%;
+  padding:9px 12px;border:1px solid var(--sujiu-line);
+  border-radius:5px 14px 14px 14px;background:var(--sujiu-surface);
+  font-weight:400;line-height:1.58;white-space:normal;
+}
+.sujiu-speaker[data-sujiu-kind="action"] .sujiu-speech{
+  border-style:dashed;opacity:.89;font-style:italic;
+}
+.sujiu-speaker-continued{margin-top:-5px;}
+.sujiu-speaker-continued .sujiu-avatar{visibility:hidden;}
+.sujiu-speaker-continued .sujiu-speech{border-radius:12px;}
+.sujiu-status{
+  display:flex;flex-direction:column;gap:4px;padding:10px 7px 2px;
+  border-top:1px solid var(--sujiu-line);font-size:.84em;
+  line-height:1.5;opacity:.86;
+}
+.sujiu-status-title{font-weight:700;}
+.sujiu-inventory{margin-top:1px;}
+.sujiu-inventory strong{font-weight:650;}
+.sujiu-continuity{
+  display:block;box-sizing:border-box;margin:1px 0;padding:7px 10px;
+  border:1px solid var(--sujiu-line);border-radius:10px;
+  font-size:.8em;opacity:.88;max-width:100%;
+}
+.sujiu-continuity>summary{cursor:pointer;user-select:none;font-weight:600;}
+.sujiu-continuity-text{
+  white-space:pre-wrap;overflow-wrap:anywhere;
+  padding:8px 2px 4px;line-height:1.6;max-height:50vh;overflow:auto;
+}
+.sujiu-pending{font-size:.82em;opacity:.56;margin-left:4px;}
+.sujiu-settings{
+  padding:10px;border:1px solid var(--SmartThemeBorderColor,#686868);
+  border-radius:10px;margin:6px 0;font-size:inherit;
+}
+.sujiu-settings summary{font-weight:650;cursor:pointer;}
+.sujiu-settings label{display:block;margin-top:10px;}
+.sujiu-settings textarea{box-sizing:border-box;width:100%;margin-top:5px;font-family:monospace;resize:vertical;}
+.sujiu-settings small{display:block;margin-top:8px;opacity:.78;}
+.sujiu-diagnostics{margin:10px 0 0;padding:7px 9px;border-radius:7px;
+  border:1px solid color-mix(in srgb,currentColor 15%,transparent);
+  font-size:.8em;opacity:.85;overflow-wrap:anywhere;}
+@media(max-width:560px){
+ .sujiu-scene{gap:9px;margin:5px 0;font-size:min(1em,16px);}
+ .sujiu-speaker{grid-template-columns:29px minmax(0,1fr);gap:7px;}
+ .sujiu-avatar{width:29px;height:29px;font-size:15px;}
+ .sujiu-speaker-name{font-size:.81em;margin-bottom:3px;}
+ .sujiu-speech{padding:8px 10px;border-radius:5px 12px 12px 12px;}
+ .sujiu-narration{padding:3px 4px 3px 7px;}
+ .sujiu-status{padding-top:8px;}
+}
