@@ -1,0 +1,13 @@
+{
+  "display_name": "sujiu | 多角色结构化气泡",
+  "loading_order": 15,
+  "requires": [],
+  "optional": [],
+  "dependencies": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "sujiu",
+  "version": "4.0.0",
+  "auto_update": true,
+  "minimum_client_version": "1.12.0"
+}

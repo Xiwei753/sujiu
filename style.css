@@ -1,0 +1,17 @@
+.sujiu-scene{display:flex;flex-direction:column;gap:12px;margin:6px 0;color:var(--SmartThemeBodyColor,inherit);font-size:inherit;line-height:1.65}
+.sujiu-scene p{margin:0 0 .55em!important}.sujiu-scene p:last-child{margin-bottom:0!important}
+.sujiu-narration{padding:4px 7px;opacity:.94;line-height:1.75;overflow-wrap:anywhere}
+.sujiu-speaker{display:flex;align-items:flex-start;gap:9px;max-width:96%;min-width:0}
+.sujiu-avatar{height:37px;width:37px;border-radius:50%;display:flex;align-items:center;justify-content:center;flex:0 0 37px;font-size:18px;font-weight:600;background:color-mix(in srgb,var(--SmartThemeQuoteColor,#718096) 22%,transparent);border:1px solid color-mix(in srgb,currentColor 15%,transparent)}
+.sujiu-hue-0{background:#9c754b3d}.sujiu-hue-1{background:#4c91ba3d}.sujiu-hue-2{background:#9974d83d}.sujiu-hue-3{background:#5cae873d}.sujiu-hue-4{background:#d4789d3d}.sujiu-hue-5{background:#c7a8563d}.sujiu-hue-6{background:#779ab03d}
+.sujiu-speaker-body{min-width:0;flex:1}.sujiu-speaker-name{font-size:.85em;font-weight:700;margin:0 0 4px 2px;opacity:.89}
+.sujiu-speech{border-radius:11px;padding:10px 12px;background:color-mix(in srgb,var(--SmartThemeBlurTintColor,#777) 12%,transparent);border:1px solid color-mix(in srgb,currentColor 8%,transparent);overflow-wrap:anywhere}
+.sujiu-speaker[data-sujiu-kind="action"] .sujiu-speech{border-style:dashed}
+.sujiu-status{border-top:1px solid color-mix(in srgb,currentColor 15%,transparent);padding:10px 4px 0;opacity:.86;font-size:.86em;line-height:1.65}
+.sujiu-status-title{font-weight:650}.sujiu-inventory{margin-top:3px}.sujiu-inventory strong{font-weight:650}
+.sujiu-continuity{font-size:.85em;margin:0 3px;padding:6px 9px;border:1px solid color-mix(in srgb,currentColor 16%,transparent);border-radius:7px}
+.sujiu-continuity>summary{cursor:pointer;user-select:none;opacity:.8}.sujiu-continuity-text{white-space:pre-wrap;overflow-wrap:anywhere;padding:8px 1px 3px;line-height:1.6;max-height:55vh;overflow:auto}
+.sujiu-pending{font-size:.8em;opacity:.6;margin-left:3px}
+.sujiu-settings{padding:8px;border:1px solid color-mix(in srgb,currentColor 15%,transparent);border-radius:8px;margin:6px 0}
+.sujiu-settings summary{font-weight:600;cursor:pointer}.sujiu-settings label{display:block;margin-top:10px}.sujiu-settings textarea{width:100%;margin-top:5px;font-family:monospace;resize:vertical}.sujiu-settings small{display:block;margin-top:8px;opacity:.8}
+@media(max-width:560px){.sujiu-scene{gap:10px}.sujiu-avatar{width:32px;height:32px;flex-basis:32px;font-size:17px}.sujiu-speech{padding:9px 10px}.sujiu-speaker{max-width:100%}}
