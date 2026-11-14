@@ -1,0 +1,45 @@
+name: SillyTavern structured chat public release cleanup
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sillytavern-structured-chat-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  clean-public-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep only the standalone extension asset and point release at clean history
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="stchat-v4.0.0"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG does not exist."
+            exit 0
+          fi
+          if gh release view "$TAG" --json assets --jq '.assets[].name' | grep -Fxq 'sujiu-stchat-dm-v4.0.0-complete.zip'; then
+            gh release delete-asset "$TAG" 'sujiu-stchat-dm-v4.0.0-complete.zip' --yes
+          fi
+          cat > release-notes.md <<'EOF'
+          素酒 SillyTavern 多角色结构化群聊前端扩展 v4.0.0。
+
+          本公开发行版**仅提供前端扩展**。DM 角色卡、世界书、生成预设、Persona 和剧情资料均不作为仓库文件或 Release 附件提供。
+
+          酒馆「安装扩展」：
+          - Repository URL: https://github.com/Xiwei753/sujiu.git
+          - Branch or tag name: sillytavern-structured-chat
+
+          扩展不包含动漫角色头像图片，默认显示符号或姓名首字。
+          尚未在安卓酒馆客户端进行端到端测试。
+          EOF
+          gh release edit "$TAG" --notes-file release-notes.md
+          gh api --method PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$GITHUB_SHA" -F force=true >/dev/null

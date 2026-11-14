@@ -152,3 +152,9 @@ switching them over is a change in their composition root only.
 ## License
 
 AGPL-3.0. See [LICENSE](LICENSE).
+
+## SillyTavern structured chat (v4.0.0)
+
+- [安装及发行版说明](tools/sillytavern-structured-chat/README.md)
+- [酒馆 Git 安装分支](https://github.com/Xiwei753/sujiu/tree/sillytavern-structured-chat)（安装时填写 branch: `sillytavern-structured-chat`）
+
