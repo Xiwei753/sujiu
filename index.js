@@ -93,8 +93,14 @@ function renderFallbackMessage(messageElement) {
     const parsed = parseMessage(raw);
     if (!parsed) {
         if (textElement.dataset.sujiuSource) {
-            // The original source became plain text: re-render normally on chat reload.
-            delete textElement.dataset.sujiuSource;
+            // A user edit or changed setting may invalidate the fallback parse.
+            // Restore the stored source safely rather than leaving stale bubbles.
+            processingFallback = true;
+            try {
+                textElement.textContent = raw;
+                textElement.style.whiteSpace = 'pre-wrap';
+                delete textElement.dataset.sujiuSource;
+            } finally { processingFallback = false; }
         }
         report(null, raw, id);
         return;
@@ -140,7 +146,7 @@ function startFallback() {
 }
 
 function mountSettings() {
-    const panel = document.querySelector('#extensions_settings2');
+    const panel = document.querySelector('#extensions_settings2') || document.querySelector('#extensions_settings');
     if (!panel || document.getElementById('sujiu-structured-settings')) return;
     const shell = document.createElement('section');
     shell.id = 'sujiu-structured-settings';
