@@ -199,10 +199,11 @@ function initialize() {
     mountSettings();
     const ctx = context();
     const listen = (type, fn) => { if (type && ctx?.eventSource?.on) ctx.eventSource.on(type, fn); };
-    listen(ctx?.event_types?.CHAT_CHANGED, () => { pendingSources.clear(); lastResult = '尚未解析消息'; startFallback(); refreshDiagnostics(); });
-    listen(ctx?.event_types?.APP_READY, mountSettings);
-    listen(ctx?.event_types?.CHARACTER_MESSAGE_RENDERED, () => { document.querySelectorAll('#chat .mes').forEach(enqueueFallback); });
-    listen(ctx?.event_types?.MESSAGE_RECEIVED, () => { document.querySelectorAll('#chat .mes').forEach(enqueueFallback); });
+    const events = ctx?.eventTypes ?? ctx?.event_types;
+    listen(events?.CHAT_CHANGED, () => { pendingSources.clear(); lastResult = '尚未解析消息'; startFallback(); refreshDiagnostics(); });
+    listen(events?.APP_READY, mountSettings);
+    listen(events?.CHARACTER_MESSAGE_RENDERED, () => { document.querySelectorAll('#chat .mes').forEach(enqueueFallback); });
+    listen(events?.MESSAGE_RECEIVED, () => { document.querySelectorAll('#chat .mes').forEach(enqueueFallback); });
     console.info('[sujiu-structured-chat] loaded', hookReady ? 'formatter' : 'fallback');
 }
 
